@@ -29,6 +29,8 @@ Live hackathon deployment: [Agentic Video Studio](https://agentic-video-studio-w
 
 Live SubSchool proof: [30-second Veo 3.1 + Google TTS + FFmpeg vertical video](https://agentic-video-studio-api-912667618167.us-central1.run.app/media/prj_subschool/gener_0aa01df0fc905674/renders/version_1_9x16.mp4). It was generated through the same live workflow used by the application; it is not a mock fixture.
 
+The exact provider calls, immutable image digests, private YouTube upload, observability event, and test results are recorded in [the live validation report](docs/operations/live-validation.md).
+
 ## Checks
 
 ```bash

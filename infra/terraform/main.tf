@@ -130,6 +130,7 @@ resource "google_service_account" "deployer" {
 
 resource "google_project_iam_member" "deployer_roles" {
   for_each = toset([
+    "roles/artifactregistry.reader",
     "roles/cloudbuild.builds.editor",
     "roles/run.admin",
     "roles/serviceusage.serviceUsageConsumer",

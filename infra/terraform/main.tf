@@ -244,6 +244,12 @@ resource "google_storage_bucket_iam_member" "deployer_build_source" {
   member = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+resource "google_storage_bucket_iam_member" "deployer_build_source_metadata" {
+  bucket = google_storage_bucket.build_source.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 resource "google_storage_bucket_iam_member" "runtime_media" {
   bucket = google_storage_bucket.media.name
   role   = "roles/storage.objectAdmin"

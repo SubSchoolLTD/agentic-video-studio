@@ -59,7 +59,7 @@ locals {
     APP_AUTH_MODE                  = "demo"
     APP_BASE_URL                   = var.app_base_url
     WEB_BASE_URL                   = var.web_base_url
-    ALLOWED_ORIGINS                = var.web_base_url
+    ALLOWED_ORIGINS                = join(",", concat([var.web_base_url], var.additional_web_origins))
     PROVIDER_MODE                  = "live"
     GOOGLE_CLOUD_PROJECT           = var.project_id
     GOOGLE_CLOUD_LOCATION          = var.region

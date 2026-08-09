@@ -7,5 +7,6 @@ clickhouse_image          = "us-central1-docker.pkg.dev/your-isolated-project-id
 grafana_image             = "us-central1-docker.pkg.dev/your-isolated-project-id/agentic-video-studio/grafana:13.1"
 app_base_url              = "https://api.example.com"
 web_base_url              = "https://studio.example.com"
+additional_web_origins    = ["https://studio.subschool.us"]
 deploy_runtime_services = false
 github_repository       = "your-owner/agentic-video-studio"

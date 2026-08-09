@@ -29,7 +29,7 @@ The upload remains private intentionally; the rendered proof link above is the j
 
 ## Runtime and observability
 
-- API revision: `agentic-video-studio-api-00013-fnk`
+- API revision: `agentic-video-studio-api-00014-ds8`
 - Web revision: `agentic-video-studio-web-00007-vvs`
 - Grafana revision: `agentic-video-studio-grafana-00002-2f4`
 - API image digest: `sha256:1d6428e6297c346abc13c9bce2d7f768f11f8877a365bf2aed2c808f73b0901c`
@@ -42,6 +42,7 @@ The upload remains private intentionally; the rendered proof link above is the j
 - ClickHouse returned the new `correlation_id` column and a `research.completed` event correlated to that run.
 - Grafana returned all five provisioned dashboard UIDs: `avs-pipeline`, `avs-ai`, `avs-media`, `avs-publishing`, `avs-cost`.
 - The production YouTube provider kill switch was paused and resumed successfully without deleting any jobs.
+- `studio.subschool.us` is mapped to the web service and is awaiting its `CNAME studio → ghs.googlehosted.com.` DNS record and managed certificate; the API already allows the custom origin.
 
 ## GitHub automation
 

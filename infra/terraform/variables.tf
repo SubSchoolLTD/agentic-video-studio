@@ -57,6 +57,12 @@ variable "web_base_url" {
   default     = "https://example.invalid"
 }
 
+variable "additional_web_origins" {
+  description = "Additional public web origins allowed by CORS, such as a custom domain."
+  type        = list(string)
+  default     = ["https://studio.subschool.us"]
+}
+
 variable "deploy_runtime_services" {
   description = "Create Cloud Run services after images exist and all secret placeholders have versions."
   type        = bool

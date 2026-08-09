@@ -7,7 +7,7 @@ The live hackathon environment uses four Cloud Run services:
 - Analytics event store: `agentic-video-studio-clickhouse`, authenticated with ClickHouse headers backed by Secret Manager.
 - Operations UI: `agentic-video-studio-grafana`, with a provisioned ClickHouse datasource and Pipeline, AI, Media, Publishing and Cost dashboards.
 
-Durable state lives in the `avs-postgres` Cloud SQL PostgreSQL instance. Media and manifests live in the private `subschool-484119-avs-media` bucket. Images are built by Cloud Build into the `agentic-video-studio` Artifact Registry repository. The runtime service account is `avs-runtime` and receives provider, database, object, logging, Pub/Sub, and secret access without a service-account JSON key.
+The production project is `upheld-dragon-505012-v3` (project number `670288630676`). Durable state lives in the `avs-postgres` Cloud SQL PostgreSQL instance. Media and manifests live in the private `upheld-dragon-505012-v3-avs-media` bucket. Images are built by Cloud Build into the `agentic-video-studio` Artifact Registry repository. The runtime service account is `avs-runtime` and receives provider, database, object, logging, Pub/Sub, and secret access without a service-account JSON key.
 
 The reproducible topology lives in `infra/terraform`. Its two-phase `deploy_runtime_services` switch creates foundational resources and secret placeholders first, then Cloud Run only after immutable images and secret versions exist. Terraform never stores provider secret values; the only manual console work is OAuth consent/provider review.
 
@@ -44,9 +44,9 @@ The public ClickHouse endpoint still requires `X-ClickHouse-User` and `X-ClickHo
 ## Smoke checks
 
 ```bash
-curl -fsS https://agentic-video-studio-api-912667618167.us-central1.run.app/v1/health
-curl -fsS https://agentic-video-studio-grafana-912667618167.us-central1.run.app/api/health
-E2E_BASE_URL=https://agentic-video-studio-web-912667618167.us-central1.run.app \
+curl -fsS https://agentic-video-studio-api-670288630676.us-central1.run.app/v1/health
+curl -fsS https://agentic-video-studio-grafana-670288630676.us-central1.run.app/api/health
+E2E_BASE_URL=https://studio.subschool.us \
   pnpm --filter @avs/web exec playwright test tests/e2e/navigation.spec.ts
 ```
 

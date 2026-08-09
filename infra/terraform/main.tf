@@ -429,11 +429,12 @@ resource "google_cloud_scheduler_job" "metrics_collector" {
 resource "google_cloud_run_v2_service" "clickhouse" {
   count = var.deploy_runtime_services ? 1 : 0
 
-  name                = "agentic-video-studio-clickhouse"
-  location            = var.region
-  deletion_protection = false
-  ingress             = "INGRESS_TRAFFIC_ALL"
-  labels              = local.labels
+  name                 = "agentic-video-studio-clickhouse"
+  location             = var.region
+  deletion_protection  = false
+  invoker_iam_disabled = true
+  ingress              = "INGRESS_TRAFFIC_ALL"
+  labels               = local.labels
 
   template {
     service_account = google_service_account.runtime.email
@@ -486,11 +487,12 @@ resource "google_cloud_run_v2_service" "clickhouse" {
 resource "google_cloud_run_v2_service" "grafana" {
   count = var.deploy_runtime_services ? 1 : 0
 
-  name                = "agentic-video-studio-grafana"
-  location            = var.region
-  deletion_protection = false
-  ingress             = "INGRESS_TRAFFIC_ALL"
-  labels              = local.labels
+  name                 = "agentic-video-studio-grafana"
+  location             = var.region
+  deletion_protection  = false
+  invoker_iam_disabled = true
+  ingress              = "INGRESS_TRAFFIC_ALL"
+  labels               = local.labels
 
   template {
     service_account = google_service_account.runtime.email
@@ -555,11 +557,12 @@ resource "google_cloud_run_v2_service" "grafana" {
 resource "google_cloud_run_v2_service" "api" {
   count = var.deploy_runtime_services ? 1 : 0
 
-  name                = "agentic-video-studio-api"
-  location            = var.region
-  deletion_protection = false
-  ingress             = "INGRESS_TRAFFIC_ALL"
-  labels              = local.labels
+  name                 = "agentic-video-studio-api"
+  location             = var.region
+  deletion_protection  = false
+  invoker_iam_disabled = true
+  ingress              = "INGRESS_TRAFFIC_ALL"
+  labels               = local.labels
 
   template {
     service_account = google_service_account.runtime.email
@@ -631,11 +634,12 @@ resource "google_cloud_run_v2_service" "api" {
 resource "google_cloud_run_v2_service" "web" {
   count = var.deploy_runtime_services ? 1 : 0
 
-  name                = "agentic-video-studio-web"
-  location            = var.region
-  deletion_protection = false
-  ingress             = "INGRESS_TRAFFIC_ALL"
-  labels              = local.labels
+  name                 = "agentic-video-studio-web"
+  location             = var.region
+  deletion_protection  = false
+  invoker_iam_disabled = true
+  ingress              = "INGRESS_TRAFFIC_ALL"
+  labels               = local.labels
 
   template {
     service_account = google_service_account.runtime.email
@@ -677,19 +681,4 @@ resource "google_cloud_run_v2_service" "web" {
   }
 
   depends_on = [google_secret_manager_secret_iam_member.runtime_access]
-}
-
-resource "google_cloud_run_v2_service_iam_member" "public" {
-  for_each = var.deploy_runtime_services ? {
-    api        = google_cloud_run_v2_service.api[0].name
-    web        = google_cloud_run_v2_service.web[0].name
-    clickhouse = google_cloud_run_v2_service.clickhouse[0].name
-    grafana    = google_cloud_run_v2_service.grafana[0].name
-  } : {}
-
-  project  = var.project_id
-  location = var.region
-  name     = each.value
-  role     = "roles/run.invoker"
-  member   = "allUsers"
 }

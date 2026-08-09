@@ -158,11 +158,21 @@ jobs:
             "gs://$new_media_bucket" \
             --recursive
 
-          gcloud sql import sql avs-postgres \
-            "gs://$new_media_bucket/$DB_EXPORT_OBJECT" \
-            --database=agentic_video_studio \
+          completed_import="$(gcloud sql operations list \
+            --instance=avs-postgres \
             --project="$NEW_PROJECT_ID" \
-            --quiet
+            --filter='operationType=IMPORT AND status=DONE' \
+            --limit=1 \
+            --format='value(name)')"
+          if [[ -z "$completed_import" ]]; then
+            gcloud sql import sql avs-postgres \
+              "gs://$new_media_bucket/$DB_EXPORT_OBJECT" \
+              --database=agentic_video_studio \
+              --project="$NEW_PROJECT_ID" \
+              --quiet
+          else
+            echo "Skipping database import; completed operation $completed_import already exists."
+          fi
 
           connection_name="$(gcloud sql instances describe avs-postgres \
             --project="$NEW_PROJECT_ID" \

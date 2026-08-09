@@ -28,10 +28,11 @@ The upload remains private intentionally; the rendered proof link above is the j
 ## Runtime and observability
 
 - API revision: `agentic-video-studio-api-00010-qm9`
-- Web revision: `agentic-video-studio-web-00003-wtd`
-- Final source commit used for both images: `aa8999c21be869e8b35ce5257c1e9be262427a14`
+- Web revision: `agentic-video-studio-web-00004-p9r`
+- API source commit: `aa8999c21be869e8b35ce5257c1e9be262427a14`
+- Web source commit: `577e698bc2cd802c1c201a951cb7a21abad413cc`
 - API image digest: `sha256:e16065db276cd876357a8af5a25ac67d9e966e7800068bce80f26a53c7c9993f`
-- Web image digest: `sha256:a3a8babd15c18e70a387f041d172f9faddae833292afc0a8b9b671a809c14434`
+- Web image digest: `sha256:e398e7c0e0594e36735b05b3592c670591e2b3c88a5b8eba200d887371ea6780`
 - Domain event `evt_4eb5e587aa265921` was observed in both ClickHouse and Pub/Sub.
 - The scheduled metrics Workflow execution `9be5737f-49cd-4c21-8d6c-2701ccbf0af7` completed successfully.
 

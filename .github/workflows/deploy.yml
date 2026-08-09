@@ -41,12 +41,14 @@ jobs:
           gcloud run deploy agentic-video-studio-api
           --project='${{ secrets.GCP_PROJECT_ID }}'
           --region=us-central1
+          --no-invoker-iam-check
           --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/api:${{ github.sha }}
       - name: Deploy web
         run: >-
           gcloud run deploy agentic-video-studio-web
           --project='${{ secrets.GCP_PROJECT_ID }}'
           --region=us-central1
+          --no-invoker-iam-check
           --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/web:${{ github.sha }}
       - name: Verify rollout
         run: |

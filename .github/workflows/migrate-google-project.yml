@@ -2,6 +2,11 @@ name: Migrate Google Cloud project
 
 on:
   workflow_dispatch:
+    inputs:
+      runtime_image_tag:
+        description: Existing immutable image tag to reuse when resuming a migration
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -95,10 +100,15 @@ jobs:
         run: |
           set -euo pipefail
           project_number="$(gcloud projects describe "$NEW_PROJECT_ID" --format='value(projectNumber)')"
+          image_tag='${{ inputs.runtime_image_tag }}'
+          if [[ -z "$image_tag" ]]; then
+            image_tag="$GITHUB_SHA"
+          fi
           {
             echo "PROJECT_NUMBER=$project_number"
             echo "NEW_API_URL=https://agentic-video-studio-api-${project_number}.${REGION}.run.app"
             echo "NEW_WEB_URL=https://agentic-video-studio-web-${project_number}.${REGION}.run.app"
+            echo "IMAGE_TAG=$image_tag"
           } >> "$GITHUB_ENV"
 
       - name: Create foundation resources
@@ -142,8 +152,13 @@ jobs:
             fi
           fi
 
-          terraform -chdir=infra/terraform apply -auto-approve \
-            -var="deploy_runtime_services=false"
+          if terraform -chdir=infra/terraform state list | \
+            grep -q '^google_cloud_run_v2_service\.'; then
+            echo "Runtime services already exist; preserving them during the resume."
+          else
+            terraform -chdir=infra/terraform apply -auto-approve \
+              -var="deploy_runtime_services=false"
+          fi
 
       - name: Restore media, database, and runtime secrets
         shell: bash
@@ -206,26 +221,36 @@ jobs:
           image_root="${REGION}-docker.pkg.dev/${NEW_PROJECT_ID}/agentic-video-studio"
           source_bucket="gs://${NEW_PROJECT_ID}-avs-build-source/source"
 
+          if [[ "$IMAGE_TAG" != "$GITHUB_SHA" ]]; then
+            for image in api web clickhouse grafana; do
+              gcloud artifacts docker images describe \
+                "${image_root}/${image}:${IMAGE_TAG}" \
+                --project="$NEW_PROJECT_ID" >/dev/null
+            done
+            echo "Reusing the verified runtime image set tagged $IMAGE_TAG."
+            exit 0
+          fi
+
           gcloud builds submit . \
             --project="$NEW_PROJECT_ID" \
             --config=infra/cloudbuild-api.yaml \
             --gcs-source-staging-dir="$source_bucket" \
-            --substitutions="_IMAGE=${image_root}/api:${GITHUB_SHA}"
+            --substitutions="_IMAGE=${image_root}/api:${IMAGE_TAG}"
           gcloud builds submit . \
             --project="$NEW_PROJECT_ID" \
             --config=infra/cloudbuild-web.yaml \
             --gcs-source-staging-dir="$source_bucket" \
-            --substitutions="_IMAGE=${image_root}/web:${GITHUB_SHA}"
+            --substitutions="_IMAGE=${image_root}/web:${IMAGE_TAG}"
           gcloud builds submit . \
             --project="$NEW_PROJECT_ID" \
             --config=infra/cloudbuild-clickhouse.yaml \
             --gcs-source-staging-dir="$source_bucket" \
-            --substitutions="_IMAGE=${image_root}/clickhouse:${GITHUB_SHA}"
+            --substitutions="_IMAGE=${image_root}/clickhouse:${IMAGE_TAG}"
           gcloud builds submit . \
             --project="$NEW_PROJECT_ID" \
             --config=infra/cloudbuild-grafana.yaml \
             --gcs-source-staging-dir="$source_bucket" \
-            --substitutions="_IMAGE=${image_root}/grafana:${GITHUB_SHA}"
+            --substitutions="_IMAGE=${image_root}/grafana:${IMAGE_TAG}"
 
       - name: Deploy runtime services
         shell: bash
@@ -240,10 +265,10 @@ jobs:
             -var="github_repository=SubSchool/agentic-video-studio" \
             -var="app_base_url=$NEW_API_URL" \
             -var="web_base_url=$NEW_WEB_URL" \
-            -var="api_image=${image_root}/api:${GITHUB_SHA}" \
-            -var="web_image=${image_root}/web:${GITHUB_SHA}" \
-            -var="clickhouse_image=${image_root}/clickhouse:${GITHUB_SHA}" \
-            -var="grafana_image=${image_root}/grafana:${GITHUB_SHA}" \
+            -var="api_image=${image_root}/api:${IMAGE_TAG}" \
+            -var="web_image=${image_root}/web:${IMAGE_TAG}" \
+            -var="clickhouse_image=${image_root}/clickhouse:${IMAGE_TAG}" \
+            -var="grafana_image=${image_root}/grafana:${IMAGE_TAG}" \
             -var="deploy_runtime_services=true"
 
       - name: Verify the new production services

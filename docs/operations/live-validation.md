@@ -29,11 +29,11 @@ The upload remains private intentionally; the rendered proof link above is the j
 
 ## Runtime and observability
 
-- API revision: `agentic-video-studio-api-00012-gbz`
-- Web revision: `agentic-video-studio-web-00006-b96`
+- API revision: `agentic-video-studio-api-00013-fnk`
+- Web revision: `agentic-video-studio-web-00007-vvs`
 - Grafana revision: `agentic-video-studio-grafana-00002-2f4`
-- API image digest: `sha256:d20c634d4ae8ceb166402afa2244da7b794144a1e6b7cc71a4208266f7b0b74e`
-- Web image digest: `sha256:726fd0059f1e39cdad4f0b0e7a205366df92c7421f876665b1850ca05a6b2c9e`
+- API image digest: `sha256:1d6428e6297c346abc13c9bce2d7f768f11f8877a365bf2aed2c808f73b0901c`
+- Web image digest: `sha256:c100d4f50a830ebe34cfad373b0f38c88e095688d2d98bd076fb3d6da8d928fe`
 - Grafana image digest: `sha256:6c55ad79b9a0741b7de77cf6d5c4b900584f86aa0c4e803299b29dd9fe585910`
 - Reproducible ClickHouse image digest: `sha256:28764876c6ea659277563e51c489e5d6afc16acf5e4358eb85c4b5315dfe0e9a`; the live table was migrated in place to preserve its event history.
 - Domain event `evt_4eb5e587aa265921` was observed in both ClickHouse and Pub/Sub.
@@ -42,6 +42,14 @@ The upload remains private intentionally; the rendered proof link above is the j
 - ClickHouse returned the new `correlation_id` column and a `research.completed` event correlated to that run.
 - Grafana returned all five provisioned dashboard UIDs: `avs-pipeline`, `avs-ai`, `avs-media`, `avs-publishing`, `avs-cost`.
 - The production YouTube provider kill switch was paused and resumed successfully without deleting any jobs.
+
+## GitHub automation
+
+- Private source repository: [SubSchool/agentic-video-studio](https://github.com/SubSchool/agentic-video-studio).
+- The complete CI workflow [run 31309721959](https://github.com/SubSchool/agentic-video-studio/actions/runs/31309721959) passed backend, frontend, mock browser E2E, Terraform, secret scanning, and container build jobs.
+- The keyless production deployment [run 31310371308](https://github.com/SubSchool/agentic-video-studio/actions/runs/31310371308) passed from commit `1f23ddbbe5faaeedac19dcf25a913d1e92b280dc` and produced the API and web revisions above.
+- GitHub Actions authenticates through a repository-scoped Workload Identity Federation condition; no service-account JSON key is stored in GitHub.
+- Runtime Google, YouTube, and Parallel credentials remain in Google Secret Manager. GitHub holds only deployment configuration and Workload Identity identifiers.
 
 ## Verification suite
 

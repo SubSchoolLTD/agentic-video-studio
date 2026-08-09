@@ -118,13 +118,13 @@ class ResourceRepository:
     @staticmethod
     def serialize(resource: Resource) -> dict[str, Any]:
         return {
+            **resource.data,
             "id": resource.id,
             "kind": resource.kind,
             "organization_id": resource.organization_id,
             "project_id": resource.project_id,
             "status": resource.status,
             "version": resource.version,
-            **resource.data,
             "created_at": resource.created_at.isoformat(),
             "updated_at": resource.updated_at.isoformat(),
         }
@@ -197,4 +197,3 @@ def find_api_key(session: Session, raw_key: str, pepper: str) -> ApiKeyRecord | 
     session.add(record)
     session.commit()
     return record
-

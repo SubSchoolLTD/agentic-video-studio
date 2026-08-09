@@ -230,6 +230,30 @@ def technical_qa(path: Path, *, aspect_ratio: str, duration_target: int) -> dict
     audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
     actual_duration = float(probe.get("format", {}).get("duration", 0))
     expected = (720, 1280) if aspect_ratio == "9:16" else (1280, 720)
+    black_frames_detected = False
+    black_intervals: list[str] = []
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        black_probe = subprocess.run(
+            [
+                ffmpeg_path,
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-vf",
+                "blackdetect=d=1.0:pix_th=0.10",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        black_intervals = [line.strip() for line in black_probe.stderr.splitlines() if "black_start:" in line]
+        black_frames_detected = bool(black_intervals)
     checks = {
         "file_readable": path.exists() and path.stat().st_size > 0,
         "video_codec_h264": video.get("codec_name") == "h264",
@@ -237,10 +261,11 @@ def technical_qa(path: Path, *, aspect_ratio: str, duration_target: int) -> dict
         "resolution_correct": (video.get("width"), video.get("height")) == expected,
         "duration_in_range": abs(actual_duration - duration_target) <= 1.0,
         "subtitle_safe_zone": True,
-        "black_frames": False,
+        "no_black_frames": not black_frames_detected,
+        "provider_duration_limit": 0 < actual_duration <= 60,
     }
     return {
-        "passed": all(value is True for key, value in checks.items() if key != "black_frames"),
+        "passed": all(value is True for value in checks.values()),
         "checks": checks,
         "actual": {
             "duration_seconds": round(actual_duration, 3),
@@ -249,5 +274,6 @@ def technical_qa(path: Path, *, aspect_ratio: str, duration_target: int) -> dict
             "video_codec": video.get("codec_name"),
             "audio_codec": audio.get("codec_name"),
             "size_bytes": int(probe.get("format", {}).get("size", 0)),
+            "black_intervals": black_intervals,
         },
     }

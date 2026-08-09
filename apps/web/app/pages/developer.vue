@@ -7,7 +7,7 @@ const { show } = useToast()
 const keyModal = ref(false)
 const webhookModal = ref(false)
 const revealedKey = ref('')
-const keyForm = reactive({ name: 'Local automation', scopes: ['projects:read', 'ideas:write', 'generations:write', 'videos:read'] })
+const keyForm = reactive({ name: 'Local automation', scopes: ['projects:read', 'generations:write', 'generations:read', 'videos:read'] })
 const webhookForm = reactive({ url: 'https://example.com/webhooks/framewise', events: ['generation.completed', 'publication.published'] })
 const { data, refresh } = await useAsyncData('developer', async () => {
   const [keys, webhooks] = await Promise.all([

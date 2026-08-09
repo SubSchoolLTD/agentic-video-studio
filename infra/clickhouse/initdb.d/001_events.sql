@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS events_v1
     event_type LowCardinality(String),
     resource_type LowCardinality(String),
     resource_id String,
+    correlation_id String,
     actor_type LowCardinality(String),
     payload_json String,
     occurred_at DateTime64(3, 'UTC')
@@ -13,6 +14,8 @@ CREATE TABLE IF NOT EXISTS events_v1
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(occurred_at)
 ORDER BY (project_id, event_type, occurred_at, resource_id);
+
+ALTER TABLE events_v1 ADD COLUMN IF NOT EXISTS correlation_id String AFTER resource_id;
 
 CREATE TABLE IF NOT EXISTS publication_metric_snapshots_v1
 (

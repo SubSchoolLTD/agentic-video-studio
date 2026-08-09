@@ -6,6 +6,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
+class OrganizationCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    slug: str | None = Field(default=None, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=80)
+    primary_language: str = Field(default="en", min_length=2, max_length=12)
+    timezone: str = "UTC"
+    default_currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     website_url: HttpUrl
@@ -14,6 +22,7 @@ class ProjectCreate(BaseModel):
     timezone: str = "UTC"
     analyze_website: bool = True
     rights_confirmed: bool = True
+    brief: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProjectPatch(BaseModel):
@@ -21,6 +30,7 @@ class ProjectPatch(BaseModel):
     automation_mode: Literal["manual", "assisted", "auto_safe", "draft_only"] | None = None
     timezone: str | None = None
     settings: dict[str, Any] | None = None
+    brief: dict[str, Any] | None = None
 
 
 class BrandProfilePatch(BaseModel):
@@ -40,6 +50,14 @@ class SourceCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     url: HttpUrl | None = None
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourcePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    url: HttpUrl | None = None
+    config: dict[str, Any] | None = None
+    generation_policy: Literal["research_then_approval", "draft_only", "auto_safe"] | None = None
+    status: Literal["healthy", "paused"] | None = None
 
 
 class SourceItemCreate(BaseModel):
@@ -73,11 +91,27 @@ class ContentItemCreate(BaseModel):
     rights_confirmed: bool = True
 
 
+class TopicMute(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    muted_until: datetime | None = None
+    permanent: bool = False
+
+
 class ResearchRunCreate(BaseModel):
     objective: str = Field(min_length=8, max_length=2_000)
     source_item_id: str | None = None
     recency_days: int = Field(default=30, ge=1, le=3650)
     max_candidates: int = Field(default=5, ge=1, le=20)
+
+
+class ResearchProfileCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    objective: str = Field(min_length=8, max_length=2_000)
+    interval_hours: int = Field(default=24, ge=1, le=24 * 30)
+    timezone: str = "UTC"
+    recency_days: int = Field(default=30, ge=1, le=3650)
+    max_candidates: int = Field(default=5, ge=1, le=20)
+    next_run_at: datetime | None = None
 
 
 class IdeaCreate(BaseModel):
@@ -113,9 +147,25 @@ class SceneRegenerate(BaseModel):
     visual_prompt: str | None = Field(default=None, max_length=4_000)
 
 
+class ScriptPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=300)
+    hook: str | None = Field(default=None, min_length=3, max_length=500)
+    voiceover: str | None = Field(default=None, min_length=3, max_length=8_000)
+    cta: str | None = Field(default=None, max_length=500)
+    caption_candidates: list[str] | None = None
+    hashtags: list[str] | None = None
+    reason: str = Field(min_length=8, max_length=2_000)
+
+
 class ReviewAction(BaseModel):
     reason_code: str | None = None
     comment: str | None = Field(default=None, max_length=2_000)
+
+
+class ScoreOverride(BaseModel):
+    score: Literal["publish_readiness", "predicted_performance"]
+    value: int = Field(ge=0, le=100)
+    reason: str = Field(min_length=8, max_length=2_000)
 
 
 class PublicationCreate(BaseModel):
@@ -131,6 +181,10 @@ class PublicationCreate(BaseModel):
     commercial_content: bool = False
     synthetic_media_disclosure: bool = True
     made_for_kids: bool = False
+    allow_comments: bool | None = None
+    allow_duet: bool | None = None
+    allow_stitch: bool | None = None
+    creator_info_acknowledged: bool = False
     dry_run: bool = False
 
 
@@ -150,6 +204,12 @@ class WebhookCreate(BaseModel):
     events: list[str] = Field(min_length=1)
 
 
+class WebhookPatch(BaseModel):
+    url: HttpUrl | None = None
+    events: list[str] | None = Field(default=None, min_length=1)
+    status: Literal["active", "paused"] | None = None
+
+
 class ConversionEventCreate(BaseModel):
     project_id: str
     publication_id: str
@@ -158,4 +218,3 @@ class ConversionEventCreate(BaseModel):
     occurred_at: datetime
     value: float = 1
     attribution: dict[str, Any] = Field(default_factory=dict)
-

@@ -1,21 +1,26 @@
 # P0 requirement traceability
 
-This matrix is the working acceptance map. `mock` means deterministic provider fixtures exercising our contracts; `live` means the same adapter is invoked against the provider.
+This is the executable acceptance map for the hackathon cut. `mock` means deterministic provider fixtures exercise the same contracts without spend; `live` means the official provider adapter was invoked in the production environment.
 
-| Capability | Implementation | Acceptance |
-|---|---|---|
-| Organization/project isolation | Principal scope + tenant-aware resource repository | Cross-tenant API tests return 404 |
-| Website/brief/brand profile | Project wizard and versioned profile resource | Editable detected profile, activation gates |
-| Manual, URL, text, RSS, REST intake | Source endpoints + safe fetch + feed parser | Idempotent source item creation |
-| Parallel runtime research | `ParallelSearchProvider` | Request ID, objectives, sources, excerpts persisted |
-| Ideas and opportunity score | Evidence packet + weighted scorer | Breakdown and confidence shown |
-| Script/fact-check/storyboard | Google ADK/Gemini structured stages + mock equivalent | Unsupported/high-risk claims block media |
-| 9:16 and 16:9 output | Veo adapter or motion fallback + FFmpeg renderer | Valid H.264/AAC files and checksums |
-| Selective regeneration | Scene attempt resource and locked-scene guard | Only selected scene attempt increments |
-| QA/readiness/performance/confidence | Independent technical/content/brand/platform reports | Hard gates separate from scores |
-| Approval and autopilot policy | Approval transitions + system minimum thresholds | High risk never autopublishes |
-| Publishing | YouTube OAuth/upload; TikTok capability/export fallback | prepare/commit and provider states |
-| 24h/7d metrics and learning | Idempotent YouTube Data/Analytics collector + metric checkpoints + performance review + versioned strategy | Missing metrics remain missing, not zero |
-| REST/API keys/webhooks | OpenAPI, hashed scoped keys, HMAC deliveries | Contract, replay, scope, idempotency tests |
-| MCP | Project/source/research/generation/approval/publication tools | Dry-run and prepare/commit tests |
-| Observability | Live ClickHouse event/metric sink + provisioned Grafana dashboard | Correlated real events and datasource health check |
+| Requirement IDs | Implementation | Automated acceptance | Live evidence |
+|---|---|---|---|
+| FR-ORG-001–002 | Workspace creation, owner membership and membership-backed tenant selection; repository and principal enforce organization/project scope | Cross-tenant header and API-key tests return 404 | Production resources remain under `org_demo/prj_subschool` |
+| FR-PRJ-001–004, 006 | URL analysis job, editable/versioned Brand Profile, mandatory brief gate, immutable profile reference on jobs, pause/resume | Activation, version reference and pause checks | SubSchool detected profile and confirmed brand are persisted |
+| FR-SRC-001–006, 008–010 | Manual idea, safe URL extraction, text/Markdown, scheduled RSS/Atom, idempotent REST intake, callback webhook, filters, exact/semantic dedupe, redirect-by-redirect SSRF defense | URL/HTML, RSS, callback, duplicate, private-target, redirect, MIME and size tests | Scheduler execution completed with the production API |
+| FR-RSH-001–008, 010 | Parallel Search adapter persists request/result metadata and evidence packets; manual/source/scheduled/backlog runs; explainable score; mute; provenance-preserving idea conversion; retrieved text is always data | Research schedule, source trigger, candidate conversion and mute tests | Run `resea_3c6eb1ffd00c69cc`, request `search_26696d2fa7fae4d0a7ec00386a4489f3`, four sources and three backlog ideas |
+| FR-PLN-001–005 | Project/UI controls for day/week caps, allowed windows, minimum gap, backlog target and quiet periods; unified calendar; collision warnings; scheduled replenishment | Calendar update/collision and backlog scheduler tests | Production Workflow revision `000002-a35` queued and completed backlog research |
+| FR-GEN-001–011 | Durable stage checkpoints, 1–3 script variants, factual gate before media, storyboard/scenes, native 9:16 and 16:9 renders, selective regeneration, approval locking, deterministic overlays, budget-blocked jobs, append-only video revisions with manifests/checksums | Full pipeline, hard-gate-before-media, retry checkpoint, scene lock and immutable revision tests | Real Parallel → Gemini → five Veo scenes → TTS → FFmpeg SubSchool video |
+| FR-QA-001–009 | FFprobe/blackdetect/provider constraints, live Gemini final-video QA, hard gates, separate readiness/performance/confidence, threshold floors, explanations and audited non-hard score overrides | Technical/scoring, threshold and score-override audit tests | Live output passed technical QA; new live jobs use Gemini multimodal QA against private GCS media |
+| FR-PUB-001–004, 007–012 | Approval modes; official YouTube OAuth/resumable upload/schedule/status polling; provider-state UI; TikTok unaudited interactive composer + honest ZIP fallback; idempotent confirm; remote-check retry; admin provider kill switch | Consent, double-confirm, export contents, status normalization and kill-switch tests | Private YouTube `0RtokaoQf9U` is `processed`, `private`, `PT31S`; production kill-switch smoke passed |
+| FR-ANL-001–008, 010 | Idempotent T+24h/T+7d checkpoints, raw values/API versions/availability, platform-local normalization, content features, performance review, proposed strategy, explicit activation/rollback, 20% exploration recommendation, delayed snapshots | Full pipeline checkpoint/review/strategy assertions | Official YouTube Data/Analytics collector returned real zero public counters and explicit unavailable analytics fields |
+| FR-DEV-001–010 | OpenAPI 3.1, hashed project/scoped keys, 202 contracts, signed queued webhooks, exponential retry history/manual replay, MCP configure/create/research/generate/status and prepare/commit, side-effect-free dry runs, actor/endpoint/body idempotency | Contract, scope, dry-run, signature, history, replay and idempotency tests | OpenAPI is public at `/docs`; scheduler owns due webhook retries |
+| FR-OBS-001–004 | End-to-end correlation IDs, non-blocking ClickHouse/Pub/Sub sinks, five provisioned Grafana dashboards, scheduled evaluator for stuck jobs/error spikes/budget/stale metrics/OAuth | Dashboard manifest and alert firing/resolution tests | `research.completed` was read from ClickHouse with correlation `resea_3c6eb1ffd00c69cc`; Grafana exposes `avs-pipeline`, `avs-ai`, `avs-media`, `avs-publishing`, `avs-cost` |
+
+## Current verification baseline
+
+- Ruff: clean.
+- Pytest: 49 tests passed.
+- Mock Playwright: 4/4 desktop/mobile tests passed, including create → render → approve → publish.
+- Production Playwright: 2/2 desktop/mobile navigation tests passed.
+- Frontend: ESLint, Nuxt typecheck and production build passed.
+- Production health: API `provider_mode=live`; Grafana database `ok`; scheduled Workflow execution `a30bd820-89f7-413c-b251-36b49e05905e` succeeded.

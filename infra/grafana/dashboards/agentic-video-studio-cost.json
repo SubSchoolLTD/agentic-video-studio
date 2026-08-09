@@ -1,0 +1,35 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}},
+      "targets": [{"editorType": "sql", "format": 0, "rawSql": "SELECT toStartOfHour(occurred_at) AS time, sum(ifNull(JSONExtractFloat(payload_json, 'cost_usd'), 0)) AS cost_usd FROM events_v1 WHERE $__timeFilter(occurred_at) AND event_type IN ('model.call.completed', 'media.render.completed') GROUP BY time ORDER BY time", "refId": "A"}],
+      "title": "Provider cost by hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"showHeader": true},
+      "targets": [{"editorType": "sql", "format": 1, "rawSql": "SELECT project_id, JSONExtractString(payload_json, 'provider') AS provider, sum(ifNull(JSONExtractFloat(payload_json, 'cost_usd'), 0)) AS cost_usd, count() AS operations FROM events_v1 WHERE $__timeFilter(occurred_at) AND event_type = 'model.call.completed' GROUP BY project_id, provider ORDER BY cost_usd DESC", "refId": "A"}],
+      "title": "Cost ledger",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["agentic-video-studio", "cost"],
+  "time": {"from": "now-30d", "to": "now"},
+  "timezone": "browser",
+  "title": "Agentic Video Studio · Cost",
+  "uid": "avs-cost",
+  "version": 1
+}

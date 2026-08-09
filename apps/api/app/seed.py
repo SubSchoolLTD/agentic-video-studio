@@ -63,6 +63,15 @@ SUBSCHOOL_BRAND = {
 
 def seed_demo(session: Session) -> None:
     if session.scalar(select(Resource).where(Resource.id == "org_demo")):
+        if not session.scalar(select(Resource).where(Resource.id == "membership_demo_owner")):
+            ResourceRepository(session).add(
+                resource_id="membership_demo_owner",
+                kind="membership",
+                organization_id="org_demo",
+                project_id=None,
+                status="active",
+                data={"actor_id": "user_demo_owner", "role": "owner", "project_scope": ["*"]},
+            )
         return
     repo = ResourceRepository(session)
     repo.add(
@@ -72,6 +81,14 @@ def seed_demo(session: Session) -> None:
         project_id=None,
         status="active",
         data={"name": "Bright Frame Studio", "slug": "bright-frame", "timezone": "America/New_York"},
+    )
+    repo.add(
+        resource_id="membership_demo_owner",
+        kind="membership",
+        organization_id="org_demo",
+        project_id=None,
+        status="active",
+        data={"actor_id": "user_demo_owner", "role": "owner", "project_scope": ["*"]},
     )
     repo.add(
         resource_id="prj_subschool",
@@ -195,4 +212,3 @@ def seed_demo(session: Session) -> None:
             "demo_data": True,
         },
     )
-

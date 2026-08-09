@@ -7,10 +7,12 @@ from urllib.parse import urlparse
 
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .database import get_db
+from .models import Resource
 from .repository import find_api_key
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -63,9 +65,23 @@ def get_principal(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bearer token required")
     token = credentials.credentials
     if settings.app_auth_mode == "demo" and token == settings.app_demo_token:
+        organization_id = "org_demo"
+        if x_organization_id and x_organization_id != organization_id:
+            membership = session.scalar(
+                select(Resource).where(
+                    Resource.kind == "membership",
+                    Resource.organization_id == x_organization_id,
+                    Resource.data["actor_id"].as_string() == "user_demo_owner",
+                    Resource.status == "active",
+                )
+            )
+            if not membership:
+                # Hide tenant existence just like a resource-level authorization guard.
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
+            organization_id = x_organization_id
         return Principal(
             actor_id="user_demo_owner",
-            organization_id=x_organization_id or "org_demo",
+            organization_id=organization_id,
             project_id=None,
             role="owner",
             scopes=ALL_SCOPES,

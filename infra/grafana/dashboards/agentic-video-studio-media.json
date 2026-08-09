@@ -1,0 +1,35 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}},
+      "targets": [{"editorType": "sql", "format": 0, "rawSql": "SELECT toStartOfMinute(occurred_at) AS time, avg(JSONExtractInt(payload_json, 'latency_ms')) AS render_latency_ms FROM events_v1 WHERE $__timeFilter(occurred_at) AND event_type = 'media.render.completed' GROUP BY time ORDER BY time", "refId": "A"}],
+      "title": "Render latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"showHeader": true},
+      "targets": [{"editorType": "sql", "format": 1, "rawSql": "SELECT occurred_at, resource_id, JSONExtractString(payload_json, 'aspect_ratio') AS aspect_ratio, JSONExtractBool(payload_json, 'technical_passed') AS technical_passed, JSONExtractBool(payload_json, 'multimodal_passed') AS multimodal_passed FROM events_v1 WHERE $__timeFilter(occurred_at) AND event_type = 'media.render.completed' ORDER BY occurred_at DESC LIMIT 100", "refId": "A"}],
+      "title": "Render and QA outputs",
+      "type": "table"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["agentic-video-studio", "media"],
+  "time": {"from": "now-24h", "to": "now"},
+  "timezone": "browser",
+  "title": "Agentic Video Studio · Media",
+  "uid": "avs-media",
+  "version": 1
+}

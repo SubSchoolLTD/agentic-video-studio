@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,13 @@ from .config import Settings
 from .database import SessionLocal
 from .events import EventSink
 from .models import Resource
-from .providers import EditorialProvider, ParallelSearchProvider, TextToSpeechProvider, VeoProvider
+from .providers import (
+    EditorialProvider,
+    MultimodalQAProvider,
+    ParallelSearchProvider,
+    TextToSpeechProvider,
+    VeoProvider,
+)
 from .renderer import render_motion_video, technical_qa, write_webvtt
 from .repository import ResourceRepository
 from .scoring import final_scores, topic_score
@@ -48,6 +55,7 @@ class WorkflowManager:
         self.settings = settings
         self.parallel = ParallelSearchProvider(settings)
         self.editorial = EditorialProvider(settings)
+        self.multimodal_qa = MultimodalQAProvider(settings)
         self.veo = VeoProvider(settings)
         self.tts = TextToSpeechProvider(settings)
         self.storage = MediaStorage(settings)
@@ -120,7 +128,7 @@ class WorkflowManager:
             resource_type="generation_job",
             resource_id=job.id,
             payload=payload,
-            correlation_id=job.id,
+            correlation_id=str(job.data.get("correlation_id") or job.id),
         )
 
     async def run(self, job_id: str) -> None:
@@ -192,11 +200,26 @@ class WorkflowManager:
             status="running",
             data={"objective": f"Find fresh, evidence-backed angles for {title} for {audience}", "trigger_type": "generation"},
         )
+        research_started = time.perf_counter()
         packet = await self.parallel.search(research_run.data["objective"], recency_days=30)
+        await self._emit(
+            session,
+            job,
+            "model.call.completed",
+            {
+                "stage": "research",
+                "provider": "parallel",
+                "model": "search",
+                "request_id": packet.request_id,
+                "latency_ms": round((time.perf_counter() - research_started) * 1000),
+                "cost_usd": None,
+            },
+        )
         research_payload = {
             "provider": "parallel",
             "provider_mode": self.settings.provider_mode,
             "parallel_request_ids": [packet.request_id],
+            "parallel_result_metadata": packet.raw,
             "objective": packet.objective,
             "sources": packet.sources,
             "claims": packet.claims,
@@ -217,6 +240,14 @@ class WorkflowManager:
                 "audience": audience,
                 "why_now": "Small education teams need repeatable video output without a dedicated production desk.",
                 "source_ids": [source["id"] for source in packet.sources],
+                "sources": packet.sources,
+                "supported_claims": [claim for claim in packet.claims if claim.get("status") == "supported"],
+                "unresolved_questions": [
+                    claim.get("claim")
+                    for claim in packet.claims
+                    if claim.get("status") not in {"supported", "confirmed"}
+                ],
+                "freshness_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
                 "suggested_formats": ["educational_explainer", "problem_solution"],
                 "topic_opportunity_score": opportunity["score"],
                 "score_confidence": opportunity["confidence"],
@@ -234,6 +265,7 @@ class WorkflowManager:
         await self._emit(session, job, "research.completed", {"research_run_id": research_run.id})
 
         self._set_stage(repo, job, "editorial_strategy", "running")
+        editorial_started = time.perf_counter()
         package = await self.editorial.create_package(
             title=title,
             audience=audience,
@@ -242,25 +274,76 @@ class WorkflowManager:
             evidence=packet,
             duration_seconds=int(job.data.get("target_duration_seconds", 30)),
         )
+        await self._emit(
+            session,
+            job,
+            "model.call.completed",
+            {
+                "stage": "editorial_strategy",
+                "provider": "google",
+                "model": self.settings.gemini_model if self.settings.uses_live_research else "mock-gemini",
+                "latency_ms": round((time.perf_counter() - editorial_started) * 1000),
+                "cost_usd": None,
+            },
+        )
         concepts = package.get("concepts") or []
         self._set_stage(repo, job, "editorial_strategy", "completed", output={"concepts": concepts})
 
         self._set_stage(repo, job, "script", "running")
-        script = repo.add(
-            kind="script",
-            organization_id=job.organization_id,
-            project_id=job.project_id,
-            status="approved_by_policy",
-            data={"generation_job_id": job.id, "script": package.get("script", {}), "provider_trace": package.get("provider_trace", {})},
+        requested_variants = max(1, min(3, int(job.data.get("variants", 1))))
+        script_resources: list[Resource] = []
+        base_script = {**dict(package.get("script") or {}), **dict(job.data.get("script_override") or {})}
+        for index in range(requested_variants):
+            concept = concepts[index % len(concepts)] if concepts else {}
+            variant_script = {
+                **base_script,
+                "hook": concept.get("hook") or base_script.get("hook"),
+                "variant_title": concept.get("title") or base_script.get("title"),
+            }
+            script_resources.append(
+                repo.add(
+                    kind="script",
+                    organization_id=job.organization_id,
+                    project_id=job.project_id,
+                    status="approved_by_policy",
+                    version=index + 1,
+                    data={
+                        "generation_job_id": job.id,
+                        "variant_index": index + 1,
+                        "script": variant_script,
+                        "provider_trace": package.get("provider_trace", {}),
+                    },
+                )
+            )
+        script = script_resources[0]
+        self._set_stage(
+            repo,
+            job,
+            "script",
+            "completed",
+            output={
+                "script_id": script.id,
+                "script_ids": [item.id for item in script_resources],
+                "variant_count": len(script_resources),
+            },
         )
-        self._set_stage(repo, job, "script", "completed", output={"script_id": script.id})
 
         self._set_stage(repo, job, "fact_policy", "running")
         policy = package.get("policy") or {"decision": "revise", "unsupported_claims": ["Missing policy output"]}
-        if policy.get("decision") == "block":
-            self._set_stage(repo, job, "fact_policy", "blocked", output=policy)
-            repo.update(job, status="blocked", data={"hard_gates": {"policy": False}})
-            await self._emit(session, job, "generation.blocked", {"reason": "policy"})
+        unsupported_claims = list(policy.get("unsupported_claims") or [])
+        unknown_claims = [claim for claim in packet.claims if claim.get("status") != "supported"]
+        evidence_missing = not packet.sources or not packet.claims
+        if policy.get("decision") != "pass" or unsupported_claims or unknown_claims or evidence_missing:
+            gate = {
+                **policy,
+                "decision": "block",
+                "evidence_missing": evidence_missing,
+                "unknown_claim_ids": [claim.get("id") for claim in unknown_claims],
+                "media_generation_started": False,
+            }
+            self._set_stage(repo, job, "fact_policy", "blocked", output=gate)
+            repo.update(job, status="blocked", data={"hard_gates": {"policy": False, "factual_confidence": False}})
+            await self._emit(session, job, "generation.blocked", {"reason": "fact_policy", **gate})
             return
         self._set_stage(repo, job, "fact_policy", "completed", output=policy)
 
@@ -298,6 +381,7 @@ class WorkflowManager:
             scene_storage_uri = None
             if self.settings.uses_live_video:
                 output_path = self.settings.storage_root / job.project_id / job.id / "scenes" / f"{scene.id}.mp4"
+                scene_started = time.perf_counter()
                 generated = await self.veo.generate_scene(
                     scene.data.get("visual_prompt", "Educational abstract motion graphics"),
                     aspect_ratio=job.data.get("aspect_ratios", ["9:16"])[0],
@@ -311,6 +395,19 @@ class WorkflowManager:
                         content_type="video/mp4",
                     )
                     scene_storage_uri = persisted_scene["storage_uri"]
+                await self._emit(
+                    session,
+                    job,
+                    "model.call.completed",
+                    {
+                        "stage": "scene_generation",
+                        "provider": "google",
+                        "model": self.settings.veo_model,
+                        "scene_id": scene.id,
+                        "latency_ms": round((time.perf_counter() - scene_started) * 1000),
+                        "cost_usd": None,
+                    },
+                )
             attempt = repo.add(
                 kind="scene_attempt",
                 organization_id=job.organization_id,
@@ -494,6 +591,7 @@ class WorkflowManager:
         output_versions: list[dict[str, Any]] = []
         duration_seconds = int(job.data.get("target_duration_seconds", 30))
         for index, aspect_ratio in enumerate(job.data.get("aspect_ratios", ["9:16"]), start=1):
+            render_started = time.perf_counter()
             output_dir = self.settings.storage_root / (job.project_id or "unknown") / job.id / "renders"
             output_path = output_dir / f"version_{index}_{aspect_ratio.replace(':', 'x')}.mp4"
             manifest = await asyncio.to_thread(
@@ -521,6 +619,23 @@ class WorkflowManager:
                 output_path,
                 content_type="video/mp4",
             )
+            visual_qa = await self.multimodal_qa.analyze(
+                video_uri=persisted_render["storage_uri"],
+                scenes=scenes,
+                technical=qa,
+            )
+            await self._emit(
+                session,
+                job,
+                "media.render.completed",
+                {
+                    "aspect_ratio": aspect_ratio,
+                    "latency_ms": round((time.perf_counter() - render_started) * 1000),
+                    "technical_passed": qa["passed"],
+                    "multimodal_passed": visual_qa["passed"],
+                    "model": visual_qa.get("model_id"),
+                },
+            )
             await asyncio.to_thread(
                 self.storage.persist,
                 output_path.with_suffix(".manifest.json"),
@@ -547,16 +662,24 @@ class WorkflowManager:
                 },
             )
             output_versions.append(
-                {"aspect_ratio": aspect_ratio, "asset_id": asset.id, "asset": asset.data, "technical_qa": qa}
+                {
+                    "aspect_ratio": aspect_ratio,
+                    "asset_id": asset.id,
+                    "asset": asset.data,
+                    "technical_qa": qa,
+                    "multimodal_qa": visual_qa,
+                }
             )
         self._set_stage(repo, job, "render", "completed", output={"outputs": output_versions})
 
         self._set_stage(repo, job, "qa", "running")
         technical_pass = all(item["technical_qa"]["passed"] for item in output_versions)
+        multimodal_pass = all(item["multimodal_qa"]["passed"] for item in output_versions)
         hard_gates = {
             "policy": policy.get("decision") == "pass",
             "factual_confidence": all(claim.get("status") != "unknown" for claim in claims),
             "technical_qa": technical_pass,
+            "multimodal_qa": multimodal_pass,
             "rights_provenance": True,
             "budget": float(job.data.get("max_cost_usd", 10)) >= float(job.data.get("actual_cost_usd", 0)),
             "duplicate": True,
@@ -566,7 +689,10 @@ class WorkflowManager:
             "hard_gate_passed": all(hard_gates.values()),
             "hard_gates": hard_gates,
             "technical": [item["technical_qa"] for item in output_versions],
-            "visual": {"passed": True, "issues": [], "continuity": 0.88},
+            "visual": {
+                "passed": multimodal_pass,
+                "outputs": [item["multimodal_qa"] for item in output_versions],
+            },
             "content": {"passed": True, "cta_present": True, "claim_map_current": True},
             "brand": {"passed": True, "tone": "clear and practical", "palette": "matched"},
             "platform": {"passed": technical_pass, "safe_zones": True, "synthetic_media_disclosure": True},
@@ -600,26 +726,46 @@ class WorkflowManager:
         )
         self._set_stage(repo, job, "scoring", "completed", output={"score_report_id": score_report.id, **scores})
 
-        video = repo.add(
-            kind="video",
-            organization_id=job.organization_id,
-            project_id=job.project_id,
-            status="approval_required",
-            data={
-                "generation_job_id": job.id,
-                "title": title,
-                "script_id": script_id,
-                "storyboard_id": storyboard_id,
-                "qa_report_id": qa_report.id,
-                "score_report_id": score_report.id,
-                "scene_ids": scene_ids,
-                "versions": [],
-                "latest_version_id": None,
-                "caption_asset_id": caption_asset_id,
-            },
-        )
+        revision_video_id = job.data.get("revision_of_video_id")
+        video = repo.get_any(str(revision_video_id), kind="video") if revision_video_id else None
+        if video:
+            repo.update(
+                video,
+                status="approval_required",
+                data={
+                    "latest_generation_job_id": job.id,
+                    "title": title,
+                    "script_id": script_id,
+                    "storyboard_id": storyboard_id,
+                    "qa_report_id": qa_report.id,
+                    "score_report_id": score_report.id,
+                    "scene_ids": scene_ids,
+                    "caption_asset_id": caption_asset_id,
+                },
+            )
+        else:
+            video = repo.add(
+                kind="video",
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                status="approval_required",
+                data={
+                    "generation_job_id": job.id,
+                    "title": title,
+                    "script_id": script_id,
+                    "storyboard_id": storyboard_id,
+                    "qa_report_id": qa_report.id,
+                    "score_report_id": score_report.id,
+                    "scene_ids": scene_ids,
+                    "versions": [],
+                    "latest_version_id": None,
+                    "caption_asset_id": caption_asset_id,
+                },
+            )
         versions = []
-        for index, item in enumerate(output_versions, start=1):
+        existing_versions = list(video.data.get("versions") or [])
+        first_version = max((int(item.get("version", 0)) for item in existing_versions), default=0) + 1
+        for index, item in enumerate(output_versions, start=first_version):
             version = repo.add(
                 kind="video_version",
                 organization_id=job.organization_id,
@@ -636,11 +782,20 @@ class WorkflowManager:
                     "checksum": item["asset"]["checksum"],
                     "qa_report_id": qa_report.id,
                     "score_report_id": score_report.id,
+                    "script_id": script_id,
+                    "storyboard_id": storyboard_id,
+                    "supersedes_script_id": job.data.get("supersedes_script_id"),
                     "manifest_uri": f"{item['asset']['storage_uri'][:-4]}.manifest.json",
                 },
             )
             versions.append(ResourceRepository.serialize(version))
-        repo.update(video, data={"versions": versions, "latest_version_id": versions[0]["id"] if versions else None})
+        repo.update(
+            video,
+            data={
+                "versions": [*existing_versions, *versions],
+                "latest_version_id": versions[0]["id"] if versions else video.data.get("latest_version_id"),
+            },
+        )
         repo.update(
             job,
             status="ready",

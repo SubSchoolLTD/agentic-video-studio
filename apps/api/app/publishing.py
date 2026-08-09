@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
+import subprocess
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -230,6 +233,123 @@ def upload_youtube_video(
         "external_url": f"https://youtu.be/{response['id']}",
         "raw": response,
     }
+
+
+def get_youtube_video_status(
+    settings: Settings,
+    *,
+    video_id: str,
+    secret_ref: str | None,
+) -> dict[str, Any]:
+    """Resolve the provider-side processing state before any retry decision."""
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    refresh_token = load_refresh_token(settings, secret_ref)
+    if not refresh_token:
+        raise RuntimeError("YouTube refresh token is unavailable")
+    credentials = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.youtube_client_id,
+        client_secret=settings.youtube_client_secret,
+        scopes=[
+            "https://www.googleapis.com/auth/youtube.upload",
+            "https://www.googleapis.com/auth/youtube.readonly",
+        ],
+    )
+    youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
+    response = youtube.videos().list(part="status,snippet,contentDetails", id=video_id).execute()
+    items = response.get("items", [])
+    if not items:
+        return {
+            "provider_status": "not_found",
+            "status": "rejected",
+            "rejection_reason": "Provider video was not found",
+            "raw": response,
+        }
+    item = items[0]
+    provider_status = str(item.get("status", {}).get("uploadStatus") or "uploaded")
+    normalized = {
+        "processed": "published",
+        "uploaded": "processing",
+        "failed": "retryable_failure",
+        "rejected": "rejected",
+        "deleted": "rejected",
+    }.get(provider_status, "processing")
+    return {
+        "provider_status": provider_status,
+        "status": normalized,
+        "privacy_status": item.get("status", {}).get("privacyStatus"),
+        "rejection_reason": item.get("status", {}).get("rejectionReason"),
+        "failure_reason": item.get("status", {}).get("failureReason"),
+        "duration": item.get("contentDetails", {}).get("duration"),
+        "raw": item,
+    }
+
+
+def create_export_package(
+    *,
+    video_path: Path,
+    captions_path: Path | None,
+    output_path: Path,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a provider-neutral, reproducible handoff bundle."""
+    import hashlib
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    thumbnail_path = output_path.with_suffix(".thumbnail.jpg")
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        completed = subprocess.run(
+            [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                "00:00:01",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(thumbnail_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            thumbnail_path.unlink(missing_ok=True)
+
+    manifest = {
+        "schema_version": "1.0",
+        **metadata,
+        "files": {
+            "video": "video.mp4",
+            "captions": "captions.vtt" if captions_path else None,
+            "thumbnail": "thumbnail.jpg" if thumbnail_path.exists() else None,
+            "caption": "caption.txt",
+            "hashtags": "hashtags.txt",
+        },
+    }
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.write(video_path, "video.mp4")
+        if captions_path and captions_path.exists():
+            bundle.write(captions_path, "captions.vtt")
+        if thumbnail_path.exists():
+            bundle.write(thumbnail_path, "thumbnail.jpg")
+        bundle.writestr("caption.txt", str(metadata.get("caption") or ""))
+        bundle.writestr("hashtags.txt", " ".join(f"#{tag.lstrip('#')}" for tag in metadata.get("hashtags", [])))
+        bundle.writestr("publication.json", json.dumps(manifest, indent=2, ensure_ascii=False, default=str))
+    thumbnail_path.unlink(missing_ok=True)
+    checksum = hashlib.sha256(output_path.read_bytes()).hexdigest()
+    return {"checksum": checksum, "size_bytes": output_path.stat().st_size, "manifest": manifest}
 
 
 def confirmation_token() -> str:

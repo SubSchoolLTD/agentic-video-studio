@@ -248,6 +248,7 @@ class EditorialProvider:
             duration_seconds,
         )
 
+
     def _generate_with_gemini(
         self,
         title: str,
@@ -398,6 +399,86 @@ class EditorialProvider:
             },
             "storyboard": {"scenes": scenes, "visual_mode": "motion_graphics_hybrid"},
             "provider_trace": {"provider": "google", "mode": "mock", "model": "mock-gemini"},
+        }
+
+
+class MultimodalQAProvider:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def analyze(
+        self,
+        *,
+        video_uri: str,
+        scenes: list[dict[str, Any]],
+        technical: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.settings.uses_live_video:
+            return {
+                "passed": True,
+                "issues": [],
+                "scene_issues": [],
+                "continuity": 0.88,
+                "provider": "deterministic_mock",
+                "model_id": None,
+                "demo_data": True,
+            }
+        if not video_uri.startswith("gs://"):
+            return {
+                "passed": False,
+                "issues": ["Final video is not available through a private GCS URI for multimodal QA"],
+                "scene_issues": [],
+                "continuity": None,
+                "provider": "gemini",
+                "model_id": self.settings.gemini_model,
+                "availability": "missing",
+            }
+        return await asyncio.to_thread(self._analyze_with_gemini, video_uri, scenes, technical)
+
+    def _analyze_with_gemini(
+        self,
+        video_uri: str,
+        scenes: list[dict[str, Any]],
+        technical: dict[str, Any],
+    ) -> dict[str, Any]:
+        from google.genai import types
+
+        client = google_genai_client(self.settings)
+        prompt = {
+            "task": "Inspect this final rendered marketing video. Return only JSON.",
+            "criteria": [
+                "visual corruption or black frames",
+                "audio and visible-scene alignment",
+                "subtitle and overlay readability",
+                "scene continuity",
+                "brand-safe and non-misleading visuals",
+            ],
+            "expected_schema": {
+                "passed": "boolean",
+                "issues": ["string"],
+                "scene_issues": [{"scene_id": "string", "severity": "low|medium|high", "issue": "string"}],
+                "continuity": "number between 0 and 1",
+            },
+            "planned_scenes": scenes,
+            "technical_probe": technical,
+        }
+        response = client.models.generate_content(
+            model=self.settings.gemini_model,
+            contents=[
+                types.Part.from_uri(file_uri=video_uri, mime_type="video/mp4"),
+                json.dumps(prompt),
+            ],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0),
+        )
+        parsed = json.loads(response.text or "{}")
+        return {
+            "passed": bool(parsed.get("passed")),
+            "issues": list(parsed.get("issues") or []),
+            "scene_issues": list(parsed.get("scene_issues") or []),
+            "continuity": parsed.get("continuity"),
+            "provider": "gemini",
+            "model_id": self.settings.gemini_model,
+            "provider_response_id": getattr(response, "response_id", None),
         }
 
 

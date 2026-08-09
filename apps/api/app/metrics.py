@@ -62,6 +62,7 @@ def mock_youtube_metrics(*, window: str, published_at: datetime) -> dict[str, An
         "metrics": values,
         "availability": _availability(values, demo=True),
         "provider_status": {"uploadStatus": "processed"},
+        "provider_api_versions": {"youtube_data": "v3", "youtube_analytics": "v2"},
         "raw_payload": {"demo_data": True, "window": window},
         "is_complete": True,
         "demo_data": True,
@@ -168,6 +169,7 @@ def collect_youtube_metrics(
         "metrics": metrics,
         "availability": _availability(metrics),
         "provider_status": item.get("status", {}),
+        "provider_api_versions": {"youtube_data": "v3", "youtube_analytics": "v2"},
         "raw_payload": {
             "youtube_data_api": public_payload,
             "youtube_analytics": analytics_payload,

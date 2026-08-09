@@ -5,7 +5,7 @@ The live hackathon environment uses four Cloud Run services:
 - Web: `agentic-video-studio-web` in `us-central1`.
 - API/workflow: `agentic-video-studio-api` in `us-central1` with always-allocated CPU and one minimum instance for long-running provider operations.
 - Analytics event store: `agentic-video-studio-clickhouse`, authenticated with ClickHouse headers backed by Secret Manager.
-- Operations UI: `agentic-video-studio-grafana`, with a provisioned ClickHouse datasource and `avs-pipeline` dashboard.
+- Operations UI: `agentic-video-studio-grafana`, with a provisioned ClickHouse datasource and Pipeline, AI, Media, Publishing and Cost dashboards.
 
 Durable state lives in the `avs-postgres` Cloud SQL PostgreSQL instance. Media and manifests live in the private `subschool-484119-avs-media` bucket. Images are built by Cloud Build into the `agentic-video-studio` Artifact Registry repository. The runtime service account is `avs-runtime` and receives provider, database, object, logging, Pub/Sub, and secret access without a service-account JSON key.
 
@@ -39,7 +39,7 @@ Publication confirmation creates independent `24h` and `7d` checkpoints in Postg
 
 The public ClickHouse endpoint still requires `X-ClickHouse-User` and `X-ClickHouse-Key`; the password is injected from Secret Manager. Grafana requires its provisioned admin login. The competition deployment intentionally uses one warm Cloud Run ClickHouse instance for a real, inexpensive demo event stream. Its local disk is ephemeral; production should use ClickHouse Cloud or persistent compute without changing the append-only schema or API sink.
 
-`avs-metrics-collector` is a Google Workflow started every 15 minutes by Cloud Scheduler. It calls the hidden due-checkpoint endpoint with an OIDC token for `avs-runtime`; no application bearer secret is copied into Scheduler. Domain events are published to `avs-domain-events`, with a retained observability subscription available for verification and independent consumers.
+`avs-metrics-collector` is a Google Workflow started every 15 minutes by Cloud Scheduler. Its OIDC-authenticated automation pass polls due RSS, launches scheduled research/backlog replenishment, refreshes provider processing states, retries due webhook deliveries and evaluates operational alerts; its metrics pass collects due checkpoints. No application bearer secret is copied into Scheduler. Domain events are published to `avs-domain-events`, with a retained observability subscription available for verification and independent consumers.
 
 ## Smoke checks
 

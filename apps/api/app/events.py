@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import hashlib
+import hmac
 import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
+from .models import Resource
 from .repository import ResourceRepository
 
 logger = logging.getLogger("avs.events")
@@ -50,12 +55,58 @@ class EventSink:
             status="recorded",
             data=envelope,
         )
+        self._enqueue_webhooks(session, envelope)
         logger.info("domain_event", extra={"event": envelope})
         if self.settings.clickhouse_url:
             await self._send_clickhouse(envelope)
         if self.settings.google_pubsub_topic:
             await asyncio.to_thread(self._send_pubsub, envelope)
         return envelope
+
+    def _enqueue_webhooks(self, session: Session, envelope: dict[str, Any]) -> None:
+        if not envelope.get("project_id"):
+            return
+        webhooks = list(
+            session.scalars(
+                select(Resource).where(
+                    Resource.kind == "webhook",
+                    Resource.organization_id == envelope["organization_id"],
+                    Resource.project_id == envelope["project_id"],
+                    Resource.status == "active",
+                )
+            )
+        )
+        event = {
+            "event_id": envelope["event_id"],
+            "type": envelope["event_type"],
+            "timestamp": int(datetime.now(UTC).timestamp()),
+            "project_id": envelope["project_id"],
+            "resource_type": envelope["resource_type"],
+            "resource_id": envelope["resource_id"],
+            "correlation_id": envelope.get("correlation_id"),
+            "data": envelope.get("payload") or {},
+        }
+        raw = json.dumps(event, separators=(",", ":"), sort_keys=True).encode()
+        signature = hmac.new(self.settings.webhook_signing_secret.encode(), raw, hashlib.sha256).hexdigest()
+        repo = ResourceRepository(session)
+        for webhook in webhooks:
+            patterns = list(webhook.data.get("events") or [])
+            if patterns and not any(fnmatch.fnmatch(envelope["event_type"], pattern) for pattern in patterns):
+                continue
+            repo.add(
+                kind="webhook_delivery",
+                organization_id=envelope["organization_id"],
+                project_id=envelope["project_id"],
+                status="retry_scheduled",
+                data={
+                    "webhook_id": webhook.id,
+                    "event_id": event["event_id"],
+                    "event": event,
+                    "attempt": 0,
+                    "signature": f"sha256={signature}",
+                    "next_attempt_at": datetime.now(UTC).isoformat(),
+                },
+            )
 
     def _send_pubsub(self, envelope: dict[str, Any]) -> None:
         try:
@@ -89,6 +140,7 @@ class EventSink:
             "event_type": envelope["event_type"],
             "resource_type": envelope["resource_type"],
             "resource_id": envelope["resource_id"],
+            "correlation_id": envelope.get("correlation_id") or "",
             "actor_type": "system",
             "payload_json": json.dumps(envelope["payload"], default=str),
             "occurred_at": envelope["occurred_at"],

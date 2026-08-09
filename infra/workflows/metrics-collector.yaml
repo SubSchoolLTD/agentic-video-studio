@@ -1,6 +1,15 @@
 main:
   params: [args]
   steps:
+    - runDueAutomation:
+        call: http.post
+        args:
+          url: ${args.api_url + "/v1/internal/automation/run-due"}
+          auth:
+            type: OIDC
+            audience: ${args.api_url}
+          timeout: 300
+        result: automationResponse
     - collectDueMetrics:
         call: http.post
         args:
@@ -12,5 +21,9 @@ main:
         result: collectorResponse
     - returnResult:
         return:
-          status_code: ${collectorResponse.code}
-          body: ${collectorResponse.body}
+          automation:
+            status_code: ${automationResponse.code}
+            body: ${automationResponse.body}
+          metrics:
+            status_code: ${collectorResponse.code}
+            body: ${collectorResponse.body}

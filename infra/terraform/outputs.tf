@@ -6,6 +6,10 @@ output "media_bucket" {
   value = google_storage_bucket.media.name
 }
 
+output "build_source_bucket" {
+  value = google_storage_bucket.build_source.name
+}
+
 output "cloud_sql_connection_name" {
   value = google_sql_database_instance.postgres.connection_name
 }

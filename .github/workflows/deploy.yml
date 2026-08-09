@@ -27,12 +27,14 @@ jobs:
           gcloud builds submit .
           --project='${{ secrets.GCP_PROJECT_ID }}'
           --config=infra/cloudbuild-api.yaml
+          --gcs-source-staging-dir=gs://${{ secrets.GCP_PROJECT_ID }}-avs-build-source/source
           --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/api:${{ github.sha }}
       - name: Build immutable web image
         run: >-
           gcloud builds submit .
           --project='${{ secrets.GCP_PROJECT_ID }}'
           --config=infra/cloudbuild-web.yaml
+          --gcs-source-staging-dir=gs://${{ secrets.GCP_PROJECT_ID }}-avs-build-source/source
           --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/web:${{ github.sha }}
       - name: Deploy API and run migrations
         run: >-

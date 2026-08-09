@@ -130,15 +130,20 @@ resource "google_service_account" "deployer" {
 
 resource "google_project_iam_member" "deployer_roles" {
   for_each = toset([
-    "roles/artifactregistry.writer",
     "roles/cloudbuild.builds.editor",
-    "roles/iam.serviceAccountUser",
     "roles/run.admin",
+    "roles/serviceusage.serviceUsageConsumer",
   ])
 
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_service_account_iam_member" "deployer_act_as_runtime" {
+  service_account_id = google_service_account.runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deployer.email}"
 }
 
 resource "google_iam_workload_identity_pool" "github" {
@@ -213,6 +218,30 @@ resource "google_storage_bucket" "media" {
       type = "Delete"
     }
   }
+}
+
+resource "google_storage_bucket" "build_source" {
+  name                        = "${var.project_id}-avs-build-source"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+  labels                      = local.labels
+
+  lifecycle_rule {
+    condition {
+      age = 7
+    }
+    action {
+      type = "Delete"
+    }
+  }
+}
+
+resource "google_storage_bucket_iam_member" "deployer_build_source" {
+  bucket = google_storage_bucket.build_source.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.deployer.email}"
 }
 
 resource "google_storage_bucket_iam_member" "runtime_media" {

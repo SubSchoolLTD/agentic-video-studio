@@ -125,6 +125,21 @@ jobs:
                 google_sql_database_instance.postgres \
                 "projects/${NEW_PROJECT_ID}/instances/avs-postgres"
             fi
+
+            sql_state=""
+            for _ in $(seq 1 90); do
+              sql_state="$(gcloud sql instances describe avs-postgres \
+                --project="$NEW_PROJECT_ID" \
+                --format='value(state)')"
+              if [[ "$sql_state" == "RUNNABLE" ]]; then
+                break
+              fi
+              sleep 10
+            done
+            if [[ "$sql_state" != "RUNNABLE" ]]; then
+              echo "Cloud SQL did not become RUNNABLE; last state: $sql_state" >&2
+              exit 1
+            fi
           fi
 
           terraform -chdir=infra/terraform apply -auto-approve \

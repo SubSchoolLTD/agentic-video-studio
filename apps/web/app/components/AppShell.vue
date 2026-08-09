@@ -48,7 +48,15 @@ const nav = [
 const { data: projects } = await useAsyncData('shell-projects', () => api<any>('/v1/projects'), {
   default: () => ({ items: [{ id: 'prj_subschool', name: 'SubSchool', status: 'active' }] }),
 })
+const { data: health } = await useAsyncData('shell-health', () => api<any>('/v1/health'), {
+  default: () => ({ status: 'unknown', environment: 'unknown', provider_mode: 'unknown' }),
+})
 const activeProject = computed(() => projects.value?.items?.find((item: any) => item.id === projectId.value) || projects.value?.items?.[0])
+const healthTitle = computed(() => health.value?.status === 'ok' ? 'Systems operational' : 'System status unknown')
+const healthDetail = computed(() => {
+  const provider = health.value?.provider_mode === 'live' ? 'Live providers' : health.value?.provider_mode === 'mock' ? 'Mock providers' : 'Providers unknown'
+  return `${provider} · ${health.value?.environment || 'unknown'}`
+})
 
 function isActive(to: string) {
   if (to === '/') return route.path === '/'
@@ -97,7 +105,7 @@ function isActive(to: string) {
       <div class="sidebar__footer">
         <div class="system-health">
           <span class="system-health__pulse" />
-          <div><strong>Systems operational</strong><span>Mock providers · local</span></div>
+          <div><strong>{{ healthTitle }}</strong><span>{{ healthDetail }}</span></div>
         </div>
         <button class="sidebar-collapse" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="collapsed = !collapsed">
           <PanelLeftClose :size="17" />

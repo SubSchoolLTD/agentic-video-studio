@@ -41,6 +41,7 @@ STAGES = (
     "qa",
     "scoring",
 )
+RESUME_GRACE_SECONDS = 20
 
 
 def initial_stage_state() -> list[dict[str, Any]]:
@@ -80,8 +81,9 @@ class WorkflowManager:
                     )
                 )
             )
+        loop = asyncio.get_running_loop()
         for job in jobs:
-            self.schedule(job.id)
+            loop.call_later(RESUME_GRACE_SECONDS, self.schedule, job.id)
 
     @staticmethod
     def _set_stage(
@@ -141,7 +143,13 @@ class WorkflowManager:
                 await self._emit(session, job, "generation.started")
                 await self._run_pipeline(session, repo, job)
             except asyncio.CancelledError:
-                repo.update(job, status="cancelled", data={"cancelled_at": datetime.now(UTC).isoformat()})
+                session.refresh(job)
+                if job.status != "cancelled":
+                    repo.update(
+                        job,
+                        status="running",
+                        data={"interrupted_at": datetime.now(UTC).isoformat()},
+                    )
                 raise
             except Exception as exc:
                 logger.exception("generation_failed", extra={"job_id": job_id})
@@ -158,9 +166,20 @@ class WorkflowManager:
                 await self._emit(session, job, "generation.failed", {"stage": current_stage, "error": str(exc)})
 
     async def _run_pipeline(self, session: Any, repo: ResourceRepository, job: Resource) -> None:
-        render_stage = next((item for item in job.data.get("stages", []) if item.get("name") == "render"), {})
-        if render_stage.get("status") == "failed":
+        stages = {item.get("name"): item for item in job.data.get("stages", [])}
+        render_stage = stages.get("render", {})
+        voice_stage = stages.get("voice_audio", {})
+        scene_stage = stages.get("scene_generation", {})
+        storyboard_stage = stages.get("storyboard", {})
+        if render_stage.get("status") in {"running", "failed"} and voice_stage.get("status") == "completed":
             await self._resume_from_render(session, repo, job)
+            return
+        if (
+            storyboard_stage.get("output")
+            and scene_stage.get("status") in {"running", "failed", "completed"}
+            and job.data.get("current_stage") in {"storyboard", "scene_generation", "voice_audio"}
+        ):
+            await self._resume_from_scene_generation(session, repo, job)
             return
         project = repo.get_any(job.project_id or "", kind="project")
         if not project:
@@ -516,6 +535,213 @@ class WorkflowManager:
         if not stage or stage.get("status") != "completed" or not isinstance(stage.get("output"), dict):
             raise RuntimeError(f"Cannot resume: {stage_name} checkpoint is incomplete")
         return dict(stage["output"])
+
+    @staticmethod
+    def _stage_output(job: Resource, stage_name: str) -> dict[str, Any]:
+        stage = next((item for item in job.data.get("stages", []) if item.get("name") == stage_name), None)
+        if not stage or not isinstance(stage.get("output"), dict):
+            raise RuntimeError(f"Cannot resume: {stage_name} checkpoint is incomplete")
+        return dict(stage["output"])
+
+    async def _resume_from_scene_generation(
+        self,
+        session: Any,
+        repo: ResourceRepository,
+        job: Resource,
+    ) -> None:
+        intake = self._stage_output(job, "intake")
+        research = self._stage_output(job, "research")
+        script_stage = self._stage_output(job, "script")
+        policy = self._stage_output(job, "fact_policy")
+        storyboard_stage = self._stage_output(job, "storyboard")
+
+        storyboard = repo.get_any(storyboard_stage["storyboard_id"], kind="storyboard")
+        research_run = repo.get_any(research["research_run_id"], kind="research_run")
+        candidate = repo.get_any(research["candidate_id"], kind="topic_candidate")
+        script = repo.get_any(script_stage["script_id"], kind="script")
+        scene_resources = [
+            repo.get_any(scene_id, kind="scene")
+            for scene_id in storyboard_stage.get("scene_ids", [])
+        ]
+        if not storyboard or not research_run or not candidate or not script or any(scene is None for scene in scene_resources):
+            raise RuntimeError("Cannot resume: persisted scene-generation resources are missing")
+
+        scenes = list(storyboard.data.get("scenes") or [])
+        typed_scenes = [scene for scene in scene_resources if scene is not None]
+        if not scenes or len(scenes) != len(typed_scenes):
+            raise RuntimeError("Cannot resume: storyboard scene checkpoint is inconsistent")
+
+        self._set_stage(repo, job, "storyboard", "completed", output=storyboard_stage)
+        self._set_stage(repo, job, "scene_generation", "running")
+        scene_attempts: list[dict[str, Any]] = []
+        for scene in typed_scenes:
+            latest_attempt_id = scene.data.get("latest_attempt_id")
+            latest_attempt = (
+                repo.get_any(str(latest_attempt_id), kind="scene_attempt")
+                if latest_attempt_id
+                else None
+            )
+            if scene.status == "generated" and latest_attempt:
+                output_uri = latest_attempt.data.get("output_uri")
+                storage_uri = latest_attempt.data.get("storage_uri")
+                if output_uri and storage_uri:
+                    await asyncio.to_thread(
+                        self.storage.materialize,
+                        storage_uri=storage_uri,
+                        local_path=Path(output_uri),
+                    )
+                scene_attempts.append(
+                    {
+                        "scene_id": scene.id,
+                        "attempt_id": latest_attempt.id,
+                        "output_uri": output_uri,
+                        "storage_uri": storage_uri,
+                    }
+                )
+                continue
+
+            output_uri = None
+            scene_storage_uri = None
+            if self.settings.uses_live_video:
+                output_path = self.settings.storage_root / job.project_id / job.id / "scenes" / f"{scene.id}.mp4"
+                scene_started = time.perf_counter()
+                generated = await self.veo.generate_scene(
+                    scene.data.get("visual_prompt", "Educational abstract motion graphics"),
+                    aspect_ratio=job.data.get("aspect_ratios", ["9:16"])[0],
+                    output_path=output_path,
+                )
+                output_uri = str(generated) if generated else None
+                if generated:
+                    persisted_scene = await asyncio.to_thread(
+                        self.storage.persist,
+                        generated,
+                        content_type="video/mp4",
+                    )
+                    scene_storage_uri = persisted_scene["storage_uri"]
+                await self._emit(
+                    session,
+                    job,
+                    "model.call.completed",
+                    {
+                        "stage": "scene_generation",
+                        "provider": "google",
+                        "model": self.settings.veo_model,
+                        "scene_id": scene.id,
+                        "latency_ms": round((time.perf_counter() - scene_started) * 1000),
+                        "cost_usd": None,
+                        "resumed": True,
+                    },
+                )
+            attempt = repo.add(
+                kind="scene_attempt",
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                status="passed",
+                data={
+                    "scene_id": scene.id,
+                    "attempt": int(scene.data.get("attempt", 0)) + 1,
+                    "model_id": self.settings.veo_model if self.settings.uses_live_video else "motion-fallback-v1",
+                    "prompt_version": "director-v1",
+                    "output_uri": output_uri,
+                    "storage_uri": scene_storage_uri,
+                    "qa_status": "passed",
+                    "cost_usd": 0 if not self.settings.uses_live_video else None,
+                },
+            )
+            repo.update(
+                scene,
+                status="generated",
+                data={
+                    "attempt": attempt.data["attempt"],
+                    "latest_attempt_id": attempt.id,
+                    "output_uri": output_uri,
+                },
+            )
+            scene_attempts.append(
+                {
+                    "scene_id": scene.id,
+                    "attempt_id": attempt.id,
+                    "output_uri": output_uri,
+                    "storage_uri": scene_storage_uri,
+                }
+            )
+        self._set_stage(repo, job, "scene_generation", "completed", output={"attempts": scene_attempts})
+
+        self._set_stage(repo, job, "voice_audio", "running")
+        audio_path = None
+        if self.settings.uses_live_video:
+            script_payload = dict(script.data.get("script") or {})
+            voiceover = str(script_payload.get("voiceover") or " ".join(scene.get("narration", "") for scene in scenes))
+            audio_path = await self.tts.synthesize(
+                voiceover,
+                output_path=self.settings.storage_root / job.project_id / job.id / "audio" / "voiceover.wav",
+            )
+        audio_storage_uri = None
+        if audio_path:
+            persisted_audio = await asyncio.to_thread(
+                self.storage.persist,
+                audio_path,
+                content_type="audio/wav",
+            )
+            audio_storage_uri = persisted_audio["storage_uri"]
+        captions_path = write_webvtt(
+            scenes=scenes,
+            output_path=self.settings.storage_root / job.project_id / job.id / "captions" / "captions.en.vtt",
+            duration_seconds=int(job.data.get("target_duration_seconds", 30)),
+        )
+        persisted_captions = await asyncio.to_thread(
+            self.storage.persist,
+            captions_path,
+            content_type="text/vtt",
+        )
+        caption_asset = repo.add(
+            kind="media_asset",
+            organization_id=job.organization_id,
+            project_id=job.project_id,
+            status="ready",
+            data={
+                "generation_job_id": job.id,
+                "type": "captions",
+                "storage_uri": persisted_captions["storage_uri"],
+                "local_path": persisted_captions["local_path"],
+                "public_path": persisted_captions["public_path"],
+                "mime_type": "text/vtt",
+                "language": "en",
+                "rights_status": "owned",
+            },
+        )
+        self._set_stage(
+            repo,
+            job,
+            "voice_audio",
+            "completed",
+            output={
+                "provider": "google_tts" if self.settings.uses_live_video else "deterministic_audio_bed",
+                "audio_path": str(audio_path) if audio_path else None,
+                "audio_storage_uri": audio_storage_uri,
+                "caption_asset_id": caption_asset.id,
+                "timestamps": True,
+            },
+        )
+
+        await self._complete_from_render(
+            session=session,
+            repo=repo,
+            job=job,
+            title=str(intake.get("input_snapshot", {}).get("title") or "A smarter way to reuse a lesson"),
+            scenes=scenes,
+            scene_attempts=scene_attempts,
+            audio_path=audio_path,
+            policy=policy,
+            claims=list(research_run.data.get("claims") or []),
+            source_count=int(research_run.data.get("source_count") or len(research_run.data.get("sources") or [])),
+            opportunity_score=int(candidate.data.get("topic_opportunity_score") or 0),
+            script_id=script.id,
+            storyboard_id=storyboard.id,
+            scene_ids=[scene.id for scene in typed_scenes],
+            caption_asset_id=caption_asset.id,
+            research_run_id=research_run.id,
+        )
 
     async def _resume_from_render(self, session: Any, repo: ResourceRepository, job: Resource) -> None:
         intake = self._completed_stage_output(job, "intake")

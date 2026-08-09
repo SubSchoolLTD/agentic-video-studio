@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import time
 
+from sqlalchemy import func, select
+
 from apps.api.app import workflow
+from apps.api.app.database import SessionLocal
+from apps.api.app.models import Resource
 from apps.api.app.renderer import RenderError
 
 
@@ -199,6 +204,84 @@ def test_retry_resumes_from_failed_render_checkpoint(client, auth_headers, monke
     assert attempts["research"] == 1
     assert attempts["scene_generation"] == 1
     assert attempts["render"] == 2
+
+
+def test_interrupted_job_resumes_from_scene_checkpoint_without_duplicate_provider_work(
+    client, auth_headers, monkeypatch
+) -> None:
+    original_write_webvtt = workflow.write_webvtt
+
+    def interrupt_after_scenes(**_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(workflow, "write_webvtt", interrupt_after_scenes)
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Durable scene checkpoint",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "approval_mode": "final_only",
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-scene-checkpoint-1"},
+    )
+    assert created.status_code == 202
+    job_id = created.json()["generation_job_id"]
+
+    deadline = time.monotonic() + 20
+    interrupted = None
+    while time.monotonic() < deadline:
+        interrupted = client.get(f"/v1/generation-jobs/{job_id}", headers=auth_headers).json()
+        if interrupted.get("interrupted_at") and job_id not in client.app.state.workflow.tasks:
+            break
+        time.sleep(0.1)
+    assert interrupted is not None
+    assert interrupted["status"] == "running"
+    assert interrupted["current_stage"] == "voice_audio"
+
+    with SessionLocal() as session:
+        research_before = session.scalar(
+            select(func.count()).select_from(Resource).where(
+                Resource.kind == "research_run",
+                Resource.project_id == "prj_subschool",
+            )
+        )
+        attempts_before = session.scalar(
+            select(func.count()).select_from(Resource).where(
+                Resource.kind == "scene_attempt",
+                Resource.project_id == "prj_subschool",
+            )
+        )
+        interrupted_resource = session.scalar(
+            select(Resource).where(Resource.id == job_id, Resource.kind == "generation_job")
+        )
+        assert interrupted_resource is not None
+        interrupted_resource.status = "failed"
+        session.add(interrupted_resource)
+        session.commit()
+
+    monkeypatch.setattr(workflow, "write_webvtt", original_write_webvtt)
+    retry = client.post(f"/v1/generation-jobs/{job_id}/retry", headers=auth_headers)
+    assert retry.status_code == 202
+    completed = wait_for_job(client, job_id, auth_headers)
+    assert completed["status"] == "ready", completed.get("last_error")
+
+    with SessionLocal() as session:
+        research_after = session.scalar(
+            select(func.count()).select_from(Resource).where(
+                Resource.kind == "research_run",
+                Resource.project_id == "prj_subschool",
+            )
+        )
+        attempts_after = session.scalar(
+            select(func.count()).select_from(Resource).where(
+                Resource.kind == "scene_attempt",
+                Resource.project_id == "prj_subschool",
+            )
+        )
+    assert research_after == research_before
+    assert attempts_after == attempts_before
 
 
 def test_unsupported_claim_blocks_before_media_generation(client, auth_headers, monkeypatch) -> None:

@@ -141,6 +141,14 @@ resource "google_project_iam_member" "deployer_roles" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+resource "google_project_iam_member" "cloud_build_default_builder" {
+  project = var.project_id
+  role    = "roles/cloudbuild.builds.builder"
+  member  = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+
+  depends_on = [google_project_service.required]
+}
+
 resource "google_service_account_iam_member" "deployer_act_as_runtime" {
   service_account_id = google_service_account.runtime.name
   role               = "roles/iam.serviceAccountUser"
@@ -301,6 +309,12 @@ resource "google_sql_user" "application" {
   name     = "avs_app"
   instance = google_sql_database_instance.postgres.name
   password = var.sql_user_password
+}
+
+resource "google_storage_bucket_iam_member" "cloud_sql_media" {
+  bucket = google_storage_bucket.media.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_sql_database_instance.postgres.service_account_email_address}"
 }
 
 resource "google_secret_manager_secret" "runtime" {

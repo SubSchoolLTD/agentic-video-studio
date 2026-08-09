@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.13.2"
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: terraform -chdir=infra/terraform init -backend=false
+      - run: terraform -chdir=infra/terraform validate
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+      - run: pip install -e '.[dev]'
+      - run: ruff check apps/api apps/mcp tests migrations
+      - run: pytest
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @avs/web lint
+      - run: pnpm --filter @avs/web typecheck
+      - run: pnpm --filter @avs/web test
+      - run: pnpm --filter @avs/web build
+      - run: pnpm --filter @avs/web exec playwright install --with-deps chromium
+      - run: pnpm --filter @avs/web test:e2e
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: docker build -f infra/Dockerfile.api -t avs-api:ci .
+      - run: docker build -f infra/Dockerfile.web -t avs-web:ci .
+      - run: docker build -f infra/Dockerfile.clickhouse -t avs-clickhouse:ci .
+      - run: docker build -f infra/Dockerfile.grafana -t avs-grafana:ci .

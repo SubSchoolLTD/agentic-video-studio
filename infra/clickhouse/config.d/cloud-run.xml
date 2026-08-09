@@ -1,0 +1,8 @@
+<clickhouse>
+  <http_port>8080</http_port>
+  <listen_host>::</listen_host>
+  <logger>
+    <level>information</level>
+    <console>true</console>
+  </logger>
+</clickhouse>

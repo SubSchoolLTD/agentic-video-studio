@@ -1,0 +1,24 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE alembic.ini ./
+COPY apps/api ./apps/api
+COPY apps/mcp ./apps/mcp
+COPY migrations ./migrations
+RUN pip install --no-cache-dir .
+
+RUN addgroup --system avs && adduser --system --ingroup avs avs \
+    && mkdir -p /tmp/avs-media /tmp/avs-data \
+    && chown -R avs:avs /tmp/avs-media /tmp/avs-data /app
+USER avs
+
+CMD ["sh", "-c", "alembic upgrade head && uvicorn apps.api.app.main:app --host 0.0.0.0 --port ${PORT}"]
+

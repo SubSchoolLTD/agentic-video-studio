@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-video-studio"
+version = "0.1.0"
+description = "Evidence-first agentic short-form video production studio"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.16.5",
+  "fastapi>=0.116.1",
+  "feedparser>=6.0.11",
+  "google-adk>=1.12.0",
+  "google-api-python-client>=2.179.0",
+  "google-auth-oauthlib>=1.2.2",
+  "google-cloud-storage>=3.3.0",
+  "google-cloud-secret-manager>=2.24.0",
+  "google-cloud-pubsub>=2.31.1",
+  "google-cloud-texttospeech>=2.27.0",
+  "google-genai>=1.29.0",
+  "httpx>=0.28.1",
+  "mcp>=1.13.0,<2",
+  "opentelemetry-api>=1.36.0",
+  "opentelemetry-sdk>=1.36.0",
+  "pydantic-settings>=2.10.1",
+  "psycopg[binary]>=3.2.9",
+  "python-multipart>=0.0.20",
+  "sqlalchemy>=2.0.43",
+  "uvicorn[standard]>=0.35.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.1",
+  "pytest-asyncio>=1.1.0",
+  "pytest-cov>=6.2.1",
+  "respx>=0.22.0",
+  "ruff>=0.12.8"
+]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
+ignore = ["B008", "E501", "S101", "S105", "S106", "S603"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.setuptools.packages.find]
+include = ["apps*"]
+exclude = ["apps.web*"]

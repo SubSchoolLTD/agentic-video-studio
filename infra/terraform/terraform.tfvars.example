@@ -1,0 +1,11 @@
+project_id                = "your-isolated-project-id"
+environment               = "prod"
+sql_user_password         = "supply-with-TF_VAR_sql_user_password-instead"
+api_image                 = "us-central1-docker.pkg.dev/your-isolated-project-id/agentic-video-studio/api:COMMIT_SHA"
+web_image                 = "us-central1-docker.pkg.dev/your-isolated-project-id/agentic-video-studio/web:COMMIT_SHA"
+clickhouse_image          = "us-central1-docker.pkg.dev/your-isolated-project-id/agentic-video-studio/clickhouse:26.5"
+grafana_image             = "us-central1-docker.pkg.dev/your-isolated-project-id/agentic-video-studio/grafana:13.1"
+app_base_url              = "https://api.example.com"
+web_base_url              = "https://studio.example.com"
+deploy_runtime_services = false
+github_repository       = "your-owner/agentic-video-studio"

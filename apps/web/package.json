@@ -1,0 +1,31 @@
+{
+  "name": "@avs/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev --host 127.0.0.1 --port 3000",
+    "build": "nuxt build",
+    "preview": "nuxt preview --host 127.0.0.1 --port 3000",
+    "lint": "eslint app tests nuxt.config.ts playwright.config.ts",
+    "typecheck": "nuxi typecheck",
+    "test": "vitest run --exclude 'tests/e2e/**' --passWithNoTests",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "lucide-vue-next": "^0.468.0",
+    "nuxt": "^4.1.2",
+    "vue": "^3.5.18"
+  },
+  "devDependencies": {
+    "@nuxt/eslint": "^1.9.0",
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.3.0",
+    "@vue/test-utils": "^2.4.6",
+    "eslint": "^9.34.0",
+    "happy-dom": "^18.0.1",
+    "typescript": "^5.9.2",
+    "vue-tsc": "^3.1.5",
+    "vitest": "^3.2.4"
+  }
+}

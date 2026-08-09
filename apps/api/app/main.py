@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
+
+from .config import get_settings
+from .database import SessionLocal, init_database
+from .routes import router
+from .seed import seed_demo
+from .storage import MediaStorage
+from .workflow import WorkflowManager
+
+settings = get_settings()
+logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_database()
+    with SessionLocal() as session:
+        seed_demo(session)
+    app.state.workflow = WorkflowManager(settings)
+    app.state.workflow.resume_pending()
+    yield
+    for task in list(app.state.workflow.tasks.values()):
+        if not task.done():
+            task.cancel()
+
+
+app = FastAPI(
+    title="Agentic Video Studio API",
+    version="0.1.0",
+    description="Evidence-first, tenant-aware production orchestration for short-form video.",
+    openapi_version="3.1.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
+    request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    detail = exc.detail
+    message = detail if isinstance(detail, str) else "Request failed"
+    code = "request_failed"
+    details = detail if isinstance(detail, dict) else None
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+                "request_id": request_id,
+                "retryable": exc.status_code >= 500,
+            }
+        },
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "validation_error",
+                "message": "Request validation failed.",
+                "details": {"errors": exc.errors()},
+                "request_id": request_id,
+                "retryable": False,
+            }
+        },
+    )
+
+
+@app.get("/", include_in_schema=False)
+def root() -> dict[str, str]:
+    return {"service": "Agentic Video Studio", "docs": "/docs", "health": "/v1/health"}
+
+
+@app.get("/media/{asset_path:path}", include_in_schema=False)
+def media(asset_path: str):
+    storage = MediaStorage(settings)
+    local_path = storage.resolve_local(asset_path)
+    if not local_path:
+        raise HTTPException(404, "Media asset not found")
+    if local_path.is_file():
+        return FileResponse(local_path)
+    remote = storage.download_bytes(asset_path)
+    if not remote:
+        raise HTTPException(404, "Media asset not found")
+    body, content_type = remote
+    return Response(body, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
+
+
+app.include_router(router)

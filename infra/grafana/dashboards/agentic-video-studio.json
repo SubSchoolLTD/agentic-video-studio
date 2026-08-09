@@ -1,0 +1,84 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "blue", "value": 100}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"}, "editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT count() AS events FROM events_v1 WHERE $__timeFilter(occurred_at)", "refId": "A"}],
+      "title": "Domain events",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"}, "editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT countIf(event_type LIKE '%failed%' OR event_type LIKE '%blocked%') AS failures FROM events_v1 WHERE $__timeFilter(occurred_at)", "refId": "A"}],
+      "title": "Failures and blocks",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 22, "gradientMode": "opacity", "hideFrom": {"legend": false, "tooltip": false, "viz": false}, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": false, "stacking": {"group": "A", "mode": "none"}, "thresholdsStyle": {"mode": "off"}}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"hideZeros": false, "mode": "single", "sort": "none"}},
+      "targets": [{"datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"}, "editorType": "sql", "format": 0, "queryType": "table", "rawSql": "SELECT toStartOfMinute(occurred_at) AS time, count() AS events FROM events_v1 WHERE $__timeFilter(occurred_at) GROUP BY time ORDER BY time", "refId": "A"}],
+      "title": "Pipeline activity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 4,
+      "options": {"displayMode": "gradient", "legend": {"calcs": [], "displayMode": "list", "placement": "right", "showLegend": false}, "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": true}, "showUnfilled": true, "sizing": "auto"},
+      "targets": [{"datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"}, "editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT event_type, count() AS events FROM events_v1 WHERE $__timeFilter(occurred_at) GROUP BY event_type ORDER BY events DESC LIMIT 10", "refId": "A"}],
+      "title": "Top event types",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"},
+      "fieldConfig": {"defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": false}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 13},
+      "id": 5,
+      "options": {"cellHeight": "sm", "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false}, "showHeader": true},
+      "targets": [{"datasource": {"type": "grafana-clickhouse-datasource", "uid": "avs-clickhouse"}, "editorType": "sql", "format": 1, "queryType": "table", "rawSql": "SELECT occurred_at, event_type, resource_type, resource_id, project_id FROM events_v1 WHERE $__timeFilter(occurred_at) ORDER BY occurred_at DESC LIMIT 100", "refId": "A"}],
+      "title": "Latest domain events",
+      "type": "table"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": ["agentic-video-studio", "pipeline", "clickhouse"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Agentic Video Studio · Pipeline",
+  "uid": "avs-pipeline",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,0 +1,15 @@
+FROM grafana/grafana:13.1
+
+USER root
+RUN grafana cli plugins install grafana-clickhouse-datasource
+COPY infra/grafana/provisioning /etc/grafana/provisioning
+COPY infra/grafana/dashboards /var/lib/grafana/dashboards
+RUN chown -R grafana:root /etc/grafana/provisioning /var/lib/grafana/dashboards
+USER grafana
+
+ENV GF_SERVER_HTTP_PORT=8080 \
+    GF_USERS_ALLOW_SIGN_UP=false \
+    GF_AUTH_ANONYMOUS_ENABLED=false \
+    GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
+
+EXPOSE 8080

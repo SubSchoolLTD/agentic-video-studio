@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Agentic Video Studio ClickHouse
+    uid: avs-clickhouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    isDefault: true
+    editable: false
+    jsonData:
+      host: $CLICKHOUSE_HOST
+      port: 443
+      protocol: http
+      secure: true
+      username: $CLICKHOUSE_USER
+      defaultDatabase: default
+      dialTimeout: 10
+      queryTimeout: 30
+      validateSql: true
+    secureJsonData:
+      password: $CLICKHOUSE_PASSWORD

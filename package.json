@@ -1,0 +1,14 @@
+{
+  "name": "agentic-video-studio",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter @avs/web dev",
+    "build": "pnpm --filter @avs/web build",
+    "lint": "pnpm --filter @avs/web lint",
+    "typecheck": "pnpm --filter @avs/web typecheck",
+    "test:web": "pnpm --filter @avs/web test",
+    "test:e2e": "pnpm --filter @avs/web test:e2e"
+  }
+}

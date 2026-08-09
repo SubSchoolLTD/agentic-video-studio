@@ -1,0 +1,16 @@
+main:
+  params: [args]
+  steps:
+    - collectDueMetrics:
+        call: http.post
+        args:
+          url: ${args.api_url + "/v1/internal/metrics/collect-due"}
+          auth:
+            type: OIDC
+            audience: ${args.api_url}
+          timeout: 300
+        result: collectorResponse
+    - returnResult:
+        return:
+          status_code: ${collectorResponse.code}
+          body: ${collectorResponse.body}

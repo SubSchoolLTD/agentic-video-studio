@@ -1,0 +1,6 @@
+FROM clickhouse/clickhouse-server:26.5
+
+COPY infra/clickhouse/config.d/cloud-run.xml /etc/clickhouse-server/config.d/cloud-run.xml
+COPY infra/clickhouse/initdb.d/001_events.sql /docker-entrypoint-initdb.d/001_events.sql
+
+EXPOSE 8080

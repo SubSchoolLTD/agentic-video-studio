@@ -5,14 +5,16 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+import jwt
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .auth import active_membership, decode_access_token
 from .config import Settings, get_settings
 from .database import get_db
-from .models import Resource
+from .models import Resource, User
 from .repository import find_api_key
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -25,10 +27,21 @@ class Principal:
     project_id: str | None
     role: str
     scopes: frozenset[str]
+    email: str | None = None
+    display_name: str | None = None
+    is_platform_admin: bool = False
+    project_scope: frozenset[str] | None = None
 
     def require(self, scope: str) -> None:
         if "admin" not in self.scopes and scope not in self.scopes:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing scope: {scope}")
+
+    def require_platform_admin(self) -> None:
+        if not self.is_platform_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Platform administrator access required")
+
+    def can_access_project(self, project_id: str | None) -> bool:
+        return project_id is None or self.project_scope is None or project_id in self.project_scope
 
 
 ALL_SCOPES = frozenset(
@@ -53,6 +66,17 @@ ALL_SCOPES = frozenset(
         "webhooks:write",
     }
 )
+
+ROLE_SCOPES: dict[str, frozenset[str]] = {
+    "owner": ALL_SCOPES,
+    "admin": ALL_SCOPES,
+    "editor": frozenset(scope for scope in ALL_SCOPES if scope != "admin" and not scope.startswith("integrations:")),
+    "publisher": frozenset(
+        {"projects:read", "generations:read", "videos:read", "videos:approve", "publications:read", "publications:write", "analytics:read"}
+    ),
+    "analyst": frozenset({"projects:read", "sources:read", "research:read", "generations:read", "videos:read", "publications:read", "analytics:read"}),
+    "viewer": frozenset({"projects:read", "sources:read", "research:read", "generations:read", "videos:read", "publications:read", "analytics:read"}),
+}
 
 
 def get_principal(
@@ -85,7 +109,39 @@ def get_principal(
             project_id=None,
             role="owner",
             scopes=ALL_SCOPES,
+            email="demo@example.invalid",
+            display_name="Demo User",
+            is_platform_admin=True,
         )
+    if settings.app_auth_mode == "jwt":
+        try:
+            claims = decode_access_token(token, settings)
+        except jwt.PyJWTError:
+            claims = None
+        if claims:
+            user = session.get(User, str(claims["sub"]))
+            if not user or user.status != "active" or user.email_verified_at is None:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is not active")
+            if int(claims.get("ver", 0)) != user.token_version:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been revoked")
+            organization_id = x_organization_id or str(claims["org"])
+            membership = active_membership(session, user.id, organization_id)
+            if not membership:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
+            role = str(membership.data.get("role") or "viewer")
+            raw_scope = membership.data.get("project_scope") or ["*"]
+            project_scope = None if "*" in raw_scope else frozenset(str(item) for item in raw_scope)
+            return Principal(
+                actor_id=user.id,
+                organization_id=organization_id,
+                project_id=next(iter(project_scope)) if project_scope and len(project_scope) == 1 else None,
+                role=role,
+                scopes=ROLE_SCOPES.get(role, ROLE_SCOPES["viewer"]),
+                email=user.email,
+                display_name=user.display_name,
+                is_platform_admin=bool(user.is_platform_admin),
+                project_scope=project_scope,
+            )
     record = find_api_key(session, token, settings.api_key_pepper)
     if not record:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
@@ -95,6 +151,7 @@ def get_principal(
         project_id=record.project_id,
         role="service_account",
         scopes=frozenset(scope for scope in record.scopes.split(" ") if scope),
+        project_scope=frozenset({record.project_id}),
     )
 
 

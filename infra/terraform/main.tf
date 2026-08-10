@@ -29,13 +29,15 @@ locals {
 
   secret_names = toset([
     "api-key-pepper",
-    "app-demo-token",
     "clickhouse-password",
     "cloud-sql-password",
     "database-url",
     "google-api-key",
     "grafana-admin-password",
     "parallel-api-key",
+    "jwt-secret",
+    "sendpulse-id",
+    "sendpulse-secret",
     "secret-encryption-key",
     "webhook-signing-secret",
     "youtube-client-id",
@@ -56,11 +58,19 @@ locals {
 
   api_plain_env = {
     APP_ENV                        = var.environment
-    APP_AUTH_MODE                  = "demo"
+    APP_AUTH_MODE                  = "jwt"
     APP_BASE_URL                   = var.app_base_url
     WEB_BASE_URL                   = var.web_base_url
     ALLOWED_ORIGINS                = join(",", concat([var.web_base_url], var.additional_web_origins))
     PROVIDER_MODE                  = "live"
+    EMAIL_DELIVERY_MODE            = "sendpulse"
+    EMAIL_FROM_NAME                = "Framewise"
+    EMAIL_FROM_EMAIL               = "hello@subschool.us"
+    SENDPULSE_TEMPLATE_ID          = "266399"
+    SENDPULSE_TEMPLATE_NAME        = "subschool_main"
+    BOOTSTRAP_ADMIN_EMAIL          = "maksim@subschool.us"
+    BOOTSTRAP_ADMIN_NAME           = "Maksim Mamchur"
+    SEED_DEMO_DATA                 = "false"
     GOOGLE_CLOUD_PROJECT           = var.project_id
     GOOGLE_CLOUD_LOCATION          = var.region
     GOOGLE_CLOUD_STORAGE_BUCKET    = google_storage_bucket.media.name
@@ -79,11 +89,13 @@ locals {
 
   api_secret_env = {
     API_KEY_PEPPER         = "api-key-pepper"
-    APP_DEMO_TOKEN         = "app-demo-token"
     CLICKHOUSE_PASSWORD    = "clickhouse-password"
     DATABASE_URL           = "database-url"
     GOOGLE_API_KEY         = "google-api-key"
     PARALLEL_API_KEY       = "parallel-api-key"
+    JWT_SECRET             = "jwt-secret"
+    SENDPULSE_ID           = "sendpulse-id"
+    SENDPULSE_SECRET       = "sendpulse-secret"
     SECRET_ENCRYPTION_KEY  = "secret-encryption-key"
     WEBHOOK_SIGNING_SECRET = "webhook-signing-secret"
     YOUTUBE_CLIENT_ID      = "youtube-client-id"
@@ -667,15 +679,6 @@ resource "google_cloud_run_v2_service" "web" {
       env {
         name  = "NUXT_PUBLIC_GRAFANA_URL"
         value = google_cloud_run_v2_service.grafana[0].uri
-      }
-      env {
-        name = "NUXT_PUBLIC_DEMO_TOKEN"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.runtime["app-demo-token"].secret_id
-            version = "latest"
-          }
-        }
       }
     }
   }

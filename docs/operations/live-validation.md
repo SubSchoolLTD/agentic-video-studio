@@ -16,7 +16,7 @@ Validated against the production deployment on 2026-08-09.
 - Technical QA: both ratios passed; publish readiness 89; predicted performance 82 at 0.53 confidence
 - Manual review: completed and approved; no public publication was triggered
 - SHA-256 (9:16): `381696e2ccfa0e94f783bbe5be2e7c3f617efe9bbff951927d6a7d1e64a063d8`
-- [Rendered proof video](https://agentic-video-studio-api-670288630676.us-central1.run.app/media/prj_subschool/gener_0c7a514e2be252e3/renders/version_1_9x16.mp4)
+- Rendered proof video is retained in private Cloud Storage and is exposed only through an expiring URL returned to an authorized SubSchool workspace member.
 
 The live job crossed a rolling API deployment while generating scenes. Revision `agentic-video-studio-api-00003-bwc` resumed from the persisted storyboard/scene checkpoint and finished without duplicate provider work, validating the durable recovery path in production.
 

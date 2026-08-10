@@ -4,15 +4,18 @@ import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from .admin_routes import router as admin_router
+from .auth_routes import router as auth_router
+from .billing_routes import router as billing_router
 from .config import get_settings
 from .database import SessionLocal, init_database
 from .routes import router
-from .seed import seed_demo
+from .seed import seed_application
 from .storage import MediaStorage
 from .workflow import WorkflowManager
 
@@ -24,7 +27,7 @@ logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.I
 async def lifespan(app: FastAPI):
     init_database()
     with SessionLocal() as session:
-        seed_demo(session)
+        seed_application(session, settings)
     app.state.workflow = WorkflowManager(settings)
     app.state.workflow.resume_pending()
     yield
@@ -108,8 +111,16 @@ def root() -> dict[str, str]:
 
 
 @app.get("/media/{asset_path:path}", include_in_schema=False)
-def media(asset_path: str):
+def media(
+    asset_path: str,
+    org: str = Query(min_length=3, max_length=64),
+    expires: int = Query(gt=0),
+    sig: str = Query(min_length=64, max_length=64),
+):
     storage = MediaStorage(settings)
+    public_path = f"/media/{asset_path}"
+    if not storage.verify_signed_path(public_path, org, expires, sig):
+        raise HTTPException(403, "Media link is invalid or expired")
     local_path = storage.resolve_local(asset_path)
     if not local_path:
         raise HTTPException(404, "Media asset not found")
@@ -123,3 +134,6 @@ def media(asset_path: str):
 
 
 app.include_router(router)
+app.include_router(auth_router)
+app.include_router(billing_router)
+app.include_router(admin_router)

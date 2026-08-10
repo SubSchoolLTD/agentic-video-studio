@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_env: str = "local"
-    app_auth_mode: str = "demo"
+    app_auth_mode: str = "jwt"
     app_demo_token: str = "demo-token"
     app_base_url: str = "http://localhost:8000"
     web_base_url: str = "http://localhost:3000"
@@ -20,6 +20,28 @@ class Settings(BaseSettings):
     storage_root: Path = Path("./local_data/media")
     provider_mode: str = "mock"
     log_level: str = "INFO"
+
+    jwt_secret: str = "development-only-change-me"
+    jwt_issuer: str = "agentic-video-studio"
+    jwt_audience: str = "agentic-video-studio-api"
+    access_token_minutes: int = 15
+    refresh_token_days: int = 30
+    email_token_minutes: int = 60
+    password_reset_minutes: int = 30
+    email_min_resend_seconds: int = 60
+    email_max_per_hour: int = 5
+    email_delivery_mode: str = "log"
+    email_from_name: str = "Framewise"
+    email_from_email: str = "hello@subschool.us"
+    sendpulse_id: str = ""
+    sendpulse_secret: str = ""
+    sendpulse_template_id: str = "266399"
+    sendpulse_template_name: str = "subschool_main"
+    bootstrap_admin_email: str = ""
+    bootstrap_admin_name: str = "Maksim Mamchur"
+    seed_demo_data: bool = False
+    signup_credit_tokens: int = 1_000
+    test_support_secret: str = "test-support-only"
 
     google_cloud_project: str = ""
     google_cloud_location: str = "us-central1"
@@ -82,9 +104,34 @@ class Settings(BaseSettings):
             if database_path and database_path != ":memory:":
                 Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
+    def validate_runtime(self) -> None:
+        if self.app_env == "production":
+            if self.app_auth_mode != "jwt":
+                raise RuntimeError("Production requires APP_AUTH_MODE=jwt")
+            if self.jwt_secret in {"", "development-only-change-me"} or len(self.jwt_secret) < 32:
+                raise RuntimeError("Production requires a strong JWT_SECRET")
+            if self.provider_mode != "live":
+                raise RuntimeError("Production requires PROVIDER_MODE=live")
+            missing = []
+            if not self.parallel_api_key:
+                missing.append("PARALLEL_API_KEY")
+            if not self.google_cloud_project:
+                missing.append("GOOGLE_CLOUD_PROJECT")
+            if not self.google_cloud_storage_bucket:
+                missing.append("GOOGLE_CLOUD_STORAGE_BUCKET")
+            if self.email_delivery_mode != "sendpulse":
+                missing.append("EMAIL_DELIVERY_MODE=sendpulse")
+            if not self.sendpulse_id:
+                missing.append("SENDPULSE_ID")
+            if not self.sendpulse_secret:
+                missing.append("SENDPULSE_SECRET")
+            if missing:
+                raise RuntimeError(f"Production configuration is incomplete: {', '.join(missing)}")
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_local_directories()
+    settings.validate_runtime()
     return settings

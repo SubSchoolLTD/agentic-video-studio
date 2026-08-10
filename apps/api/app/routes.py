@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from .billing import charge_feature
 from .cloud_auth import require_google_service_identity
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db
@@ -35,7 +36,7 @@ from .events import EventSink
 from .ingestion import extract_article, fetch_public_text, prompt_injection_score
 from .metrics import collect_youtube_metrics, mock_youtube_metrics, observed_performance
 from .models import ApiKeyRecord, Resource
-from .providers import ParallelSearchProvider
+from .providers import BrandProfileProvider, ParallelSearchProvider, TopicCandidateProvider
 from .publishing import (
     PROVIDER_CAPABILITIES,
     confirmation_token,
@@ -80,7 +81,6 @@ from .schemas import (
     WebhookPatch,
 )
 from .security import ALL_SCOPES, Principal, get_principal, validate_public_url
-from .seed import SUBSCHOOL_BRAND
 from .storage import MediaStorage
 from .workflow import WorkflowManager, initial_stage_state
 
@@ -109,7 +109,7 @@ def require_resource(
         kind=kind,
         project_id=project_id,
     )
-    if not resource or (principal.project_id and resource.project_id not in {None, principal.project_id}):
+    if not resource or not principal.can_access_project(resource.project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
     return resource
 
@@ -148,6 +148,9 @@ def me(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
         "project_id": principal.project_id,
         "role": principal.role,
         "scopes": sorted(principal.scopes),
+        "email": principal.email,
+        "display_name": principal.display_name,
+        "is_platform_admin": principal.is_platform_admin,
     }
 
 
@@ -228,9 +231,11 @@ def create_organization(
 @router.post("/projects", status_code=status.HTTP_202_ACCEPTED, tags=["projects"])
 def create_project(
     payload: ProjectCreate,
+    background: BackgroundTasks,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     principal: Principal = Depends(get_principal),
     session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     principal.require("projects:write")
     body = payload.model_dump(mode="json")
@@ -271,18 +276,44 @@ def create_project(
     project.project_id = project.id
     session.add(project)
     session.commit()
-    analysis = repo.add(
-        kind="project_analysis",
-        organization_id=principal.organization_id,
-        project_id=project.id,
-        status="queued",
-        data={"website_url": str(payload.website_url), "provider": "parallel"},
-    )
+    analysis = None
+    if payload.analyze_website:
+        analysis = repo.add(
+            kind="project_analysis",
+            organization_id=principal.organization_id,
+            project_id=project.id,
+            status="queued",
+            data={"website_url": str(payload.website_url), "providers": ["parallel", "google"]},
+        )
+        try:
+            charge_feature(
+                session,
+                organization_id=principal.organization_id,
+                user_id=principal.actor_id,
+                feature_key="project.website_analysis",
+                quantity=1,
+                reference_id=analysis.id,
+            )
+        except HTTPException:
+            session.delete(analysis)
+            session.delete(project)
+            session.commit()
+            raise
+        background.add_task(
+            _analyze_project_task,
+            project_id=project.id,
+            analysis_id=analysis.id,
+            organization_id=principal.organization_id,
+            settings=settings,
+        )
     response = {
         "project_id": project.id,
         "status": project.status,
-        "analysis_job_id": analysis.id,
-        "links": {"self": f"/v1/projects/{project.id}", "job": f"/v1/project-analyses/{analysis.id}"},
+        "analysis_job_id": analysis.id if analysis else None,
+        "links": {
+            "self": f"/v1/projects/{project.id}",
+            **({"job": f"/v1/project-analyses/{analysis.id}"} if analysis else {}),
+        },
     }
     if idempotency_key:
         save_idempotent_response(
@@ -370,22 +401,30 @@ async def _analyze_project_task(
             packet = await ParallelSearchProvider(settings).search(
                 f"Analyze the public identity, audience, products, claims, and external context of {project.data['website_url']}"
             )
-            profile = {
-                **SUBSCHOOL_BRAND,
-                "identity": {
-                    **SUBSCHOOL_BRAND["identity"],
-                    "name": project.data["name"],
-                    "website": project.data["website_url"],
-                },
-                "confirmed": False,
-                "confidence": 0.78,
-                "source_ids": [source["id"] for source in packet.sources],
-            }
+            profile = await BrandProfileProvider(settings).analyze(
+                project_name=project.data["name"],
+                website_url=project.data["website_url"],
+                default_language=project.data.get("default_language", "en"),
+                regions=list(project.data.get("regions") or []),
+                brief=dict(project.data.get("brief") or {}),
+                evidence=packet,
+            )
+            latest_profile = session.scalar(
+                select(Resource)
+                .where(
+                    Resource.organization_id == organization_id,
+                    Resource.project_id == project_id,
+                    Resource.kind == "brand_profile",
+                )
+                .order_by(Resource.version.desc())
+            )
+            version = int(latest_profile.version) + 1 if latest_profile else 1
             brand = repo.add(
                 kind="brand_profile",
                 organization_id=organization_id,
                 project_id=project_id,
                 status="review_required",
+                version=version,
                 data=profile,
             )
             repo.update(
@@ -393,7 +432,7 @@ async def _analyze_project_task(
                 status="completed",
                 data={"brand_profile_id": brand.id, "parallel_request_ids": [packet.request_id], "sources": packet.sources},
             )
-            repo.update(project, status="review_required", data={"brand_profile_version": 1})
+            repo.update(project, status="review_required", data={"brand_profile_version": version})
         except Exception as exc:
             repo.update(analysis, status="failed", data={"error": str(exc), "retryable": True})
 
@@ -414,8 +453,21 @@ def analyze_website(
         organization_id=principal.organization_id,
         project_id=project_id,
         status="queued",
-        data={"website_url": project.data["website_url"], "provider": "parallel"},
+        data={"website_url": project.data["website_url"], "providers": ["parallel", "google"]},
     )
+    try:
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key="project.website_analysis",
+            quantity=1,
+            reference_id=analysis.id,
+        )
+    except HTTPException:
+        session.delete(analysis)
+        session.commit()
+        raise
     background.add_task(
         _analyze_project_task,
         project_id=project_id,
@@ -1502,18 +1554,27 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                     "completed_at": datetime.now(UTC).isoformat(),
                 },
             )
+            brand_resource = session.scalar(
+                select(Resource)
+                .where(
+                    Resource.kind == "brand_profile",
+                    Resource.organization_id == run.organization_id,
+                    Resource.project_id == run.project_id,
+                )
+                .order_by(Resource.version.desc())
+            )
+            brand = brand_resource.data if brand_resource else {}
+            drafts = await TopicCandidateProvider(settings).propose(
+                objective=run.data["objective"],
+                brand=brand,
+                evidence=packet,
+                max_candidates=int(run.data.get("max_candidates", 5)),
+            )
             score = min(92, 61 + len(packet.sources) * 7)
-            for index in range(min(int(run.data.get("max_candidates", 5)), 3)):
-                title = (
-                    "One lesson, three reusable learning assets",
-                    "The feedback loop most course creators skip",
-                    "A 30-second fix for an unclear course outcome",
-                )[index]
-                angle = (
-                    "Show the three-part transformation with one concrete example",
-                    "Contrast late generic feedback with immediate actionable practice",
-                    "Rewrite a vague topic as a measurable learner outcome",
-                )[index]
+            created_count = 0
+            for index, draft in enumerate(drafts):
+                title = draft["title"]
+                angle = draft["angle"]
                 fingerprint = hashlib.sha256(f"{title}|{angle}".lower().encode()).hexdigest()
                 muted = False
                 for mute in repo.list(
@@ -1541,9 +1602,11 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                         "research_run_id": run.id,
                         "title": title,
                         "angle": angle,
-                        "audience": "Independent teachers",
-                        "why_now": "Relevant to active creator workflows and current short-form discovery.",
-                        "source_ids": [source["id"] for source in packet.sources],
+                        "audience": draft["audience"],
+                        "objective": draft["objective"],
+                        "format": draft["format"],
+                        "why_now": draft["why_now"],
+                        "source_ids": draft["source_ids"],
                         "supported_claims": [claim for claim in packet.claims if claim.get("status") == "supported"],
                         "unresolved_questions": [
                             claim.get("claim") or claim.get("text")
@@ -1554,8 +1617,14 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                         "score_confidence": min(0.86, 0.48 + len(packet.sources) * 0.08),
                         "risk_flags": [],
                         "freshness_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+                        "provider_trace": {
+                            "provider": "google" if settings.uses_live_research else "deterministic_mock",
+                            "model": settings.gemini_model if settings.uses_live_research else None,
+                            "parallel_request_id": packet.request_id,
+                        },
                     },
                 )
+                created_count += 1
                 if run.data.get("trigger_type") == "backlog":
                     repo.add(
                         kind="idea",
@@ -1565,9 +1634,9 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                         data={
                             "title": title,
                             "hook": angle,
-                            "audience": "Independent teachers",
-                            "objective": "education",
-                            "format": "educational_explainer",
+                            "audience": draft["audience"],
+                            "objective": draft["objective"],
+                            "format": draft["format"],
                             "topic_candidate_id": candidate.id,
                             "research_run_id": run.id,
                             "source_ids": candidate.data["source_ids"],
@@ -1583,7 +1652,7 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                 event_type="research.completed",
                 resource_type="research_run",
                 resource_id=run.id,
-                payload={"candidate_count": min(int(run.data.get("max_candidates", 5)), 3)},
+                payload={"candidate_count": created_count},
                 correlation_id=run.id,
             )
         except Exception as exc:
@@ -1621,6 +1690,19 @@ def create_research_run(
         status="queued",
         data={**payload.model_dump(), "trigger_type": "manual", "provider": "parallel"},
     )
+    try:
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key="research.run",
+            quantity=1,
+            reference_id=run.id,
+        )
+    except HTTPException:
+        session.delete(run)
+        session.commit()
+        raise
     background.add_task(_run_research_task, run.id, settings)
     return {"research_run_id": run.id, "status": "queued", "status_url": f"/v1/research-runs/{run.id}"}
 
@@ -1693,8 +1775,8 @@ def select_candidate(
             "title": candidate.data.get("title"),
             "hook": candidate.data.get("angle"),
             "audience": candidate.data.get("audience"),
-            "objective": "education",
-            "format": (candidate.data.get("suggested_formats") or ["educational_explainer"])[0],
+            "objective": candidate.data.get("objective") or "awareness",
+            "format": candidate.data.get("format") or (candidate.data.get("suggested_formats") or ["explainer"])[0],
             "topic_candidate_id": candidate.id,
             "research_run_id": candidate.data.get("research_run_id"),
             "source_ids": candidate.data.get("source_ids", []),
@@ -2080,6 +2162,19 @@ async def create_generation(
             "idempotency_key": idempotency_key,
         },
     )
+    try:
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key="video.generate",
+            quantity=len(payload.aspect_ratios) * payload.variants,
+            reference_id=job.id,
+        )
+    except HTTPException:
+        session.delete(job)
+        session.commit()
+        raise
     response = {
         "generation_job_id": job.id,
         "status": "queued",
@@ -2367,6 +2462,19 @@ def regenerate_scene(
             "selective": True,
         },
     )
+    try:
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key="video.scene_regenerate",
+            quantity=1,
+            reference_id=attempt.id,
+        )
+    except HTTPException:
+        session.delete(attempt)
+        session.commit()
+        raise
     repo.update(scene, status="regenerating", data={"attempt": attempt_no, "latest_attempt_id": attempt.id, "visual_prompt": prompt})
     return {"scene_id": scene.id, "attempt_id": attempt.id, "status": "queued", "locked_other_scenes": True}
 
@@ -2511,7 +2619,7 @@ def authorize_connection(
             if provider == "tiktok"
             else None,
         }
-    if settings.provider_mode == "mock" or not (settings.youtube_client_id and settings.youtube_client_secret):
+    if settings.provider_mode == "mock":
         connection = repo.add(
             kind="connection",
             organization_id=principal.organization_id,
@@ -2527,6 +2635,8 @@ def authorize_connection(
             },
         )
         return {"connection_id": connection.id, "status": "limited", "mode": "mock"}
+    if not (settings.youtube_client_id and settings.youtube_client_secret):
+        raise HTTPException(503, "YouTube OAuth is not configured for this deployment")
     state_value = secrets.token_urlsafe(32)
     state_record = repo.add(
         kind="oauth_state",
@@ -2812,7 +2922,7 @@ async def pause_provider_publications(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    principal.require("admin")
+    principal.require_platform_admin()
     if provider not in PROVIDER_CAPABILITIES:
         raise HTTPException(404, "Provider not found")
     repo = ResourceRepository(session)
@@ -2850,7 +2960,7 @@ async def resume_provider_publications(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    principal.require("admin")
+    principal.require_platform_admin()
     control = _active_provider_pause(session, provider)
     if not control:
         return {"provider": provider, "status": "active"}
@@ -3277,10 +3387,9 @@ def analytics_summary(
             "budget_limit_usd": budget.get("monthly_usd", 0),
         },
         "latest_metrics": [ResourceRepository.serialize(item) for item in metrics[:5]],
-        "patterns": [
-            {"name": "Question hooks", "delta_percentile": 12.4, "confidence": 0.58, "sample_size": 7},
-            {"name": "20–35 second explainers", "delta_percentile": 8.1, "confidence": 0.51, "sample_size": 6},
-        ],
+        # Patterns are only emitted after a real cohort-analysis job persists them.
+        # Returning an empty set is preferable to presenting synthetic insight as tenant data.
+        "patterns": [],
         "provider_comparison_warning": "Rates are normalized within platform/account cohorts; raw views are not compared across platforms.",
     }
 

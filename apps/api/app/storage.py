@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import mimetypes
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 from .config import Settings
 
@@ -43,6 +47,20 @@ class MediaStorage:
             "public_path": f"/media/{relative}",
         }
 
+    def signed_path(self, public_path: str, organization_id: str, *, ttl_seconds: int = 3600) -> str:
+        clean = public_path.split("?", 1)[0]
+        expires = int(time.time()) + ttl_seconds
+        message = f"{clean}:{organization_id}:{expires}".encode()
+        signature = hmac.new(self.settings.jwt_secret.encode(), message, hashlib.sha256).hexdigest()
+        return f"{clean}?org={quote(organization_id, safe='')}&expires={expires}&sig={signature}"
+
+    def verify_signed_path(self, public_path: str, organization_id: str, expires: int, signature: str) -> bool:
+        if expires < int(time.time()) or expires > int(time.time()) + 86400:
+            return False
+        message = f"{public_path}:{organization_id}:{expires}".encode()
+        expected = hmac.new(self.settings.jwt_secret.encode(), message, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
     def materialize(self, *, storage_uri: str | None, local_path: Path) -> Path:
         if local_path.exists():
             return local_path
@@ -77,4 +95,3 @@ class MediaStorage:
             blob.download_as_bytes(timeout=180),
             blob.content_type or mimetypes.guess_type(asset_path)[0] or "application/octet-stream",
         )
-

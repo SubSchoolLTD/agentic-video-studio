@@ -3,21 +3,26 @@ import { ArrowUpRight, Check, ChevronRight, CircleHelp, Clock3, EyeOff, External
 
 const { api, projectId } = useApi()
 const { show } = useToast()
-const objective = ref('Find fresh, evidence-backed short-form topics for independent teachers creating online courses.')
+const objective = ref('Find fresh, evidence-backed short-form topics for this project and its primary audience.')
 const modalOpen = ref(false)
 const running = ref(false)
 const selectedRun = ref<any>(null)
 
 const { data, refresh } = await useAsyncData('research-radar', async () => {
-  const [runs, candidates] = await Promise.all([
+  const [runs, candidates, project, brand, profiles] = await Promise.all([
     api<any>(`/v1/projects/${projectId.value}/research-runs`),
     api<any>(`/v1/projects/${projectId.value}/topic-candidates`),
+    api<any>(`/v1/projects/${projectId.value}`),
+    api<any>(`/v1/projects/${projectId.value}/brand-profile`),
+    api<any>(`/v1/projects/${projectId.value}/research-profiles`),
   ])
-  return { runs: runs.items, candidates: candidates.items }
-}, { default: () => ({ runs: [], candidates: [] }) })
+  return { runs: runs.items, candidates: candidates.items, project, brand, profiles: profiles.items }
+}, { default: () => ({ runs: [], candidates: [], project: {}, brand: {}, profiles: [] }) })
 
 const candidates = computed(() => data.value.candidates || [])
 const latestRun = computed(() => selectedRun.value || data.value.runs?.[0])
+const researchProfile = computed(() => data.value.profiles?.[0])
+const cadence = computed(() => researchProfile.value?.interval_hours ? `Every ${researchProfile.value.interval_hours}h` : 'On demand')
 
 async function runResearch() {
   running.value = true
@@ -58,7 +63,7 @@ async function muteCandidate(id: string) {
       <UiAppCard><span>Latest provider</span><strong>Parallel Search</strong><small>{{ latestRun?.parallel_request_ids?.[0] || 'Ready for first live call' }}</small></UiAppCard>
       <UiAppCard><span>Evidence sources</span><strong>{{ latestRun?.sources?.length || 0 }}</strong><small>Primary sources preferred</small></UiAppCard>
       <UiAppCard><span>Candidates</span><strong>{{ candidates.length }}</strong><small>Ranked before generation</small></UiAppCard>
-      <UiAppCard><span>Research cadence</span><strong>3× weekly</strong><small>+ source-triggered</small></UiAppCard>
+      <UiAppCard><span>Research cadence</span><strong>{{ cadence }}</strong><small>{{ researchProfile ? 'Configured profile' : 'No schedule configured' }}</small></UiAppCard>
     </div>
 
     <div class="grid-two research-layout">
@@ -82,8 +87,8 @@ async function muteCandidate(id: string) {
           <div v-else class="mini-empty"><CircleHelp :size="20" /><p>A completed research run will show traceable sources and claims here.</p></div>
         </UiAppCard>
         <UiAppCard>
-          <div class="section-heading"><div><h2>Saved profile</h2><p>Teacher creator intelligence</p></div><button class="icon-button"><ArrowUpRight :size="14" /></button></div>
-          <dl class="profile-list"><div><dt>Regions</dt><dd>United States · Global</dd></div><div><dt>Recency</dt><dd>30 days</dd></div><div><dt>Min. sources</dt><dd>2 independent</dd></div><div><dt>Coverage</dt><dd>Demand · news · evergreen · competition</dd></div></dl>
+          <div class="section-heading"><div><h2>Project research profile</h2><p>{{ data.brand?.identity?.name || data.project?.name || 'Current project' }}</p></div><button class="icon-button"><ArrowUpRight :size="14" /></button></div>
+          <dl class="profile-list"><div><dt>Regions</dt><dd>{{ data.brand?.identity?.regions?.join(' · ') || 'Not set' }}</dd></div><div><dt>Recency</dt><dd>{{ researchProfile?.recency_days ? `${researchProfile.recency_days} days` : 'Per request' }}</dd></div><div><dt>Audience</dt><dd>{{ data.brand?.audiences?.primary?.join(' · ') || 'Review brand profile' }}</dd></div><div><dt>Coverage</dt><dd>Demand · news · evergreen · competition</dd></div></dl>
         </UiAppCard>
       </div>
     </div>

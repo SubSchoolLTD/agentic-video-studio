@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Resource
+from .auth import hash_password
+from .billing import ensure_wallet, grant_signup_credit, seed_price_rules
+from .config import Settings
+from .models import Resource, User
 from .repository import ResourceRepository
 
 SUBSCHOOL_BRAND = {
@@ -62,8 +66,8 @@ SUBSCHOOL_BRAND = {
 
 
 def seed_demo(session: Session) -> None:
-    if session.scalar(select(Resource).where(Resource.id == "org_demo")):
-        if not session.scalar(select(Resource).where(Resource.id == "membership_demo_owner")):
+    if session.get(Resource, "org_demo"):
+        if not session.get(Resource, "membership_demo_owner"):
             ResourceRepository(session).add(
                 resource_id="membership_demo_owner",
                 kind="membership",
@@ -212,3 +216,74 @@ def seed_demo(session: Session) -> None:
             "demo_data": True,
         },
     )
+
+
+def seed_application(session: Session, settings: Settings) -> None:
+    seed_price_rules(session)
+    if settings.seed_demo_data or settings.app_auth_mode == "demo":
+        seed_demo(session)
+        ensure_wallet(session, "org_demo")
+        grant_signup_credit(session, "org_demo", "user_demo_owner", 1_000_000)
+    email = settings.bootstrap_admin_email.strip().lower()
+    if not email:
+        return
+    user = session.scalar(select(User).where(User.email == email))
+    if not user:
+        user = User(
+            id=f"usr_{secrets.token_hex(12)}",
+            email=email,
+            password_hash=hash_password(secrets.token_urlsafe(48)),
+            display_name=settings.bootstrap_admin_name,
+            status="active",
+            email_verified_at=datetime.now(UTC),
+            is_platform_admin=True,
+        )
+        session.add(user)
+        session.commit()
+    elif not user.is_platform_admin:
+        user.is_platform_admin = True
+        session.add(user)
+        session.commit()
+    existing_org = session.get(Resource, "org_demo")
+    if not existing_org:
+        return
+    existing_org.data = {**existing_org.data, "name": "SubSchool", "owner_actor_id": user.id}
+    memberships = list(
+        session.scalars(select(Resource).where(Resource.kind == "membership", Resource.organization_id == "org_demo"))
+    )
+    owner = next((item for item in memberships if item.data.get("actor_id") == user.id), None)
+    if not owner:
+        owner = next((item for item in memberships if item.data.get("actor_id") == "user_demo_owner"), None)
+    if owner:
+        owner.data = {**owner.data, "actor_id": user.id, "role": "owner", "project_scope": ["*"]}
+        owner.status = "active"
+        session.add(owner)
+    else:
+        session.add(
+            Resource(
+                id=f"mem_{secrets.token_hex(12)}",
+                organization_id="org_demo",
+                project_id=None,
+                kind="membership",
+                status="active",
+                data={"actor_id": user.id, "role": "owner", "project_scope": ["*"]},
+            )
+        )
+    if settings.app_env == "production":
+        legacy_demo_ids = {"conn_youtube_demo", "metric_demo_1", "strategy_subschool_v1"}
+        legacy_resources = list(
+            session.scalars(select(Resource).where(Resource.organization_id == "org_demo"))
+        )
+        for resource in legacy_resources:
+            is_demo_fixture = (
+                resource.id in legacy_demo_ids
+                or resource.id.startswith("idea_seed_")
+                or bool(resource.data.get("demo_data"))
+                or (resource.kind == "connection" and resource.data.get("mode") == "mock")
+            )
+            if is_demo_fixture:
+                session.delete(resource)
+    session.add(existing_org)
+    session.commit()
+    ensure_wallet(session, "org_demo")
+    grant_signup_credit(session, "org_demo", user.id, settings.signup_credit_tokens)

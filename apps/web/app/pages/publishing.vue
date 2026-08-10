@@ -7,13 +7,21 @@ const composerOpen = ref(Boolean(route.query.version))
 const preparing = ref(false)
 const confirming = ref(false)
 const plan = ref<any>(null)
-const form = reactive<any>({ video_version_id: String(route.query.version || ''), connection_id: 'conn_youtube_demo', platform: 'youtube', title: 'One lesson, three reusable learning assets', caption: 'A practical way to turn one useful lesson into course material, homework and a clear short explanation.', privacy: 'private', allow_comments: true, allow_duet: false, allow_stitch: false, creator_info_acknowledged: false })
+const form = reactive<any>({ video_version_id: String(route.query.version || ''), connection_id: '', platform: 'youtube', title: '', caption: '', privacy: 'private', allow_comments: true, allow_duet: false, allow_stitch: false, creator_info_acknowledged: false })
 const { data, refresh } = await useAsyncData('publishing-data', async () => {
   const [videos, connections, publications] = await Promise.all([api<any>(`/v1/projects/${projectId.value}/videos`),api<any>(`/v1/projects/${projectId.value}/connections`),api<any>(`/v1/projects/${projectId.value}/publications`)])
   return { videos: videos.items, connections: connections.items, publications: publications.items }
 }, { default: () => ({ videos: [], connections: [], publications: [] }) })
 const versions = computed(() => data.value.videos.flatMap((video:any) => (video.versions || []).map((version:any) => ({...version,title:video.title,status:version.status}))))
-watchEffect(() => { if (!form.video_version_id && versions.value[0]) form.video_version_id = versions.value[0].id })
+watchEffect(() => {
+  if (!form.video_version_id && versions.value[0]) form.video_version_id = versions.value[0].id
+  const version = versions.value.find((item:any) => item.id === form.video_version_id)
+  if (version && !form.title) form.title = version.title || 'Video publication'
+  if (!data.value.connections.some((item:any) => item.id === form.connection_id) && data.value.connections[0]) {
+    form.connection_id = data.value.connections[0].id
+    form.platform = data.value.connections[0].provider
+  }
+})
 const selectedVersion = computed(() => versions.value.find((item:any) => item.id === form.video_version_id))
 const selectedConnection = computed(() => data.value.connections.find((item:any) => item.id === form.connection_id))
 async function prepare() { preparing.value=true; try { plan.value=await api('/v1/publications',{method:'POST',headers:{'Idempotency-Key':`composer-${Date.now()}`},body:{...form,synthetic_media_disclosure:true,made_for_kids:false}}); show('Publication plan prepared','Review the provider capability warning before commit.','success') } catch(error:any){ show('Could not prepare publication',error.message,'error') } finally{preparing.value=false} }

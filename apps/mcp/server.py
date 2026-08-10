@@ -11,8 +11,12 @@ from .utils import stable_idempotency_key
 
 mcp = FastMCP("Agentic Video Studio", stateless_http=True, json_response=True)
 API_BASE = os.getenv("APP_BASE_URL", "http://localhost:8000")
-TOKEN = os.getenv("APP_DEMO_TOKEN", "demo-token")
+TOKEN = os.getenv("APP_API_TOKEN", "").strip()
+
+
 async def api(method: str, path: str, *, json: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
+    if not TOKEN:
+        raise RuntimeError("APP_API_TOKEN must contain a tenant-scoped API key or access token")
     request_headers = {"Authorization": f"Bearer {TOKEN}", **(headers or {})}
     async with httpx.AsyncClient(base_url=API_BASE, timeout=60) as client:
         response = await client.request(method, path, json=json, headers=request_headers)
@@ -87,9 +91,16 @@ async def topic_candidate_list(project_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def idea_create(project_id: str, title: str, audience: str, hook: str = "", dry_run: bool = False) -> dict[str, Any]:
+async def idea_create(
+    project_id: str,
+    title: str,
+    audience: str,
+    hook: str = "",
+    objective: str = "awareness",
+    dry_run: bool = False,
+) -> dict[str, Any]:
     """Create a content idea for a single audience."""
-    payload = {"title": title, "audience": audience, "hook": hook, "objective": "education"}
+    payload = {"title": title, "audience": audience, "hook": hook, "objective": objective}
     if dry_run:
         return {"dry_run": True, "action": "idea_create", "payload": payload}
     return await api("POST", f"/v1/projects/{project_id}/ideas", json=payload)

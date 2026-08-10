@@ -22,14 +22,14 @@ export default defineConfig({
   ],
   webServer: externalBaseUrl ? undefined : [
     {
-      command: 'APP_ENV=test PROVIDER_MODE=mock GOOGLE_CLOUD_STORAGE_BUCKET= GOOGLE_PUBSUB_TOPIC= CLICKHOUSE_URL= APP_DEMO_TOKEN=demo-token ALLOWED_ORIGINS=http://127.0.0.1:3100 DATABASE_URL=sqlite:///./local_data/e2e.sqlite3 STORAGE_ROOT=./local_data/e2e_media .venv/bin/uvicorn apps.api.app.main:app --host 127.0.0.1 --port 8100',
+      command: 'APP_ENV=test APP_AUTH_MODE=jwt JWT_SECRET=framewise-e2e-secret-with-more-than-32-characters TEST_SUPPORT_SECRET=framewise-e2e-support EMAIL_DELIVERY_MODE=log SEED_DEMO_DATA=false PROVIDER_MODE=mock GOOGLE_CLOUD_STORAGE_BUCKET= GOOGLE_PUBSUB_TOPIC= CLICKHOUSE_URL= ALLOWED_ORIGINS=http://127.0.0.1:3100 DATABASE_URL=sqlite:////tmp/avs-e2e-${RANDOM}-${RANDOM}.sqlite3 STORAGE_ROOT=./local_data/e2e_auth_media .venv/bin/uvicorn apps.api.app.main:app --host 127.0.0.1 --port 8100',
       cwd: '../..',
       url: 'http://127.0.0.1:8100/v1/health',
       timeout: 30_000,
       reuseExistingServer: false,
     },
     {
-      command: 'NUXT_PUBLIC_API_BASE=http://127.0.0.1:8100 NUXT_PUBLIC_DEMO_TOKEN=demo-token pnpm --filter @avs/web exec nuxt dev --host 127.0.0.1 --port 3100',
+      command: 'NUXT_PUBLIC_API_BASE=http://127.0.0.1:8100 pnpm --filter @avs/web exec nuxt dev --host 127.0.0.1 --port 3100',
       cwd: '../..',
       url: 'http://127.0.0.1:3100',
       timeout: 30_000,

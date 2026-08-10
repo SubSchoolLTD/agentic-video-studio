@@ -117,7 +117,7 @@ class ResourceRepository:
 
     @staticmethod
     def serialize(resource: Resource) -> dict[str, Any]:
-        return {
+        payload = {
             **resource.data,
             "id": resource.id,
             "kind": resource.kind,
@@ -128,6 +128,21 @@ class ResourceRepository:
             "created_at": resource.created_at.isoformat(),
             "updated_at": resource.updated_at.isoformat(),
         }
+        if resource.kind == "video_version" and payload.get("render_url"):
+            from .config import get_settings
+            from .storage import MediaStorage
+
+            payload["render_url"] = MediaStorage(get_settings()).signed_path(
+                str(payload["render_url"]), resource.organization_id
+            )
+        if resource.kind == "publication" and payload.get("export_package_url"):
+            from .config import get_settings
+            from .storage import MediaStorage
+
+            payload["export_package_url"] = MediaStorage(get_settings()).signed_path(
+                str(payload["export_package_url"]), resource.organization_id
+            )
+        return payload
 
 
 def canonical_request_hash(payload: dict[str, Any]) -> str:

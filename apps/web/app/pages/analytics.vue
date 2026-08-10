@@ -23,9 +23,7 @@ const chartLabels = computed(() => snapshots.value.map((item) => {
 
 <template>
   <div>
-    <UiPageHeader eyebrow="Normalized evidence" title="Analytics" description="Raw provider values remain intact; comparisons happen only inside relevant platform, account, format and age cohorts.">
-      <button class="button">Last 28 days</button><button class="button button--primary">Weekly intelligence</button>
-    </UiPageHeader>
+    <UiPageHeader eyebrow="Last 28 days · normalized evidence" title="Analytics" description="Raw provider values remain intact; comparisons happen only inside relevant platform, account, format and age cohorts." />
     <div class="metric-grid">
       <UiAppCard class="metric-card"><span class="metric-card__icon"><Eye :size="18" /></span><span class="metric-card__label">Views</span><div class="metric-card__value"><strong>{{ metric.views || 0 }}</strong><span>Latest snapshot</span></div></UiAppCard>
       <UiAppCard class="metric-card"><span class="metric-card__icon"><Heart :size="18" /></span><span class="metric-card__label">Likes</span><div class="metric-card__value"><strong>{{ metric.likes || 0 }}</strong><span>Provider value</span></div></UiAppCard>

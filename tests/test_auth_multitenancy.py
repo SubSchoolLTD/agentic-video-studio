@@ -76,6 +76,15 @@ def test_registration_login_refresh_reset_and_tenant_isolation(jwt_client: TestC
     analytics_a = jwt_client.get(f"/v1/projects/{project_a['id']}/analytics/summary", headers=headers(account_a))
     assert analytics_a.status_code == 200
     assert analytics_a.json()["patterns"] == []
+    strategy_a = jwt_client.get(f"/v1/projects/{project_a['id']}/strategy", headers=headers(account_a))
+    assert strategy_a.status_code == 200
+    assert strategy_a.json()["cold_start"] is True
+    assert strategy_a.json()["sample_size"] == 0
+    assert strategy_a.json()["confidence"] == 0
+    calendar_a = jwt_client.get(f"/v1/projects/{project_a['id']}/calendar", headers=headers(account_a))
+    assert calendar_a.status_code == 200
+    assert calendar_a.json()["timezone"] == "UTC"
+    assert calendar_a.json()["cadence"] == {"daily_cap": 0, "weekly_cap": 0, "minimum_gap_hours": 0.0}
 
     cross_tenant = jwt_client.get(f"/v1/projects/{project_a['id']}", headers=headers(account_b))
     assert cross_tenant.status_code == 404

@@ -82,6 +82,7 @@ from .schemas import (
 )
 from .security import ALL_SCOPES, Principal, get_principal, validate_public_url
 from .storage import MediaStorage
+from .strategy_defaults import cold_start_strategy
 from .workflow import WorkflowManager, initial_stage_state
 
 router = APIRouter(prefix="/v1")
@@ -306,6 +307,13 @@ def create_project(
             organization_id=principal.organization_id,
             settings=settings,
         )
+    repo.add(
+        kind="strategy",
+        organization_id=principal.organization_id,
+        project_id=project.id,
+        status="active",
+        data=cold_start_strategy(),
+    )
     response = {
         "project_id": project.id,
         "status": project.status,
@@ -2057,10 +2065,10 @@ def get_calendar(
     principal: Principal = Depends(get_principal),
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    require_project(ResourceRepository(session), project_id, principal)
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
     kinds = ("calendar_item", "research_run", "generation_job", "publication", "metric_checkpoint")
     items: list[dict[str, Any]] = []
-    repo = ResourceRepository(session)
     for kind in kinds:
         items.extend(
             ResourceRepository.serialize(item)
@@ -2069,7 +2077,16 @@ def get_calendar(
             )
         )
     items.sort(key=lambda item: item.get("created_at", ""), reverse=True)
-    return {"items": items, "timezone": require_project(repo, project_id, principal).data.get("timezone", "UTC")}
+    publishing = dict(project.data.get("settings", {}).get("publishing", {}))
+    return {
+        "items": items,
+        "timezone": project.data.get("timezone", "UTC"),
+        "cadence": {
+            "daily_cap": int(publishing.get("daily_cap", publishing.get("max_posts_per_day", 0))),
+            "weekly_cap": int(publishing.get("weekly_cap", 0)),
+            "minimum_gap_hours": float(publishing.get("minimum_gap_hours", 0)),
+        },
+    }
 
 
 @router.post("/projects/{project_id}/generation-jobs", status_code=202, tags=["generations"])

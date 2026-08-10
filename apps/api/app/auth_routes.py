@@ -26,6 +26,7 @@ from .database import get_db
 from .email_service import consume_email_token, issue_email_token, send_account_email, test_token
 from .models import AuthSession, Resource, User, Wallet
 from .security import validate_public_url
+from .strategy_defaults import cold_start_strategy
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
@@ -204,7 +205,27 @@ def register(
         status="pending_brand_confirmation",
         data={"step": "brand_profile", "created_at": now.isoformat()},
     )
-    session.add_all([user, organization, membership, project, brand_profile, source, subscription, Wallet(organization_id=organization_id, balance_tokens=0)])
+    strategy = Resource(
+        id=f"strategy_{secrets.token_hex(12)}",
+        organization_id=organization_id,
+        project_id=project_id,
+        kind="strategy",
+        status="active",
+        data=cold_start_strategy(),
+    )
+    session.add_all(
+        [
+            user,
+            organization,
+            membership,
+            project,
+            brand_profile,
+            source,
+            subscription,
+            strategy,
+            Wallet(organization_id=organization_id, balance_tokens=0),
+        ]
+    )
     session.commit()
     raw_token = issue_email_token(
         session, user=user, kind="verify_email", settings=settings, request_ip=_request_ip(request)

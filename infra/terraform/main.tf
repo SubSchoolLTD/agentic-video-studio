@@ -57,7 +57,7 @@ locals {
   ])
 
   api_plain_env = {
-    APP_ENV                        = var.environment
+    APP_ENV                        = var.environment == "prod" ? "production" : var.environment
     APP_AUTH_MODE                  = "jwt"
     APP_BASE_URL                   = var.app_base_url
     WEB_BASE_URL                   = var.web_base_url

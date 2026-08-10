@@ -11,6 +11,7 @@ from .billing import ensure_wallet, grant_signup_credit, seed_price_rules
 from .config import Settings
 from .models import Resource, User
 from .repository import ResourceRepository
+from .strategy_defaults import cold_start_strategy
 
 SUBSCHOOL_BRAND = {
     "identity": {
@@ -283,6 +284,26 @@ def seed_application(session: Session, settings: Settings) -> None:
             )
             if is_demo_fixture:
                 session.delete(resource)
+        session.flush()
+        active_strategy = session.scalar(
+            select(Resource).where(
+                Resource.kind == "strategy",
+                Resource.organization_id == "org_demo",
+                Resource.project_id == "prj_subschool",
+                Resource.status == "active",
+            )
+        )
+        if not active_strategy:
+            session.add(
+                Resource(
+                    id="strategy_subschool_baseline",
+                    kind="strategy",
+                    organization_id="org_demo",
+                    project_id="prj_subschool",
+                    status="active",
+                    data=cold_start_strategy(),
+                )
+            )
     session.add(existing_org)
     session.commit()
     ensure_wallet(session, "org_demo")

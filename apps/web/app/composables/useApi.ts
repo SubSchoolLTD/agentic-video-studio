@@ -8,11 +8,13 @@ export interface ApiError {
 
 export function useApi() {
   const config = useRuntimeConfig()
-  const projectId = useState<string>('active-project', () => 'prj_subschool')
+  const auth = useAuth()
+  const projectId = auth.projectId
 
   async function api<T>(path: string, options: Record<string, unknown> = {}): Promise<T> {
-    const headers = {
-      Authorization: `Bearer ${config.public.demoToken}`,
+    const headers: Record<string, string> = {
+      ...(auth.accessToken.value ? { Authorization: `Bearer ${auth.accessToken.value}` } : {}),
+      ...(auth.organizationId.value ? { 'X-Organization-ID': auth.organizationId.value } : {}),
       ...((options.headers as Record<string, string> | undefined) || {}),
     }
     try {
@@ -23,6 +25,9 @@ export function useApi() {
       })
     }
     catch (error: any) {
+      if (error?.response?.status === 401 && !path.startsWith('/v1/auth/') && await auth.refresh()) {
+        return api<T>(path, options)
+      }
       const payload = error?.data as ApiError | undefined
       const message = payload?.error?.message || error?.message || 'The request could not be completed.'
       throw Object.assign(new Error(message), { requestId: payload?.error?.request_id })
@@ -31,4 +36,3 @@ export function useApi() {
 
   return { api, projectId, apiBase: config.public.apiBase }
 }
-

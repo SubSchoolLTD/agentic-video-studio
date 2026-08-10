@@ -6,7 +6,6 @@ export default defineNuxtConfig({
   runtimeConfig: {
     public: {
       apiBase: process.env.NUXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000',
-      demoToken: process.env.NUXT_PUBLIC_DEMO_TOKEN || 'demo-token',
       grafanaUrl: process.env.NUXT_PUBLIC_GRAFANA_URL || '',
     },
   },
@@ -16,6 +15,7 @@ export default defineNuxtConfig({
       meta: [
         { name: 'description', content: 'Evidence-first autonomous video production for small media teams.' },
         { name: 'theme-color', content: '#17131f' },
+        { 'http-equiv': 'Content-Security-Policy', content: "default-src 'self'; connect-src 'self' https: http://127.0.0.1:*; img-src 'self' data: https:; media-src 'self' https: http://127.0.0.1:*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; font-src 'self' data: https://fonts.gstatic.com" },
       ],
     },
   },

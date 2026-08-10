@@ -23,11 +23,11 @@ pnpm install
 pnpm --filter @avs/web dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The default local token is `demo-token`; mock mode needs no external credentials but still creates a real MP4 with FFmpeg.
+Open [http://localhost:3000](http://localhost:3000), register an account, and use the test/log email delivery mode to activate it. Mock provider mode needs no external provider credentials but still exercises the full authenticated workflow and creates a real MP4 with FFmpeg.
 
 Live hackathon deployment: [Agentic Video Studio](https://studio.subschool.us) · [Cloud Run fallback](https://agentic-video-studio-web-670288630676.us-central1.run.app) · [OpenAPI](https://agentic-video-studio-api-670288630676.us-central1.run.app/docs) · [Grafana](https://agentic-video-studio-grafana-670288630676.us-central1.run.app/d/avs-pipeline)
 
-Live SubSchool proof: [30-second Veo 3.1 + Google TTS + FFmpeg vertical video](https://agentic-video-studio-api-670288630676.us-central1.run.app/media/prj_subschool/gener_0c7a514e2be252e3/renders/version_1_9x16.mp4). It was generated and manually approved through the same live workflow used by the application; it is not a mock fixture.
+The production SubSchool workspace contains a 30-second Veo 3.1 + Google TTS + FFmpeg proof generated and manually approved through the live workflow. Media is private and the API returns short-lived signed playback URLs only to an authorized tenant member.
 
 The exact provider calls, immutable image digests, private YouTube upload, observability event, and test results are recorded in [the live validation report](docs/operations/live-validation.md).
 
@@ -51,6 +51,8 @@ pnpm test:e2e
 
 Credentials belong in `.env` locally and in the deployment secret store/GitHub Actions secrets remotely. `.env` and generated media are ignored by git. See [configuration.md](docs/operations/configuration.md) and [architecture.md](docs/architecture/architecture.md).
 
+The web application uses verified-email accounts, short-lived JWT access tokens and rotating refresh sessions. Every resource lookup is constrained by the authenticated organization and project. Platform administration, including users, AI-token adjustments, promo codes, subscription grants, pricing and margin controls, is separate from tenant owner permissions.
+
 The deployed stack uses Cloud Run, Cloud SQL for PostgreSQL, private Cloud Storage, ClickHouse/Grafana, Artifact Registry, Cloud Build, Secret Manager, Vertex AI (Gemini 2.5 Flash and Veo 3.1), Google Cloud TTS, and Parallel Search. See [deployment.md](docs/operations/deployment.md).
 
 ## Repository map
@@ -66,7 +68,7 @@ tests           Unit, contract, integration, security, and pipeline tests
 
 ## Safety defaults
 
-Autopublish is off. High-risk claims require human review. TikTok is represented as draft/interactive only. URL ingestion rejects non-public network targets. API keys are stored hashed, webhooks are HMAC-signed, and publication is a prepare/commit operation.
+Autopublish is off. High-risk claims require human review. TikTok and Instagram use explicit export/handoff workflows when official production publishing access is unavailable. URL ingestion rejects non-public network targets. Passwords use Argon2id, refresh tokens and API keys are stored hashed, media links expire, webhooks are HMAC-signed, and publication is a prepare/commit operation.
 
 ## License
 

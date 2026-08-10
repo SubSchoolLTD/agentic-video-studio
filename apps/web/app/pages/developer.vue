@@ -65,7 +65,7 @@ async function testWebhook(id: string) {
         <div v-if="data.keys.length" class="developer-list">
           <article v-for="item in data.keys" :key="item.id"><div><strong>{{ item.name }}</strong><span><code>{{ item.key_prefix }}…</code> · {{ item.scopes.join(', ') }}</span></div><UiStatusBadge :status="item.revoked_at ? 'revoked' : 'active'" /></article>
         </div>
-        <div v-else class="mini-empty">No user-created keys. The local demo token is limited to development.</div>
+        <div v-else class="mini-empty">No API keys yet. Create a tenant-scoped key for your integration.</div>
       </UiAppCard>
       <UiAppCard>
         <div class="section-heading"><div><h2>Webhooks</h2><p>At-least-once delivery with event IDs.</p></div><button class="button button--small" @click="webhookModal=true"><Plus :size="13" /> Add</button></div>

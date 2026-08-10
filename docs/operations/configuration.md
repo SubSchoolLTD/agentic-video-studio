@@ -14,7 +14,9 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 |---|---|
 | `PARALLEL_API_KEY` | `PARALLEL_API_KEY` |
 | `GOOGLE_API_KEY` | `GOOGLE_API_KEY` |
-| `APP_DEMO_TOKEN` | `APP_DEMO_TOKEN` |
+| `JWT_SECRET` | `jwt-secret` |
+| `SENDPULSE_ID` | `sendpulse-id` |
+| `SENDPULSE_SECRET` | `sendpulse-secret` |
 | `CLOUD_SQL_PASSWORD` | `CLOUD_SQL_PASSWORD` |
 | `YOUTUBE_CLIENT_ID` | `YOUTUBE_CLIENT_ID` |
 | `YOUTUBE_CLIENT_SECRET` | `YOUTUBE_CLIENT_SECRET` |
@@ -24,6 +26,8 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `GRAFANA_OTLP_HEADERS` | `GRAFANA_OTLP_HEADERS` |
 | `WEBHOOK_SIGNING_SECRET` | `WEBHOOK_SIGNING_SECRET` |
 | `API_KEY_PEPPER` | `API_KEY_PEPPER` |
+
+Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, and a strong `JWT_SECRET`. Demo authentication is accepted only in explicit local/test environments. The MCP process requires `APP_API_TOKEN` containing a tenant-scoped API key or access token; it has no shared default credential.
 
 Google runtime identity should use workload identity/service account credentials in deployment; do not place long-lived service-account JSON in GitHub when federation is available.
 

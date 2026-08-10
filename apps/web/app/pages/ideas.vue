@@ -8,7 +8,7 @@ const router = useRouter()
 const view = ref<'board' | 'table'>('board')
 const modalOpen = ref(route.query.create === '1')
 const saving = ref(false)
-const form = reactive({ title: '', hook: '', audience: 'Independent teachers', objective: 'education' })
+const form = reactive({ title: '', hook: '', audience: '', objective: 'awareness' })
 
 watch(() => route.query.create, value => { if (value === '1') modalOpen.value = true })
 
@@ -27,7 +27,7 @@ async function saveIdea() {
     await api(`/v1/projects/${projectId.value}/ideas`, { method: 'POST', body: form })
     show('Idea added', 'You can research, score or send it into production.', 'success')
     modalOpen.value = false
-    Object.assign(form, { title: '', hook: '', audience: 'Independent teachers', objective: 'education' })
+    Object.assign(form, { title: '', hook: '', audience: '', objective: 'awareness' })
     await router.replace({ query: {} })
     await refresh()
   }
@@ -63,7 +63,7 @@ async function generate(idea: any) {
         <article v-for="idea in column.items" :key="idea.id" class="idea-card">
           <div class="idea-card__top"><UiStatusBadge :status="idea.status" /><button class="icon-button icon-button--plain"><MoreHorizontal :size="15" /></button></div>
           <h3>{{ idea.title }}</h3><p>{{ idea.hook || 'Add a sharper first-two-second hook.' }}</p>
-          <div class="idea-card__tags"><span>{{ idea.audience || 'Independent teachers' }}</span><span>{{ idea.objective || 'education' }}</span></div>
+          <div class="idea-card__tags"><span>{{ idea.audience || 'General audience' }}</span><span>{{ idea.objective || 'awareness' }}</span></div>
           <div class="idea-card__score"><div><strong>{{ idea.topic_opportunity_score || '—' }}</strong><span>Opportunity</span></div><div><strong>{{ idea.confidence ? `${Math.round(idea.confidence * 100)}%` : 'Pending' }}</strong><span>Confidence</span></div></div>
           <button class="idea-card__action" @click="generate(idea)"><WandSparkles :size="14" /> Generate video <ArrowRight :size="13" /></button>
         </article>
@@ -78,7 +78,7 @@ async function generate(idea: any) {
     <div v-if="modalOpen" class="modal-backdrop" @click.self="modalOpen = false">
       <form class="modal" @submit.prevent="saveIdea">
         <div class="modal__header"><div><h2>New content idea</h2><p>Keep one audience and one core thought per short video.</p></div><button type="button" class="icon-button icon-button--plain" @click="modalOpen = false"><X :size="18" /></button></div>
-        <div class="modal__body"><div class="form-grid"><div class="field field--full"><label for="idea-title">Idea or topic</label><input id="idea-title" v-model="form.title" data-testid="idea-title" required minlength="3" placeholder="Turn one lesson into a reusable course" /></div><div class="field field--full"><label for="idea-hook">Opening hook</label><textarea id="idea-hook" v-model="form.hook" placeholder="One lesson can do more than you think." /></div><div class="field"><label for="idea-audience">Primary audience</label><select id="idea-audience" v-model="form.audience"><option>Independent teachers</option><option>Students</option><option>Parents</option><option>Course creators</option></select></div><div class="field"><label for="idea-objective">Objective</label><select id="idea-objective" v-model="form.objective"><option value="education">Education</option><option value="awareness">Awareness</option><option value="traffic">Traffic</option><option value="lead">Lead</option></select></div></div><div class="idea-note"><Sparkles :size="16" /><span>Research can strengthen this angle with live audience demand, fresh evidence and competitive saturation.</span></div></div>
+        <div class="modal__body"><div class="form-grid"><div class="field field--full"><label for="idea-title">Idea or topic</label><input id="idea-title" v-model="form.title" data-testid="idea-title" required minlength="3" placeholder="Explain one valuable idea clearly" /></div><div class="field field--full"><label for="idea-hook">Opening hook</label><textarea id="idea-hook" v-model="form.hook" placeholder="What should the audience understand in the first two seconds?" /></div><div class="field"><label for="idea-audience">Primary audience</label><input id="idea-audience" v-model="form.audience" required minlength="2" placeholder="Product leaders" /></div><div class="field"><label for="idea-objective">Objective</label><select id="idea-objective" v-model="form.objective"><option value="awareness">Awareness</option><option value="education">Education</option><option value="traffic">Traffic</option><option value="lead">Lead</option><option value="install">Install</option><option value="purchase">Purchase</option></select></div></div><div class="idea-note"><Sparkles :size="16" /><span>Research can strengthen this angle with live audience demand, fresh evidence and competitive saturation.</span></div></div>
         <div class="modal__footer"><button type="button" class="button" @click="modalOpen = false">Cancel</button><button class="button button--primary" data-testid="save-idea" :disabled="saving">{{ saving ? 'Saving…' : 'Create idea' }}</button></div>
       </form>
     </div>

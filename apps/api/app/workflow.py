@@ -186,7 +186,11 @@ class WorkflowManager:
             raise RuntimeError("Project not found")
         brand_resource = session.scalar(
             select(Resource)
-            .where(Resource.kind == "brand_profile", Resource.project_id == job.project_id)
+            .where(
+                Resource.kind == "brand_profile",
+                Resource.organization_id == job.organization_id,
+                Resource.project_id == job.project_id,
+            )
             .order_by(Resource.version.desc())
         )
         brand = brand_resource.data if brand_resource else {}
@@ -195,9 +199,10 @@ class WorkflowManager:
             input_resource = repo.get_any(job.data["idea_id"], kind="idea")
         if not input_resource and job.data.get("source_item_id"):
             input_resource = repo.get_any(job.data["source_item_id"], kind="source_item")
-        title = job.data.get("title") or (input_resource.data.get("title") if input_resource else None) or "A smarter way to reuse a lesson"
-        audience = (input_resource.data.get("audience") if input_resource else None) or "Independent teachers"
-        objective = (input_resource.data.get("objective") if input_resource else None) or "education"
+        title = job.data.get("title") or (input_resource.data.get("title") if input_resource else None) or f"Introducing {project.data.get('name', 'this project')}"
+        brand_audiences = brand.get("audiences", {}).get("primary") or []
+        audience = (input_resource.data.get("audience") if input_resource else None) or (brand_audiences[0] if brand_audiences else "General audience")
+        objective = (input_resource.data.get("objective") if input_resource else None) or project.data.get("brief", {}).get("objective") or "awareness"
 
         self._set_stage(repo, job, "intake", "running")
         if project.data.get("autopilot_paused") and job.data.get("automatic", False):
@@ -255,9 +260,9 @@ class WorkflowManager:
             data={
                 "research_run_id": research_run.id,
                 "title": title,
-                "angle": "Turn one useful teaching moment into multiple reusable learning assets",
+                "angle": f"A concise, evidence-backed explanation of {title}",
                 "audience": audience,
-                "why_now": "Small education teams need repeatable video output without a dedicated production desk.",
+                "why_now": f"The current research packet contains {len(packet.sources)} relevant sources for this production.",
                 "source_ids": [source["id"] for source in packet.sources],
                 "sources": packet.sources,
                 "supported_claims": [claim for claim in packet.claims if claim.get("status") == "supported"],
@@ -267,7 +272,7 @@ class WorkflowManager:
                     if claim.get("status") not in {"supported", "confirmed"}
                 ],
                 "freshness_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
-                "suggested_formats": ["educational_explainer", "problem_solution"],
+                "suggested_formats": ["problem_solution", "explainer"],
                 "topic_opportunity_score": opportunity["score"],
                 "score_confidence": opportunity["confidence"],
                 "score_breakdown": opportunity["breakdown"],
@@ -728,7 +733,7 @@ class WorkflowManager:
             session=session,
             repo=repo,
             job=job,
-            title=str(intake.get("input_snapshot", {}).get("title") or "A smarter way to reuse a lesson"),
+            title=str(intake.get("input_snapshot", {}).get("title") or "Introducing this project"),
             scenes=scenes,
             scene_attempts=scene_attempts,
             audio_path=audio_path,
@@ -778,7 +783,7 @@ class WorkflowManager:
             session=session,
             repo=repo,
             job=job,
-            title=str(intake.get("input_snapshot", {}).get("title") or "A smarter way to reuse a lesson"),
+            title=str(intake.get("input_snapshot", {}).get("title") or "Introducing this project"),
             scenes=list(storyboard.data.get("scenes") or []),
             scene_attempts=scene_attempts,
             audio_path=Path(audio_value) if audio_value else None,

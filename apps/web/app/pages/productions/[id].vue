@@ -67,7 +67,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 <template>
   <div v-if="job">
     <div class="production-breadcrumb"><NuxtLink to="/productions"><ArrowLeft :size="14" /> Productions</NuxtLink><span>/</span><span>{{ job.id }}</span></div>
-    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'SubSchool production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · immutable brand profile v${job.brand_profile_version || 1}`">
+    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · immutable brand profile v${job.brand_profile_version || 1}`">
       <UiStatusBadge :status="job.status" />
       <button v-if="job.status === 'ready' && previewVersion?.status !== 'approved'" class="button button--primary" data-testid="approve-video" :disabled="approving" @click="approve"><Check :size="15" /> {{ approving ? 'Approving…' : 'Approve video' }}</button>
       <NuxtLink v-if="previewVersion?.status === 'approved'" :to="`/publishing?version=${previewVersion.id}`" class="button button--primary">Prepare publication <ExternalLink :size="14" /></NuxtLink>
@@ -102,7 +102,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 
     <div v-if="activeTab === 'overview'" class="grid-three workspace-content">
       <UiAppCard><div class="detail-icon"><RadioTower :size="18" /></div><span class="eyebrow">Research</span><h3>{{ job.stages?.find((item:any) => item.name === 'research')?.output?.parallel_request_id || 'Pending' }}</h3><p>Parallel request ID and all retrieved evidence are persisted with the production.</p></UiAppCard>
-      <UiAppCard><div class="detail-icon"><CircleDollarSign :size="18" /></div><span class="eyebrow">Cost</span><h3>${{ Number(job.actual_cost_usd || 0).toFixed(2) }} actual</h3><p>Estimated range ${{ job.estimated_cost?.min }}–${{ job.estimated_cost?.max }}. Mock rendering is free.</p></UiAppCard>
+      <UiAppCard><div class="detail-icon"><CircleDollarSign :size="18" /></div><span class="eyebrow">Provider cost</span><h3>${{ Number(job.actual_cost_usd || 0).toFixed(2) }} actual</h3><p>Estimated range ${{ job.estimated_cost?.min }}–${{ job.estimated_cost?.max }}. AI token charges are recorded separately in Billing.</p></UiAppCard>
       <UiAppCard><div class="detail-icon"><Sparkles :size="18" /></div><span class="eyebrow">Model trace</span><h3>{{ video?.script?.provider_trace?.model || 'Google pipeline' }}</h3><p>Prompt/model versions remain attached to immutable generation artifacts.</p></UiAppCard>
     </div>
 

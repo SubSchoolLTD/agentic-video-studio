@@ -4,7 +4,7 @@ This is the executable acceptance map for the hackathon cut. `mock` means determ
 
 | Requirement IDs | Implementation | Automated acceptance | Live evidence |
 |---|---|---|---|
-| FR-ORG-001–002 | Workspace creation, owner membership and membership-backed tenant selection; repository and principal enforce organization/project scope | Cross-tenant header and API-key tests return 404 | Production resources remain under `org_demo/prj_subschool` |
+| FR-ORG-001–002 | Verified-email registration creates a private workspace/project; JWT and rotating refresh sessions resolve membership; repository and principal enforce organization/project scope | Registration/login/reset/replay plus cross-tenant JWT and API-key tests return the expected 401/403/404 boundaries | The retained SubSchool workspace is assigned to the verified `maksim@subschool.us` account; new registrations receive unrelated organization/project IDs |
 | FR-PRJ-001–004, 006 | URL analysis job, editable/versioned Brand Profile, mandatory brief gate, immutable profile reference on jobs, pause/resume | Activation, version reference and pause checks | SubSchool detected profile and confirmed brand are persisted |
 | FR-SRC-001–006, 008–010 | Manual idea, safe URL extraction, text/Markdown, scheduled RSS/Atom, idempotent REST intake, callback webhook, filters, exact/semantic dedupe, redirect-by-redirect SSRF defense | URL/HTML, RSS, callback, duplicate, private-target, redirect, MIME and size tests | Scheduler execution completed with the production API |
 | FR-RSH-001–008, 010 | Parallel Search adapter persists request/result metadata and evidence packets; manual/source/scheduled/backlog runs; explainable score; mute; provenance-preserving idea conversion; retrieved text is always data | Research schedule, source trigger, candidate conversion and mute tests | Run `resea_3c6eb1ffd00c69cc`, request `search_26696d2fa7fae4d0a7ec00386a4489f3`, four sources and three backlog ideas |
@@ -19,8 +19,8 @@ This is the executable acceptance map for the hackathon cut. `mock` means determ
 ## Current verification baseline
 
 - Ruff: clean.
-- Pytest: 49 tests passed.
-- Mock Playwright: 4/4 desktop/mobile tests passed, including create → render → approve → publish.
+- Pytest: 52 tests passed.
+- Mock Playwright: 6/6 desktop/mobile tests passed, including registration → verification → isolated workspace → logout/login and create → render → approve → publish.
 - Production Playwright: 2/2 desktop/mobile navigation tests passed.
 - Frontend: ESLint, Nuxt typecheck and production build passed.
 - Production health: API `provider_mode=live`; Grafana database `ok`; scheduled Workflow execution `a30bd820-89f7-413c-b251-36b49e05905e` succeeded.

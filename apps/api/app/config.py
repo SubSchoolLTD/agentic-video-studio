@@ -105,7 +105,7 @@ class Settings(BaseSettings):
                 Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     def validate_runtime(self) -> None:
-        if self.app_env == "production":
+        if self.app_env in {"production", "prod"}:
             if self.app_auth_mode != "jwt":
                 raise RuntimeError("Production requires APP_AUTH_MODE=jwt")
             if self.jwt_secret in {"", "development-only-change-me"} or len(self.jwt_secret) < 32:

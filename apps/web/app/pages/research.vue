@@ -23,6 +23,11 @@ const candidates = computed(() => data.value.candidates || [])
 const latestRun = computed(() => selectedRun.value || data.value.runs?.[0])
 const researchProfile = computed(() => data.value.profiles?.[0])
 const cadence = computed(() => researchProfile.value?.interval_hours ? `Every ${researchProfile.value.interval_hours}h` : 'On demand')
+function freshnessLabel(value?: string) {
+  if (!value) return 'freshness unknown'
+  const remaining = Math.ceil((new Date(value).getTime() - Date.now()) / 86_400_000)
+  return remaining > 0 ? `fresh ${remaining} day${remaining === 1 ? '' : 's'}` : 'refresh required'
+}
 
 async function runResearch() {
   running.value = true
@@ -73,7 +78,7 @@ async function muteCandidate(id: string) {
         <div v-else class="candidate-list">
           <article v-for="candidate in candidates" :key="candidate.id" class="candidate-card">
             <div class="candidate-card__score"><strong>{{ candidate.topic_opportunity_score }}</strong><span>topic</span></div>
-            <div class="candidate-card__body"><div class="candidate-card__meta"><UiStatusBadge :status="candidate.status" /><span><Clock3 :size="12" /> fresh 7 days</span><span><ShieldCheck :size="12" /> {{ Math.round((candidate.score_confidence || 0) * 100) }}% confidence</span></div><h3>{{ candidate.title }}</h3><p>{{ candidate.angle }}</p><div class="candidate-card__footer"><span>{{ candidate.source_ids?.length || 0 }} cited sources</span><div class="candidate-actions"><button class="text-link" @click="muteCandidate(candidate.id)"><EyeOff :size="13" /> Mute</button><button class="text-link" @click="selectCandidate(candidate.id)">Turn into idea <ChevronRight :size="13" /></button></div></div></div>
+            <div class="candidate-card__body"><div class="candidate-card__meta"><UiStatusBadge :status="candidate.status" /><span><Clock3 :size="12" /> {{ freshnessLabel(candidate.freshness_expires_at) }}</span><span><ShieldCheck :size="12" /> {{ Math.round((candidate.score_confidence || 0) * 100) }}% confidence</span></div><h3>{{ candidate.title }}</h3><p>{{ candidate.angle }}</p><div class="candidate-card__footer"><span>{{ candidate.source_ids?.length || 0 }} cited sources</span><div class="candidate-actions"><button class="text-link" @click="muteCandidate(candidate.id)"><EyeOff :size="13" /> Mute</button><button class="text-link" @click="selectCandidate(candidate.id)">Turn into idea <ChevronRight :size="13" /></button></div></div></div>
           </article>
         </div>
       </UiAppCard>
@@ -87,7 +92,7 @@ async function muteCandidate(id: string) {
           <div v-else class="mini-empty"><CircleHelp :size="20" /><p>A completed research run will show traceable sources and claims here.</p></div>
         </UiAppCard>
         <UiAppCard>
-          <div class="section-heading"><div><h2>Project research profile</h2><p>{{ data.brand?.identity?.name || data.project?.name || 'Current project' }}</p></div><button class="icon-button"><ArrowUpRight :size="14" /></button></div>
+          <div class="section-heading"><div><h2>Project research profile</h2><p>{{ data.brand?.identity?.name || data.project?.name || 'Current project' }}</p></div><NuxtLink class="icon-button" to="/settings" aria-label="Open project settings"><ArrowUpRight :size="14" /></NuxtLink></div>
           <dl class="profile-list"><div><dt>Regions</dt><dd>{{ data.brand?.identity?.regions?.join(' · ') || 'Not set' }}</dd></div><div><dt>Recency</dt><dd>{{ researchProfile?.recency_days ? `${researchProfile.recency_days} days` : 'Per request' }}</dd></div><div><dt>Audience</dt><dd>{{ data.brand?.audiences?.primary?.join(' · ') || 'Review brand profile' }}</dd></div><div><dt>Coverage</dt><dd>Demand · news · evergreen · competition</dd></div></dl>
         </UiAppCard>
       </div>

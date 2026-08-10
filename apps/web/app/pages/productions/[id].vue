@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertTriangle, ArrowLeft, Check, CheckCircle2, ChevronDown, CircleDollarSign, Clock3, ExternalLink, FileText, Film, Lock, Play, RadioTower, RotateCcw, ShieldCheck, Sparkles, WandSparkles } from 'lucide-vue-next'
+import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleDollarSign, Clock3, ExternalLink, FileText, Film, Lock, Play, RadioTower, RotateCcw, ShieldCheck, Sparkles, WandSparkles } from 'lucide-vue-next'
 
 const route = useRoute()
 const { api, apiBase } = useApi()
@@ -8,13 +8,14 @@ const jobId = String(route.params.id)
 const activeTab = ref('overview')
 const approving = ref(false)
 const regenerateId = ref<string | null>(null)
+const selectedVersionId = ref('')
 let poller: ReturnType<typeof setInterval> | null = null
 
 const { data: job, refresh: refreshJob } = await useAsyncData(`job-${jobId}`, () => api<any>(`/v1/generation-jobs/${jobId}`))
 const video = ref<any>(null)
 
 const terminal = computed(() => ['ready', 'failed', 'blocked', 'cancelled'].includes(job.value?.status))
-const previewVersion = computed(() => video.value?.versions?.find((item: any) => item.aspect_ratio === '9:16') || video.value?.versions?.[0])
+const previewVersion = computed(() => video.value?.versions?.find((item: any) => item.id === selectedVersionId.value) || video.value?.versions?.find((item: any) => item.aspect_ratio === '9:16') || video.value?.versions?.[0])
 const previewUrl = computed(() => previewVersion.value?.render_url ? `${apiBase}${previewVersion.value.render_url}` : '')
 const scenes = computed(() => video.value?.scenes || [])
 const score = computed(() => video.value?.score_report || {})
@@ -22,7 +23,10 @@ const qa = computed(() => video.value?.qa_report || {})
 const script = computed(() => video.value?.script?.script || {})
 
 async function loadVideo() {
-  if (job.value?.video_id) video.value = await api(`/v1/videos/${job.value.video_id}`)
+  if (job.value?.video_id) {
+    video.value = await api(`/v1/videos/${job.value.video_id}`)
+    if (!selectedVersionId.value) selectedVersionId.value = previewVersion.value?.id || ''
+  }
 }
 
 async function tick() {
@@ -78,7 +82,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 
     <div class="production-hero">
       <UiAppCard class="preview-card">
-        <div class="preview-toolbar"><div><span>Preview</span><strong>{{ previewVersion?.aspect_ratio || '9:16' }} · {{ formatDuration(previewVersion?.duration_ms) }}</strong></div><div><button class="toolbar-toggle">Final render <ChevronDown :size="13" /></button></div></div>
+        <div class="preview-toolbar"><div><span>Preview</span><strong>{{ previewVersion?.aspect_ratio || '9:16' }} · {{ formatDuration(previewVersion?.duration_ms) }}</strong></div><select v-if="video?.versions?.length" v-model="selectedVersionId" class="toolbar-toggle" aria-label="Select final render"><option v-for="version in video.versions" :key="version.id" :value="version.id">{{ version.aspect_ratio }} · {{ version.status }}</option></select></div>
         <div class="video-stage" :class="{ 'video-stage--horizontal': previewVersion?.aspect_ratio === '16:9' }">
           <video v-if="previewUrl" :src="previewUrl" controls playsinline preload="metadata" data-testid="video-preview" />
           <div v-else class="video-placeholder"><span class="video-placeholder__rings"><WandSparkles :size="27" /></span><h3>{{ job.status === 'failed' ? 'Production stopped' : 'Building your production' }}</h3><p v-if="job.status !== 'failed'">{{ job.current_stage?.replaceAll('_', ' ') }} is in progress. Partial artifacts are already saved.</p><p v-else>{{ job.last_error?.message }}</p><UiProgressBar :value="job.progress || 0" /></div>

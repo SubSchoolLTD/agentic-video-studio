@@ -31,6 +31,7 @@ export async function registerThroughUi(page: Page, label = 'E2E') {
   await page.getByRole('button', { name: 'Create private workspace' }).click()
   const response = await registrationResponse
   expect(response.status(), await response.text()).toBe(201)
+  expect((await response.json()).email_sent).toBe(true)
   await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible()
   const token = await verificationToken(page.request, email)
   await page.goto(`/verify-email?token=${encodeURIComponent(token)}`)

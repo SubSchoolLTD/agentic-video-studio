@@ -65,7 +65,7 @@ locals {
     PROVIDER_MODE                  = "live"
     EMAIL_DELIVERY_MODE            = "sendpulse"
     EMAIL_FROM_NAME                = "Framewise"
-    EMAIL_FROM_EMAIL               = "hello@subschool.us"
+    EMAIL_FROM_EMAIL               = "maksim@subschool.us"
     SENDPULSE_TEMPLATE_ID          = "266399"
     SENDPULSE_TEMPLATE_NAME        = "subschool_main"
     BOOTSTRAP_ADMIN_EMAIL          = "maksim@subschool.us"

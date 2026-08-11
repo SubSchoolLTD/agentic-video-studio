@@ -6,6 +6,7 @@ const form = reactive({ email: '', password: '', display_name: '', organization_
 const loading = ref(false)
 const error = ref('')
 const complete = ref(false)
+const emailDelivered = ref(true)
 const hydrated = ref(false)
 
 onMounted(() => { hydrated.value = true })
@@ -16,7 +17,8 @@ async function submit() {
   loading.value = true
   error.value = ''
   try {
-    await $fetch('/v1/auth/register', { baseURL: config.public.apiBase, method: 'POST', body: form })
+    const result = await $fetch<{ email_sent?: boolean }>('/v1/auth/register', { baseURL: config.public.apiBase, method: 'POST', body: form })
+    emailDelivered.value = result.email_sent !== false
     complete.value = true
   }
   catch (reason: any) {
@@ -35,7 +37,7 @@ async function submit() {
     </section>
     <section class="auth-panel">
       <div v-if="complete" class="auth-card auth-card--success">
-        <span class="auth-success-icon"><CheckCircle2 :size="28" /></span><h2>Check your email</h2><p>We sent a one-time confirmation link to <strong>{{ form.email }}</strong>. It activates your private workspace.</p><NuxtLink class="button button--primary auth-submit" to="/login">Back to sign in</NuxtLink>
+        <span class="auth-success-icon"><CheckCircle2 :size="28" /></span><h2>{{ emailDelivered ? 'Check your email' : 'Workspace created' }}</h2><p v-if="emailDelivered">We sent a one-time confirmation link to <strong>{{ form.email }}</strong>. It activates your private workspace.</p><p v-else>Your workspace was created, but the confirmation email could not be sent. Please contact support before trying to register the same address again.</p><NuxtLink class="button button--primary auth-submit" to="/login">Back to sign in</NuxtLink>
       </div>
       <form v-else class="auth-card" @submit.prevent="submit">
         <div><span class="eyebrow">Start creating</span><h2>Create your account</h2><p>Your first organization and project are created together.</p></div>

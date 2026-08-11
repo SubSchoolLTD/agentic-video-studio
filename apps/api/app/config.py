@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     email_max_per_hour: int = 5
     email_delivery_mode: str = "log"
     email_from_name: str = "Framewise"
-    email_from_email: str = "hello@subschool.us"
+    email_from_email: str = "maksim@subschool.us"
     sendpulse_id: str = ""
     sendpulse_secret: str = ""
     sendpulse_template_id: str = "266399"

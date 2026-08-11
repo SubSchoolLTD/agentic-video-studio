@@ -47,6 +47,7 @@ def register_and_verify(client: TestClient, label: str) -> dict:
         },
     )
     assert response.status_code == 201, response.text
+    assert response.json()["email_sent"] is True
     raw = outbox_token(email, "verify_email")
     assert raw
     verified = client.post("/v1/auth/verify-email", json={"token": raw})

@@ -50,3 +50,28 @@ test('registration creates an isolated tenant and logout protects the workspace'
   await page.goto('/')
   await expect(page).toHaveURL(/\/login\?redirect=/)
 })
+
+test('registration reports a transactional email failure honestly', async ({ page }) => {
+  await page.route('**/v1/auth/register', async (route) => {
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        status: 'verification_required',
+        email: 'delivery-test@example.com',
+        email_sent: false,
+      }),
+    })
+  })
+  await page.goto('/register')
+  await page.getByLabel('Your name').fill('Delivery Test')
+  await page.getByLabel('Work email').fill('delivery-test@example.com')
+  await page.getByLabel('Password').fill('correct horse battery staple')
+  await page.getByLabel('Organization').fill('Delivery Test Organization')
+  await page.getByLabel('Project name').fill('Delivery Test Project')
+  await page.getByLabel('Project website').fill('https://example.com')
+  await page.getByRole('button', { name: 'Create private workspace' }).click()
+  await expect(page.getByRole('heading', { name: 'Workspace created' })).toBeVisible()
+  await expect(page.getByText('the confirmation email could not be sent')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Check your email' })).toHaveCount(0)
+})

@@ -64,6 +64,7 @@ test('registration reports a transactional email failure honestly', async ({ pag
     })
   })
   await page.goto('/register')
+  await expect(page.locator('.auth-layout')).toHaveAttribute('data-hydrated', 'true')
   await page.getByLabel('Your name').fill('Delivery Test')
   await page.getByLabel('Work email').fill('delivery-test@example.com')
   await page.getByLabel('Password').fill('correct horse battery staple')

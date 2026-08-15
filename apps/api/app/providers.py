@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 
+VisualMode = Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"]
+
 
 def google_genai_client(settings: Settings):
     from google import genai
@@ -73,7 +75,7 @@ class ProductionBrief(BaseModel):
     mandatory_points: list[str]
     forbidden_claims: list[str]
     budget_class: str
-    visual_mode: Literal["ugc_creator", "product_demo", "cinematic", "motion_graphics"]
+    visual_mode: VisualMode
     aspect_ratios: list[Literal["9:16", "16:9"]]
 
 
@@ -95,7 +97,7 @@ class EditorialPolicy(BaseModel):
 
 class EditorialStoryboard(BaseModel):
     scenes: list[EditorialScene] = Field(min_length=4, max_length=6)
-    visual_mode: Literal["ugc_creator", "product_demo", "cinematic", "motion_graphics"]
+    visual_mode: VisualMode
     creator_profile: str
     visual_bible: list[str] = Field(min_length=3, max_length=8)
 
@@ -125,6 +127,13 @@ VISUAL_MODE_DIRECTIONS = {
         "natural available light, handheld smartphone framing, small human imperfections and practical actions. "
         "The creator must not visibly speak because narration is added separately. Avoid glossy advertising, "
         "abstract motion graphics, impossible camera moves and sterile studio staging."
+    ),
+    "ugc_native_audio": (
+        "Authentic talking-head UGC built around one recurring adult creator. Preserve the selected creator's "
+        "identity, natural skin texture, wardrobe and voice character across scenes. Use believable everyday "
+        "locations, available light and handheld smartphone framing. The creator speaks the supplied dialogue "
+        "directly to camera with clean native Veo speech and subtle room ambience. Avoid glossy advertising, "
+        "voiceover staging, abstract graphics, exaggerated performance and background music that masks speech."
     ),
     "product_demo": (
         "Creator-led product demonstration using approved product assets or believable over-the-shoulder context. "
@@ -565,10 +574,11 @@ class EditorialProvider:
         brand: dict[str, Any],
         evidence: ResearchPacket,
         duration_seconds: int,
-        visual_mode: Literal["ugc_creator", "product_demo", "cinematic", "motion_graphics"],
+        visual_mode: VisualMode,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str = "",
         content_format: str = "educational_explainer",
+        character_profile: str = "",
     ) -> dict[str, Any]:
         if not self.settings.uses_live_research:
             return self._mock_package(
@@ -582,6 +592,7 @@ class EditorialProvider:
                 aspect_ratios,
                 requested_hook,
                 content_format,
+                character_profile,
             )
         if not self.settings.google_cloud_project:
             raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for hybrid/live editorial generation")
@@ -597,6 +608,7 @@ class EditorialProvider:
             aspect_ratios,
             requested_hook,
             content_format,
+            character_profile,
         )
 
 
@@ -608,10 +620,11 @@ class EditorialProvider:
         brand: dict[str, Any],
         evidence: ResearchPacket,
         duration_seconds: int,
-        visual_mode: Literal["ugc_creator", "product_demo", "cinematic", "motion_graphics"],
+        visual_mode: VisualMode,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
         content_format: str,
+        character_profile: str,
     ) -> dict[str, Any]:
         from google.genai import types
 
@@ -637,10 +650,15 @@ class EditorialProvider:
                 "creator_continuity": "Define one specific recurring creator profile and reuse it verbatim across all relevant scenes",
                 "visual_bible": "3 to 8 concise continuity rules covering creator, wardrobe, location, light, camera texture and palette",
                 "generation_boundary": "No readable text, captions, prices, logos, brands or invented UI inside generative video",
-                "audio_boundary": "Plan silent visual performance; voiceover and captions are added after scene generation",
+                "audio_boundary": (
+                    "Plan short direct-to-camera dialogue for native Veo speech; each narration must fit its scene duration"
+                    if visual_mode == "ugc_native_audio"
+                    else "Plan silent visual performance; voiceover and captions are added after scene generation"
+                ),
                 "cta": "must match brand policy",
             },
             "mode_direction": VISUAL_MODE_DIRECTIONS[visual_mode],
+            "selected_creator": character_profile or None,
         }
         response = client.models.generate_content(
             model=self.settings.gemini_model,
@@ -659,14 +677,27 @@ class EditorialProvider:
         package["production_brief"]["visual_mode"] = visual_mode
         package["production_brief"]["aspect_ratios"] = aspect_ratios
         package["storyboard"]["visual_mode"] = visual_mode
-        creator_profile = package["storyboard"]["creator_profile"].strip()
+        creator_profile = character_profile.strip() or package["storyboard"]["creator_profile"].strip()
+        package["storyboard"]["creator_profile"] = creator_profile
         visual_bible = [str(item).strip() for item in package["storyboard"]["visual_bible"] if str(item).strip()]
         palette = brand.get("visual", {}).get("palette") or []
         palette_hint = ", ".join(str(value) for value in palette[:5]) or "the project-approved neutral palette"
         per_scene = duration_seconds / len(scenes)
         cursor = 0.0
+        if requested_hook:
+            package["script"]["hook"] = requested_hook
+            scenes[0]["narration"] = requested_hook
+            scenes[0]["on_screen_text"] = requested_hook[:96]
+            if package.get("concepts"):
+                package["concepts"][0]["hook"] = requested_hook
         for index, scene in enumerate(scenes):
             end = float(duration_seconds) if index == len(scenes) - 1 else round(cursor + per_scene, 3)
+            audio_direction = (
+                f'The creator says exactly in the narration language: "{scene["narration"]}". '
+                "Use clear synchronized direct speech, consistent voice identity and subtle natural room ambience."
+                if visual_mode == "ugc_native_audio"
+                else "Silent visual performance; relaxed mouth, no visible speaking."
+            )
             scene.update(
                 {
                     "id": f"scene_{index + 1}",
@@ -681,7 +712,7 @@ class EditorialProvider:
                         f"Shot: {scene['shot_type']}. Subject: {scene['subject']}. Setting: {scene['setting']}. "
                         f"Visible action: {scene['action']}. Camera: {scene['camera_direction']}. "
                         f"Performance: {scene['performance_direction']}. Project palette reference: {palette_hint}. "
-                        "Silent visual performance; relaxed mouth, no visible speaking. "
+                        f"{audio_direction} "
                         "No readable screens, interfaces, letters, numbers, subtitles, prices, logos, brands or UI glyphs."
                     ),
                     "locked": False,
@@ -690,12 +721,6 @@ class EditorialProvider:
                 }
             )
             cursor = end
-        if requested_hook:
-            package["script"]["hook"] = requested_hook
-            scenes[0]["narration"] = requested_hook
-            scenes[0]["on_screen_text"] = requested_hook[:96]
-            if package.get("concepts"):
-                package["concepts"][0]["hook"] = requested_hook
         package["script"]["voiceover"] = " ".join(
             str(scene.get("narration") or "").strip() for scene in scenes
         ).strip()
@@ -705,7 +730,7 @@ class EditorialProvider:
         package["provider_trace"] = {
             "provider": "google",
             "model": self.settings.gemini_model,
-            "prompt_version": "editorial-ugc-v2",
+            "prompt_version": "editorial-ugc-v3",
             "response_id": getattr(response, "response_id", None),
         }
         return package
@@ -718,10 +743,11 @@ class EditorialProvider:
         brand: dict[str, Any],
         evidence: ResearchPacket,
         duration_seconds: int,
-        visual_mode: Literal["ugc_creator", "product_demo", "cinematic", "motion_graphics"],
+        visual_mode: VisualMode,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
         content_format: str,
+        character_profile: str,
     ) -> dict[str, Any]:
         cta = brand.get("cta", {}).get("primary", "Learn more")
         brand_name = brand.get("identity", {}).get("name", "your project")
@@ -735,7 +761,7 @@ class EditorialProvider:
             ("payoff", f"The result is a concise story that stays aligned with {brand_name}.", "The creator completes the task and reacts with restrained satisfaction"),
             ("cta", f"{cta} with {brand_name}.", "The creator closes the notebook and leaves clean negative space for the CTA overlay"),
         ]
-        creator_profile = "One recurring adult creator in casual neutral clothing, natural appearance, no celebrity likeness"
+        creator_profile = character_profile or "One recurring adult creator in casual neutral clothing, natural appearance, no celebrity likeness"
         visual_bible = [
             "same creator and neutral wardrobe in every scene",
             "believable home-office location",
@@ -748,6 +774,11 @@ class EditorialProvider:
         cursor = 0.0
         for index, (purpose, narration, visual) in enumerate(beats):
             end = float(duration_seconds) if index == len(beats) - 1 else round(cursor + per_scene, 3)
+            audio_direction = (
+                f'The creator says exactly: "{narration}" with synchronized natural speech and quiet room ambience.'
+                if visual_mode == "ugc_native_audio"
+                else "No visible speaking; narration is added separately."
+            )
             scenes.append(
                 {
                     "id": f"scene_{index + 1}",
@@ -761,7 +792,7 @@ class EditorialProvider:
                     "visual_prompt": (
                         f"{VISUAL_MODE_DIRECTIONS[visual_mode]} Recurring creator: {creator_profile}. "
                         f"Visible action: {visual}. Use {palette_hint} only as a subtle palette reference. "
-                        "No readable text, logos, invented UI or visible speaking."
+                        f"{audio_direction} No readable text, logos or invented UI."
                     ),
                     "continuity_notes": "; ".join(visual_bible),
                     "shot_type": "creator-led medium shot" if index in {0, 3, 4} else "handheld detail shot",
@@ -769,7 +800,11 @@ class EditorialProvider:
                     "setting": "a believable daylight home office",
                     "action": visual,
                     "camera_direction": "handheld smartphone framing with subtle natural movement",
-                    "performance_direction": "natural understated action, relaxed mouth, no visible speaking",
+                    "performance_direction": (
+                        "natural direct-to-camera speech with restrained gestures"
+                        if visual_mode == "ugc_native_audio"
+                        else "natural understated action, relaxed mouth, no visible speaking"
+                    ),
                     "locked": False,
                     "status": "planned",
                     "attempt": 0,
@@ -821,7 +856,7 @@ class EditorialProvider:
                 "provider": "google",
                 "mode": "mock",
                 "model": "mock-gemini",
-                "prompt_version": "editorial-ugc-v2",
+                "prompt_version": "editorial-ugc-v3",
             },
         }
 
@@ -934,7 +969,16 @@ class VeoProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    async def generate_scene(self, prompt: str, *, aspect_ratio: str, output_path: Path) -> Path | None:
+    async def generate_scene(
+        self,
+        prompt: str,
+        *,
+        aspect_ratio: str,
+        output_path: Path,
+        generate_audio: bool = False,
+        reference_image_uri: str | None = None,
+        reference_image_mime_type: str | None = None,
+    ) -> Path | None:
         if not self.settings.uses_live_video:
             return None
         if not self.settings.google_cloud_project:
@@ -945,23 +989,50 @@ class VeoProvider:
             else "Native horizontal 16:9 composition. Re-stage the action for the wider frame; do not crop a vertical shot."
         )
         effective_prompt = f"{prompt} Framing: {framing}"
-        generated = await asyncio.to_thread(self._generate, effective_prompt, aspect_ratio, output_path)
+        generated = await asyncio.to_thread(
+            self._generate,
+            effective_prompt,
+            aspect_ratio,
+            output_path,
+            generate_audio,
+            reference_image_uri,
+            reference_image_mime_type,
+        )
         if not generated.exists() or generated.stat().st_size == 0:
             raise RuntimeError("Veo completed without a usable scene file")
         return generated
 
-    def _generate(self, prompt: str, aspect_ratio: str, output_path: Path) -> Path:
+    def _generate(
+        self,
+        prompt: str,
+        aspect_ratio: str,
+        output_path: Path,
+        generate_audio: bool,
+        reference_image_uri: str | None,
+        reference_image_mime_type: str | None,
+    ) -> Path:
         from google.genai import types
 
         client = google_genai_client(self.settings)
+        image = None
+        if reference_image_uri:
+            if reference_image_uri.startswith("gs://"):
+                image = types.Image(
+                    gcs_uri=reference_image_uri,
+                    mime_type=reference_image_mime_type or "image/jpeg",
+                )
+            else:
+                image = types.Image.from_file(location=reference_image_uri)
         operation = client.models.generate_videos(
             model=self.settings.veo_model,
             prompt=prompt,
+            image=image,
             config=types.GenerateVideosConfig(
                 aspect_ratio=aspect_ratio,
                 number_of_videos=1,
                 duration_seconds=8,
-                generate_audio=False,
+                generate_audio=generate_audio,
+                person_generation="allow_adult",
             ),
         )
         while not operation.done:
@@ -975,6 +1046,44 @@ class VeoProvider:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(generated.video.video_bytes)
         return output_path
+
+
+class CharacterImageProvider:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def generate(self, prompt: str, *, output_path: Path) -> tuple[Path, str] | None:
+        if not self.settings.uses_live_video:
+            return None
+        return await asyncio.to_thread(self._generate, prompt, output_path)
+
+    def _generate(self, prompt: str, output_path: Path) -> tuple[Path, str]:
+        from google.genai import types
+
+        client = google_genai_client(self.settings)
+        response = client.models.generate_content(
+            model=self.settings.google_image_model,
+            contents=(
+                "Create a photorealistic identity reference for a fictional adult social-video creator. "
+                "The person must not resemble a celebrity or public figure. Show one person, head to mid-thigh, "
+                "front-facing in soft neutral daylight against a simple background. Natural skin texture, casual "
+                "unbranded clothing, no text, logo, watermark, props or extra people. Creator brief: "
+                f"{prompt}"
+            ),
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio="9:16"),
+            ),
+        )
+        for part in response.parts or []:
+            inline = getattr(part, "inline_data", None)
+            if inline and inline.data:
+                mime_type = inline.mime_type or "image/png"
+                output_path = output_path.with_suffix(".jpg" if mime_type == "image/jpeg" else ".png")
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(inline.data)
+                return output_path, mime_type
+        raise RuntimeError("Gemini Image returned no downloadable character image")
 
 
 class TextToSpeechProvider:

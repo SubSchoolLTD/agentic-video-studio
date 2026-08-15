@@ -83,7 +83,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 <template>
   <div v-if="job">
     <div class="production-breadcrumb"><NuxtLink to="/productions"><ArrowLeft :size="14" /> Productions</NuxtLink><span>/</span><span>{{ job.id }}</span></div>
-    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · ${(job.visual_mode || 'ugc_creator').replaceAll('_', ' ')} · immutable brand profile v${job.brand_profile_version || 1}`">
+    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · ${(job.visual_mode || 'ugc_creator').replaceAll('_', ' ')} · ${job.audio_mode === 'veo_native' ? 'Veo native speech' : 'Google TTS voiceover'} · immutable brand profile v${job.brand_profile_version || 1}`">
       <UiStatusBadge :status="job.status" />
       <button v-if="job.status === 'ready' && previewVersion?.status !== 'approved'" class="button button--primary" data-testid="approve-video" :disabled="approving" @click="approve"><Check :size="15" /> {{ approving ? 'Approving…' : 'Approve video' }}</button>
       <NuxtLink v-if="previewVersion?.status === 'approved'" :to="`/publishing?version=${previewVersion.id}`" class="button button--primary">Prepare publication <ExternalLink :size="14" /></NuxtLink>

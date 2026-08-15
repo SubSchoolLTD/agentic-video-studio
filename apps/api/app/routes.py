@@ -17,18 +17,21 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
+    File,
+    Form,
     Header,
     HTTPException,
     Query,
     Request,
     Response,
+    UploadFile,
     status,
 )
 from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .billing import charge_feature
+from .billing import charge_feature, feature_price
 from .cloud_auth import require_google_service_identity
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db
@@ -36,7 +39,11 @@ from .events import EventSink
 from .ingestion import extract_article, fetch_public_text, prompt_injection_score
 from .metrics import collect_youtube_metrics, mock_youtube_metrics, observed_performance
 from .models import ApiKeyRecord, Resource
-from .providers import BrandProfileProvider, ParallelSearchProvider, TopicCandidateProvider
+from .providers import (
+    BrandProfileProvider,
+    ParallelSearchProvider,
+    TopicCandidateProvider,
+)
 from .publishing import (
     PROVIDER_CAPABILITIES,
     confirmation_token,
@@ -58,6 +65,7 @@ from .repository import (
 from .schemas import (
     ApiKeyCreate,
     BrandProfilePatch,
+    CharacterGenerate,
     ContentItemCreate,
     ConversionEventCreate,
     GenerationCreate,
@@ -495,6 +503,157 @@ def get_analysis(
     return ResourceRepository.serialize(
         require_resource(ResourceRepository(session), analysis_id, principal, kind="project_analysis")
     )
+
+
+@router.get("/projects/{project_id}/characters", tags=["characters"])
+def list_characters(
+    project_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:read")
+    require_project(ResourceRepository(session), project_id, principal)
+    items = ResourceRepository(session).list(
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        kind="character",
+        limit=100,
+    )
+    return serialize_many([item for item in items if item.status != "archived"])
+
+
+@router.post("/projects/{project_id}/characters/upload", status_code=201, tags=["characters"])
+async def upload_character(
+    project_id: str,
+    image: Annotated[UploadFile, File(description="JPEG, PNG or WebP identity reference")],
+    name: Annotated[str, Form(min_length=2, max_length=120)],
+    description: Annotated[str, Form(min_length=3, max_length=1_000)],
+    rights_confirmed: Annotated[bool, Form()],
+    adult_confirmed: Annotated[bool, Form()],
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    require_project(ResourceRepository(session), project_id, principal)
+    if not rights_confirmed or not adult_confirmed:
+        raise HTTPException(422, "Rights and adult-person confirmations are required")
+    content = await image.read(10 * 1024 * 1024 + 1)
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Character image must be between 1 byte and 10 MB")
+    mime_type = str(image.content_type or "").lower()
+    signatures = {
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": content.startswith(b"RIFF") and content[8:12] == b"WEBP",
+    }
+    if not signatures.get(mime_type):
+        raise HTTPException(422, "Only valid JPEG, PNG or WebP character images are accepted")
+    character_id = ResourceRepository.new_id("char")
+    extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[mime_type]
+    output_path = settings.storage_root / project_id / "characters" / f"{character_id}{extension}"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(content)
+    persisted = await asyncio.to_thread(MediaStorage(settings).persist, output_path, content_type=mime_type)
+    character = ResourceRepository(session).add(
+        resource_id=character_id,
+        kind="character",
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        status="ready",
+        data={
+            "name": name.strip(),
+            "description": description.strip(),
+            "source_type": "user_upload",
+            "rights_confirmed": True,
+            "adult_confirmed": True,
+            "synthetic": False,
+            "local_path": persisted["local_path"],
+            "storage_uri": persisted["storage_uri"],
+            "reference_url": persisted["public_path"],
+            "mime_type": mime_type,
+            "provider": "user",
+            "model_id": None,
+            "demo_data": False,
+            "created_by": principal.actor_id,
+        },
+    )
+    return ResourceRepository.serialize(character)
+
+
+@router.post("/projects/{project_id}/characters/generate", status_code=202, tags=["characters"])
+async def generate_character(
+    project_id: str,
+    payload: CharacterGenerate,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    require_project(ResourceRepository(session), project_id, principal)
+    character = ResourceRepository(session).add(
+        kind="character",
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        status="queued",
+        data={
+            "name": payload.name.strip(),
+            "description": payload.prompt.strip(),
+            "generation_prompt": payload.prompt.strip(),
+            "source_type": "ai_generated",
+            "rights_confirmed": True,
+            "adult_confirmed": True,
+            "synthetic": True,
+            "provider": "google",
+            "model_id": settings.google_image_model,
+            "demo_data": not settings.uses_live_video,
+            "created_by": principal.actor_id,
+        },
+    )
+    try:
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key="character.generate",
+            quantity=1,
+            reference_id=character.id,
+        )
+    except HTTPException:
+        session.delete(character)
+        session.commit()
+        raise
+    request.app.state.workflow.schedule_character_generation(character.id)
+    return {
+        "character_id": character.id,
+        "status": character.status,
+        "status_url": f"/v1/characters/{character.id}",
+    }
+
+
+@router.get("/characters/{character_id}", tags=["characters"])
+def get_character(
+    character_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:read")
+    return ResourceRepository.serialize(
+        require_resource(ResourceRepository(session), character_id, principal, kind="character")
+    )
+
+
+@router.delete("/characters/{character_id}", status_code=204, tags=["characters"])
+def archive_character(
+    character_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> None:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    character = require_resource(repo, character_id, principal, kind="character")
+    repo.update(character, status="archived", data={"archived_at": datetime.now(UTC).isoformat()})
 
 
 @router.get("/projects/{project_id}/brand-profile", tags=["projects"])
@@ -1857,6 +2016,10 @@ def create_idea(
     require_project(repo, project_id, principal)
     if payload.topic_candidate_id:
         require_resource(repo, payload.topic_candidate_id, principal, kind="topic_candidate", project_id=project_id)
+    if payload.character_id:
+        require_resource(repo, payload.character_id, principal, kind="character", project_id=project_id)
+    if payload.visual_mode == "ugc_native_audio" and not payload.character_id:
+        raise HTTPException(422, "UGC with native Veo speech requires a reusable character")
     idea = repo.add(
         kind="idea",
         organization_id=principal.organization_id,
@@ -1892,7 +2055,11 @@ def patch_idea(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     idea = require_resource(repo, idea_id, principal, kind="idea")
-    allowed = {key: value for key, value in payload.items() if key in {"title", "hook", "audience", "objective", "format", "status"}}
+    allowed = {
+        key: value
+        for key, value in payload.items()
+        if key in {"title", "hook", "audience", "objective", "format", "visual_mode", "character_id", "status"}
+    }
     new_status = allowed.pop("status", None)
     return ResourceRepository.serialize(repo.update(idea, data=allowed, status=new_status))
 
@@ -2101,7 +2268,25 @@ async def create_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     project = require_project(repo, project_id, principal)
+    idea = None
+    if payload.idea_id:
+        idea = require_resource(repo, payload.idea_id, principal, kind="idea", project_id=project_id)
+    effective_visual_mode = str(payload.visual_mode or (idea.data.get("visual_mode") if idea else None) or "ugc_creator")
+    character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
+    if effective_visual_mode == "ugc_native_audio":
+        if not character_id:
+            raise HTTPException(422, "UGC with native Veo speech requires a ready reusable character")
+        character = require_resource(repo, str(character_id), principal, kind="character", project_id=project_id)
+        if character.status != "ready" or not character.data.get("storage_uri"):
+            raise HTTPException(409, "Selected character is not ready")
     body = payload.model_dump(mode="json")
+    body.update(
+        {
+            "title": payload.title or (idea.data.get("title") if idea else None),
+            "visual_mode": effective_visual_mode,
+            "character_id": character_id,
+        }
+    )
     if idempotency_key:
         try:
             cached = get_idempotent_response(
@@ -2117,14 +2302,15 @@ async def create_generation(
             return cached[1]
     if project.status not in {"active", "review_required"}:
         raise HTTPException(409, f"Project is not ready for generation: {project.status}")
-    if payload.idea_id:
-        require_resource(repo, payload.idea_id, principal, kind="idea", project_id=project_id)
     if payload.source_item_id:
         require_resource(repo, payload.source_item_id, principal, kind="source_item", project_id=project_id)
+    pricing_feature = "video.generate_native_audio" if effective_visual_mode == "ugc_native_audio" else "video.generate"
+    configured_cost = float(feature_price(session, pricing_feature).provider_cost_usd) * len(payload.aspect_ratios)
     estimated = {
         "currency": "USD",
-        "min": round(0.8 * len(payload.aspect_ratios) + 0.05 * payload.variants, 2),
-        "max": round(4.2 * len(payload.aspect_ratios) + 0.25 * payload.variants, 2),
+        "min": round(configured_cost * 0.8, 2),
+        "max": round(configured_cost * 1.5, 2),
+        "basis": pricing_feature,
     }
     if estimated["max"] > payload.max_cost_usd:
         blocked = repo.add(
@@ -2184,7 +2370,7 @@ async def create_generation(
             session,
             organization_id=principal.organization_id,
             user_id=principal.actor_id,
-            feature_key="video.generate",
+            feature_key=pricing_feature,
             quantity=len(payload.aspect_ratios),
             reference_id=job.id,
         )
@@ -2476,6 +2662,13 @@ async def regenerate_scene(
     scene = require_resource(repo, scene_id, principal, kind="scene")
     if scene.data.get("locked"):
         raise HTTPException(409, "Locked scenes cannot be regenerated until explicitly unlocked")
+    storyboard = repo.get_any(str(scene.data.get("storyboard_id") or ""), kind="storyboard")
+    parent_job = (
+        repo.get_any(str(storyboard.data.get("generation_job_id") or ""), kind="generation_job")
+        if storyboard
+        else None
+    )
+    native_audio = bool(parent_job and parent_job.data.get("audio_mode") == "veo_native")
     attempt_no = int(scene.data.get("attempt", 0)) + 1
     prompt = payload.visual_prompt or scene.data.get("visual_prompt")
     regeneration = repo.add(
@@ -2490,6 +2683,8 @@ async def regenerate_scene(
             "visual_prompt": prompt,
             "model_id": settings.veo_model if settings.uses_live_video else "deterministic-test-fixture",
             "provider_mode": settings.provider_mode,
+            "audio_mode": "veo_native" if native_audio else "google_tts",
+            "character_id": parent_job.data.get("character_id") if parent_job else None,
             "selective": True,
         },
     )
@@ -2498,7 +2693,9 @@ async def regenerate_scene(
             session,
             organization_id=principal.organization_id,
             user_id=principal.actor_id,
-            feature_key="video.scene_regenerate",
+            feature_key=(
+                "video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate"
+            ),
             quantity=1,
             reference_id=regeneration.id,
         )

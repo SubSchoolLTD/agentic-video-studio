@@ -64,3 +64,51 @@ def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None
     assert manifest["composition_mode"] == "generated_scenes"
     assert manifest["overlay_style"] == "minimal_ugc_captions"
     assert technical_qa(output, aspect_ratio="9:16", duration_target=4)["passed"] is True
+
+
+def test_composes_native_audio_from_each_generated_scene(tmp_path: Path) -> None:
+    clips = []
+    for index, (color, frequency) in enumerate((("0x205c8a", 330), ("0x4ca278", 440)), start=1):
+        path = tmp_path / f"native_scene_{index}.mp4"
+        run_ffmpeg(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c={color}:s=360x640:r=30:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={frequency}:sample_rate=48000:duration=2",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(path),
+            ]
+        )
+        clips.append(path)
+    output = tmp_path / "native_composed.mp4"
+
+    manifest = render_motion_video(
+        title="Native speech composition",
+        brand_name="Framewise",
+        scenes=[
+            {"purpose": "hook", "narration": "Native line one.", "on_screen_text": "Line one"},
+            {"purpose": "proof", "narration": "Native line two.", "on_screen_text": "Line two"},
+        ],
+        aspect_ratio="9:16",
+        duration_seconds=4,
+        output_path=output,
+        scene_video_paths=clips,
+        use_scene_audio=True,
+    )
+
+    qa = technical_qa(output, aspect_ratio="9:16", duration_target=4)
+    assert manifest["audio_mode"] == "scene_native_audio"
+    assert manifest["audio_path"] is None
+    assert qa["passed"] is True
+    assert qa["actual"]["audio_codec"] == "aac"

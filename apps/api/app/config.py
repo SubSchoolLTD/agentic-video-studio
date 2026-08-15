@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     google_pubsub_topic: str = ""
     google_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    google_image_model: str = "gemini-2.5-flash-image"
     veo_model: str = "veo-3.1-generate-001"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
     google_genai_use_vertexai: bool = True

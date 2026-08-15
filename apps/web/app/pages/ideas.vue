@@ -11,12 +11,15 @@ const saving = ref(false)
 const search = ref('')
 const audienceFilter = ref('')
 const objectiveFilter = ref('')
-const form = reactive({ title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator' })
+const form = reactive({ title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', character_id: '' })
 
 watch(() => route.query.create, value => { if (value === '1') modalOpen.value = true })
 
 const { data, refresh } = await useAsyncData('ideas-list', () => api<any>(`/v1/projects/${projectId.value}/ideas`), { default: () => ({ items: [] }) })
+const { data: characterData } = await useAsyncData('idea-characters', () => api<any>(`/v1/projects/${projectId.value}/characters`), { default: () => ({ items: [] }) })
 const ideas = computed(() => data.value.items || [])
+const characters = computed(() => (characterData.value?.items || []).filter((item: any) => item.status === 'ready'))
+const usesCharacter = computed(() => ['ugc_creator', 'ugc_native_audio'].includes(form.visual_mode))
 const audiences = computed<string[]>(() => [...new Set<string>(ideas.value.map((item: any) => String(item.audience || '')).filter(Boolean))].sort())
 const filteredIdeas = computed(() => ideas.value.filter((item: any) => {
   const query = search.value.trim().toLowerCase()
@@ -36,7 +39,7 @@ async function saveIdea() {
     await api(`/v1/projects/${projectId.value}/ideas`, { method: 'POST', body: form })
     show('Idea added', 'You can research, score or send it into production.', 'success')
     modalOpen.value = false
-    Object.assign(form, { title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator' })
+    Object.assign(form, { title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', character_id: '' })
     await router.replace({ query: {} })
     await refresh()
   }
@@ -48,7 +51,7 @@ async function generate(idea: any) {
   try {
     const result = await api<any>(`/v1/projects/${projectId.value}/generation-jobs`, {
       method: 'POST', headers: { 'Idempotency-Key': `idea-${idea.id}-${Date.now()}` },
-      body: { idea_id: idea.id, aspect_ratios: ['9:16'], target_duration_seconds: 30, approval_mode: 'final_only', visual_mode: idea.visual_mode || 'ugc_creator' },
+      body: { idea_id: idea.id, aspect_ratios: ['9:16'], target_duration_seconds: 30, approval_mode: 'final_only', visual_mode: idea.visual_mode || 'ugc_creator', character_id: idea.character_id || null },
     })
     show('Production started', idea.title, 'success')
     await router.push(`/productions/${result.generation_job_id}`)
@@ -87,7 +90,7 @@ async function generate(idea: any) {
     <div v-if="modalOpen" class="modal-backdrop" @click.self="modalOpen = false">
       <form class="modal" @submit.prevent="saveIdea">
         <div class="modal__header"><div><h2>New content idea</h2><p>Keep one audience and one core thought per short video.</p></div><button type="button" class="icon-button icon-button--plain" @click="modalOpen = false"><X :size="18" /></button></div>
-        <div class="modal__body"><div class="form-grid"><div class="field field--full"><label for="idea-title">Idea or topic</label><input id="idea-title" v-model="form.title" data-testid="idea-title" required minlength="3" placeholder="Explain one valuable idea clearly" /></div><div class="field field--full"><label for="idea-hook">Opening hook</label><textarea id="idea-hook" v-model="form.hook" placeholder="What should the audience understand in the first two seconds?" /></div><div class="field"><label for="idea-audience">Primary audience</label><input id="idea-audience" v-model="form.audience" required minlength="2" placeholder="Product leaders" /></div><div class="field"><label for="idea-objective">Objective</label><select id="idea-objective" v-model="form.objective"><option value="awareness">Awareness</option><option value="education">Education</option><option value="traffic">Traffic</option><option value="lead">Lead</option><option value="install">Install</option><option value="purchase">Purchase</option></select></div><div class="field field--full"><label for="idea-visual-mode">Visual style</label><select id="idea-visual-mode" v-model="form.visual_mode"><option value="ugc_creator">Creator-led UGC (recommended)</option><option value="product_demo">Product demo</option><option value="cinematic">Cinematic b-roll</option><option value="motion_graphics">Motion graphics</option></select></div></div><div class="idea-note"><Sparkles :size="16" /><span>Creator-led UGC uses natural handheld scenes and one recurring creator. Voiceover and captions are added separately, so generated people are not asked to lip-sync.</span></div></div>
+        <div class="modal__body"><div class="form-grid"><div class="field field--full"><label for="idea-title">Idea or topic</label><input id="idea-title" v-model="form.title" data-testid="idea-title" required minlength="3" placeholder="Explain one valuable idea clearly" /></div><div class="field field--full"><label for="idea-hook">Opening hook</label><textarea id="idea-hook" v-model="form.hook" placeholder="What should the audience understand in the first two seconds?" /></div><div class="field"><label for="idea-audience">Primary audience</label><input id="idea-audience" v-model="form.audience" required minlength="2" placeholder="Product leaders" /></div><div class="field"><label for="idea-objective">Objective</label><select id="idea-objective" v-model="form.objective"><option value="awareness">Awareness</option><option value="education">Education</option><option value="traffic">Traffic</option><option value="lead">Lead</option><option value="install">Install</option><option value="purchase">Purchase</option></select></div><div class="field field--full"><label for="idea-visual-mode">Visual style</label><select id="idea-visual-mode" v-model="form.visual_mode"><option value="ugc_creator">Creator-led UGC · separate voiceover</option><option value="ugc_native_audio">Talking-head UGC · native Veo speech</option><option value="product_demo">Product demo</option><option value="cinematic">Cinematic b-roll</option><option value="motion_graphics">Motion graphics</option></select></div><div v-if="usesCharacter" class="field field--full"><label for="idea-character">Reusable character</label><select id="idea-character" v-model="form.character_id" :required="form.visual_mode === 'ugc_native_audio'"><option value="">{{ form.visual_mode === 'ugc_native_audio' ? 'Select a character' : 'Let the director cast a creator' }}</option><option v-for="character in characters" :key="character.id" :value="character.id">{{ character.name }}</option></select><small v-if="!characters.length">No ready characters. <NuxtLink to="/characters">Create one first.</NuxtLink></small></div></div><div class="idea-note"><Sparkles :size="16" /><span v-if="form.visual_mode === 'ugc_native_audio'">Veo uses the selected identity image in every scene and generates synchronized direct speech plus natural ambience. Google TTS is skipped.</span><span v-else>Creator-led UGC uses natural handheld scenes. Voiceover and captions are added separately unless native-audio mode is selected.</span></div></div>
         <div class="modal__footer"><button type="button" class="button" @click="modalOpen = false">Cancel</button><button class="button button--primary" data-testid="save-idea" :disabled="saving">{{ saving ? 'Saving…' : 'Create idea' }}</button></div>
       </form>
     </div>

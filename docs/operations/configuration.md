@@ -35,7 +35,7 @@ Google runtime identity should use workload identity/service account credentials
 
 `CLICKHOUSE_URL` and `GRAFANA_URL` are non-secret service endpoints. `CLICKHOUSE_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` are secrets. The API uses ClickHouse's dedicated `X-ClickHouse-User` and `X-ClickHouse-Key` headers so the credential is compatible with Cloud Run's authorization proxy without exposing it in a query string.
 
-The current production model IDs are `gemini-2.5-flash` and `veo-3.1-generate-001`. The deprecated Veo preview endpoint is intentionally not used.
+The current production model IDs are `gemini-2.5-flash`, `gemini-2.5-flash-image`, and `veo-3.1-generate-001`. The deprecated Veo preview endpoint is intentionally not used.
 
 ## Database migrations
 

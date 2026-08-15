@@ -14,26 +14,97 @@ from sqlalchemy.orm import Session
 from .models import CreditLedger, PriceRule, PromoCode, PromoRedemption, Subscription, Wallet
 
 DEFAULT_PRICES = (
-    ("project.website_analysis", "Website and brand analysis", "analysis", Decimal("0.02"), 30, Decimal("66.67")),
-    ("research.run", "Agentic web research", "research run", Decimal("0.05"), 75, Decimal("66.67")),
-    ("video.generate", "AI video production", "rendered aspect ratio", Decimal("2.50"), 500, Decimal("50.00")),
-    ("video.scene_regenerate", "AI scene regeneration", "scene", Decimal("0.50"), 100, Decimal("50.00")),
+    {
+        "feature_key": "project.website_analysis",
+        "label": "Website and brand analysis",
+        "unit": "analysis",
+        "provider": "Parallel + Google",
+        "integration": "Parallel Search / Vertex AI",
+        "model_id": "Parallel Search + gemini-2.5-flash",
+        "provider_cost_usd": Decimal("0.02"),
+        "charge_tokens": 30,
+        "margin_percent": Decimal("66.67"),
+    },
+    {
+        "feature_key": "research.run",
+        "label": "Agentic web research",
+        "unit": "research run",
+        "provider": "Parallel",
+        "integration": "Parallel Search API",
+        "model_id": "search",
+        "provider_cost_usd": Decimal("0.05"),
+        "charge_tokens": 75,
+        "margin_percent": Decimal("66.67"),
+    },
+    {
+        "feature_key": "video.generate",
+        "label": "Creator-led video with voiceover",
+        "unit": "rendered aspect ratio",
+        "provider": "Google + Parallel",
+        "integration": "Veo / Gemini / Cloud TTS / Parallel",
+        "model_id": "veo-3.1-generate-001 + gemini-2.5-flash + Chirp 3 HD",
+        "provider_cost_usd": Decimal("2.50"),
+        "charge_tokens": 500,
+        "margin_percent": Decimal("50.00"),
+    },
+    {
+        "feature_key": "video.generate_native_audio",
+        "label": "UGC video with native Veo speech",
+        "unit": "rendered aspect ratio",
+        "provider": "Google + Parallel",
+        "integration": "Veo native audio / Gemini / Parallel",
+        "model_id": "veo-3.1-generate-001 + gemini-2.5-flash",
+        "provider_cost_usd": Decimal("4.00"),
+        "charge_tokens": 800,
+        "margin_percent": Decimal("50.00"),
+    },
+    {
+        "feature_key": "video.scene_regenerate",
+        "label": "AI scene regeneration",
+        "unit": "scene",
+        "provider": "Google",
+        "integration": "Vertex AI Veo",
+        "model_id": "veo-3.1-generate-001",
+        "provider_cost_usd": Decimal("0.50"),
+        "charge_tokens": 100,
+        "margin_percent": Decimal("50.00"),
+    },
+    {
+        "feature_key": "video.scene_regenerate_native_audio",
+        "label": "Native-audio scene regeneration",
+        "unit": "scene",
+        "provider": "Google",
+        "integration": "Vertex AI Veo native audio",
+        "model_id": "veo-3.1-generate-001",
+        "provider_cost_usd": Decimal("0.80"),
+        "charge_tokens": 160,
+        "margin_percent": Decimal("50.00"),
+    },
+    {
+        "feature_key": "character.generate",
+        "label": "AI creator character",
+        "unit": "reference image",
+        "provider": "Google",
+        "integration": "Vertex AI Gemini Image",
+        "model_id": "gemini-2.5-flash-image",
+        "provider_cost_usd": Decimal("0.04"),
+        "charge_tokens": 25,
+        "margin_percent": Decimal("60.00"),
+    },
 )
 
 
 def seed_price_rules(session: Session) -> None:
-    for key, label, unit, provider_cost, tokens, margin in DEFAULT_PRICES:
-        if not session.get(PriceRule, key):
-            session.add(
-                PriceRule(
-                    feature_key=key,
-                    label=label,
-                    unit=unit,
-                    provider_cost_usd=provider_cost,
-                    charge_tokens=tokens,
-                    margin_percent=margin,
-                )
-            )
+    for price in DEFAULT_PRICES:
+        rule = session.get(PriceRule, price["feature_key"])
+        if not rule:
+            session.add(PriceRule(**price))
+            continue
+        # Schema provenance is safe to refresh while preserving all administrator-controlled economics.
+        rule.provider = str(price["provider"])
+        rule.integration = str(price["integration"])
+        rule.model_id = str(price["model_id"])
+        session.add(rule)
     session.commit()
 
 

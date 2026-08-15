@@ -21,6 +21,7 @@ import {
   Settings,
   Sparkles,
   ShieldCheck,
+  UserRound,
   X,
 } from 'lucide-vue-next'
 
@@ -38,6 +39,7 @@ const baseNav = [
   { label: 'Sources', to: '/sources', icon: FileStack },
   { label: 'Research', to: '/research', icon: RadioTower, badge: '3' },
   { label: 'Ideas', to: '/ideas', icon: Sparkles, badge: '7' },
+  { label: 'Characters', to: '/characters', icon: UserRound },
   { label: 'Calendar', to: '/calendar', icon: CalendarDays },
   { label: 'Productions', to: '/productions', icon: Clapperboard },
   { label: 'Library', to: '/library', icon: Library },

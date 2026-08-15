@@ -8,6 +8,7 @@ const confirmPassword = ref('')
 const loading = ref(false)
 const done = ref(false)
 const error = ref('')
+useHead({ title: 'Choose a new password — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 async function submit() { if (password.value !== confirmPassword.value) { error.value = 'Passwords do not match.'; return }; loading.value = true; error.value = ''; try { await $fetch('/v1/auth/password-reset/confirm', { baseURL: config.public.apiBase, method: 'POST', body: { token: route.query.token, password: password.value } }); done.value = true } catch (reason: any) { error.value = reason?.data?.error?.message || 'The reset link is invalid or expired.' } finally { loading.value = false } }
 </script>
 

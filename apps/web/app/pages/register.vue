@@ -11,7 +11,7 @@ const hydrated = ref(false)
 
 onMounted(() => { hydrated.value = true })
 
-useHead({ title: 'Create account — Framewise' })
+useHead({ title: 'Create account — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 
 async function submit() {
   loading.value = true

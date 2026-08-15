@@ -35,7 +35,7 @@ export async function registerThroughUi(page: Page, label = 'E2E') {
   await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible()
   const token = await verificationToken(page.request, email)
   await page.goto(`/verify-email?token=${encodeURIComponent(token)}`)
-  await expect(page).toHaveURL('/', { timeout: 15_000 })
+  await expect(page).toHaveURL('/app', { timeout: 15_000 })
   const cookies = await page.context().cookies()
   const projectId = cookies.find(item => item.name === 'avs_project')?.value
   expect(projectId).toMatch(/^prj_/)

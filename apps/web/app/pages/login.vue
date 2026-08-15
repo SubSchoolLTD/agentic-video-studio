@@ -11,14 +11,14 @@ const hydrated = ref(false)
 
 onMounted(() => { hydrated.value = true })
 
-useHead({ title: 'Sign in — Framewise' })
+useHead({ title: 'Sign in — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 
 async function submit() {
   loading.value = true
   error.value = ''
   try {
     await auth.login(email.value, password.value)
-    const target = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/') ? route.query.redirect : '/'
+    const target = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/') ? route.query.redirect : '/app'
     await navigateTo(target)
   }
   catch (reason: any) {

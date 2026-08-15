@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { registerThroughApi, registerThroughUi } from './helpers'
 
 const pages = [
-  ['/', 'Good morning, Navigation'],
+  ['/app', 'Good morning, Navigation'],
   ['/sources', 'Sources'],
   ['/research', 'Research radar'],
   ['/ideas', 'Ideas'],
@@ -16,6 +16,21 @@ const pages = [
   ['/developer', 'Developer'],
   ['/settings', 'Project settings'],
 ] as const
+
+test('public landing page explains the product, pricing and account entry points', async ({ page }) => {
+  const response = await page.goto('/')
+  expect(response?.status()).toBe(200)
+  await expect(page.getByRole('heading', { name: /checks the facts/i })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'From your website to a production system.' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Starter workspace' })).toBeVisible()
+  await expect(page.getByText('1,000 AI tokens included')).toBeVisible()
+  await expect(page.getByText('500 tokens', { exact: true })).toBeVisible()
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute('href', 'https://studio.subschool.us/')
+  await expect(page.locator('meta[name="description"]')).toHaveAttribute('content', /evidence-backed social video/i)
+  await expect(page.locator('script[type="application/ld+json"]')).toHaveCount(2)
+  await expect(page.locator('footer').getByRole('link', { name: 'Create account' })).toHaveAttribute('href', '/register')
+  await expect(page.locator('footer').getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
+})
 
 test('all product sections render without route errors', async ({ page }) => {
   await registerThroughUi(page, 'Navigation')
@@ -45,9 +60,11 @@ test('registration creates an isolated tenant and logout protects the workspace'
   await page.getByLabel('Email').fill(first.email)
   await page.getByLabel('Password').fill(first.password)
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL('/app')
   await page.getByRole('button', { name: 'Sign out' }).click()
   await page.goto('/')
+  await expect(page.getByRole('heading', { name: /checks the facts/i })).toBeVisible()
+  await page.goto('/app')
   await expect(page).toHaveURL(/\/login\?redirect=/)
 })
 

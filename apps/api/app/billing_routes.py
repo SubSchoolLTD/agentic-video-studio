@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .billing import ensure_wallet, redeem_promo
+from .config import Settings, get_settings
 from .database import get_db
 from .models import CreditLedger, PriceRule, Subscription
 from .security import Principal, get_principal
@@ -15,6 +16,29 @@ router = APIRouter(prefix="/v1/billing", tags=["billing"])
 
 class PromoRedeemRequest(BaseModel):
     code: str = Field(min_length=3, max_length=64)
+
+
+@router.get("/public-pricing")
+def public_pricing(
+    session: Session = Depends(get_db), settings: Settings = Depends(get_settings)
+) -> dict[str, object]:
+    """Return the current customer-facing token rates without exposing provider costs or margins."""
+    prices = list(
+        session.scalars(select(PriceRule).where(PriceRule.is_active.is_(True)).order_by(PriceRule.label))
+    )
+    return {
+        "beta_monthly_usd": 0,
+        "welcome_tokens": settings.signup_credit_tokens,
+        "prices": [
+            {
+                "feature_key": item.feature_key,
+                "label": item.label,
+                "unit": item.unit,
+                "charge_tokens": int(item.charge_tokens),
+            }
+            for item in prices
+        ],
+    }
 
 
 @router.get("/summary")

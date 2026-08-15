@@ -1,0 +1,18 @@
+User-agent: *
+Allow: /
+Disallow: /app
+Disallow: /admin
+Disallow: /billing
+Disallow: /calendar
+Disallow: /connections
+Disallow: /developer
+Disallow: /ideas
+Disallow: /library
+Disallow: /productions
+Disallow: /publishing
+Disallow: /research
+Disallow: /settings
+Disallow: /sources
+Disallow: /strategy
+
+Sitemap: https://studio.subschool.us/sitemap.xml

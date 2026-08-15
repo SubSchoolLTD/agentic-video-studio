@@ -177,3 +177,18 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
     assert summary.json()["balance_tokens"] == 1_220
     ledger = jwt_client.get("/v1/billing/ledger", headers=headers(customer)).json()["items"]
     assert any(item["feature_key"] == "video.generate" and item["amount_tokens"] == -500 for item in ledger)
+
+
+def test_public_pricing_exposes_customer_rates_without_internal_economics(jwt_client: TestClient):
+    response = jwt_client.get("/v1/billing/public-pricing")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["beta_monthly_usd"] == 0
+    assert payload["welcome_tokens"] == 1_000
+    assert {item["feature_key"] for item in payload["prices"]} == {
+        "project.website_analysis",
+        "research.run",
+        "video.generate",
+        "video.scene_regenerate",
+    }
+    assert all("provider_cost_usd" not in item and "margin_percent" not in item for item in payload["prices"])

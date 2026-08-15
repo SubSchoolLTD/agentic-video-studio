@@ -7,7 +7,7 @@ const auth = useAuth()
 const state = ref<'loading' | 'success' | 'error'>('loading')
 const message = ref('Confirming your email and preparing the workspace…')
 
-useHead({ title: 'Verify email — Framewise' })
+useHead({ title: 'Verify email — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 
 onMounted(async () => {
   const token = typeof route.query.token === 'string' ? route.query.token : ''
@@ -17,7 +17,7 @@ onMounted(async () => {
     auth.setSession(payload)
     state.value = 'success'
     message.value = 'Email confirmed. Your private workspace is ready.'
-    setTimeout(() => void navigateTo('/'), 900)
+    setTimeout(() => void navigateTo('/app'), 900)
   }
   catch (reason: any) {
     state.value = 'error'

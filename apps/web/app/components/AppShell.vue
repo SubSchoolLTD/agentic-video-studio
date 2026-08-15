@@ -34,7 +34,7 @@ const hydrated = ref(false)
 onMounted(() => { hydrated.value = true })
 
 const baseNav = [
-  { label: 'Overview', to: '/', icon: Gauge },
+  { label: 'Overview', to: '/app', icon: Gauge },
   { label: 'Sources', to: '/sources', icon: FileStack },
   { label: 'Research', to: '/research', icon: RadioTower, badge: '3' },
   { label: 'Ideas', to: '/ideas', icon: Sparkles, badge: '7' },
@@ -69,7 +69,7 @@ const healthDetail = computed(() => {
 })
 
 function isActive(to: string) {
-  if (to === '/') return route.path === '/'
+  if (to === '/app') return route.path === '/app'
   return route.path === to || route.path.startsWith(`${to}/`)
 }
 
@@ -79,7 +79,7 @@ function switchProject(event: Event) {
   projectId.value = value
   const cookie = useCookie<string | null>('avs_project', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 365 })
   cookie.value = value
-  void navigateTo('/')
+  void navigateTo('/app')
 }
 </script>
 

@@ -5,6 +5,7 @@ const config = useRuntimeConfig()
 const email = ref('')
 const sent = ref(false)
 const loading = ref(false)
+useHead({ title: 'Reset password — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 async function submit() { loading.value = true; await $fetch('/v1/auth/password-reset/request', { baseURL: config.public.apiBase, method: 'POST', body: { email: email.value } }).catch(() => undefined); loading.value = false; sent.value = true }
 </script>
 

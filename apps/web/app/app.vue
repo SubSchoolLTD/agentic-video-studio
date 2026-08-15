@@ -1,6 +1,6 @@
 <script setup lang="ts">
 const route = useRoute()
-const publicRoutes = ['/login', '/register', '/verify-email', '/forgot-password', '/reset-password']
+const publicRoutes = ['/', '/login', '/register', '/verify-email', '/forgot-password', '/reset-password']
 const isPublic = computed(() => publicRoutes.includes(route.path))
 
 useHead({

@@ -12,6 +12,10 @@ export default defineNuxtConfig({
   app: {
     head: {
       title: 'Framewise — Agentic Video Studio',
+      link: [
+        { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
+        { rel: 'manifest', href: '/site.webmanifest' },
+      ],
       meta: [
         { name: 'description', content: 'Evidence-first autonomous video production for small media teams.' },
         { name: 'theme-color', content: '#17131f' },

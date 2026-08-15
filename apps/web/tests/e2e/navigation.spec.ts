@@ -6,6 +6,7 @@ const pages = [
   ['/sources', 'Sources'],
   ['/research', 'Research radar'],
   ['/ideas', 'Ideas'],
+  ['/characters', 'Characters'],
   ['/calendar', 'Calendar'],
   ['/productions', 'Productions'],
   ['/library', 'Library'],

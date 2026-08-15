@@ -6,7 +6,7 @@ The hackathon path is intentionally end-to-end:
 
 ```text
 website + brief → Parallel research → evidence-backed idea → Gemini/ADK editorial pipeline
-→ Veo scenes → deterministic FFmpeg render → QA and explainable scores
+→ Veo scenes with TTS or native speech → deterministic FFmpeg render → QA and explainable scores
 → approval → YouTube publication draft/upload → metrics → strategy version
 ```
 
@@ -51,7 +51,7 @@ pnpm test:e2e
 
 Credentials belong in `.env` locally and in the deployment secret store/GitHub Actions secrets remotely. `.env` and generated media are ignored by git. See [configuration.md](docs/operations/configuration.md) and [architecture.md](docs/architecture/architecture.md).
 
-The web application uses verified-email accounts, short-lived JWT access tokens and rotating refresh sessions. Every resource lookup is constrained by the authenticated organization and project. Platform administration, including users, AI-token adjustments, promo codes, subscription grants, pricing and margin controls, is separate from tenant owner permissions.
+The web application uses verified-email accounts, short-lived JWT access tokens and rotating refresh sessions. Every resource lookup is constrained by the authenticated organization and project. Users can upload or generate private reusable creator references and choose classic creator-led voiceover or talking-head UGC with native Veo audio. Platform administration, including users, D7/D30 retention, deposits and usage, AI-token adjustments, promo codes, subscription grants, per-model pricing and margin controls, is separate from tenant owner permissions.
 
 The deployed stack uses Cloud Run, Cloud SQL for PostgreSQL, private Cloud Storage, ClickHouse/Grafana, Artifact Registry, Cloud Build, Secret Manager, Vertex AI (Gemini 2.5 Flash and Veo 3.1), Google Cloud TTS, and Parallel Search. See [deployment.md](docs/operations/deployment.md).
 

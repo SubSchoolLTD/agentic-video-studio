@@ -19,7 +19,7 @@ flowchart LR
   API --> PubSub[Pub/Sub domain events]
   WF --> Parallel[Parallel Search]
   WF --> ADK[Google ADK + Gemini]
-  WF --> Veo[Veo + Google TTS]
+  WF --> Veo[Veo native audio / Google TTS]
   WF --> Render[FFmpeg renderer]
   Render --> Media[(Local / Cloud Storage)]
   API --> YouTube[YouTube official API]
@@ -81,4 +81,4 @@ Cloud Scheduler starts the `avs-metrics-collector` Google Workflow every 15 minu
 
 ## Degradation
 
-If Parallel is required and unavailable, research-backed generation pauses. If Veo is unavailable, the production package remains usable and a deterministic motion-graphics fallback can be rendered when project policy permits. If analytics/observability is unavailable, the core workflow continues with buffered events.
+If Parallel is required and unavailable, research-backed generation pauses. If live Veo is unavailable, the job fails visibly and can resume from its last durable checkpoint; production never labels a deterministic fixture or motion-graphics substitute as a successful provider render. If analytics/observability is unavailable, the core workflow continues with buffered events.

@@ -59,6 +59,10 @@ class PasswordResetConfirm(TokenRequest):
     password: str = Field(min_length=10, max_length=128)
 
 
+class TestSupportAdminRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
 def _normalize_email(raw: str) -> str:
     try:
         return validate_email(raw, check_deliverability=False).normalized.lower()
@@ -449,3 +453,23 @@ def test_support_email_token(
     if not raw:
         raise HTTPException(404, "Email token not found")
     return {"token": raw}
+
+
+@router.post("/test-support/platform-admin", include_in_schema=False)
+def test_support_platform_admin(
+    payload: TestSupportAdminRequest,
+    x_test_support_secret: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_db),
+) -> dict[str, str]:
+    if settings.app_env != "test" or not secrets.compare_digest(
+        x_test_support_secret or "", settings.test_support_secret
+    ):
+        raise HTTPException(404, "Resource not found")
+    user = session.scalar(select(User).where(User.email == payload.email.lower()))
+    if not user or user.status != "active":
+        raise HTTPException(404, "Active user not found")
+    user.is_platform_admin = True
+    session.add(user)
+    session.commit()
+    return {"user_id": user.id, "status": "platform_admin"}

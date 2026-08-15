@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -141,6 +143,7 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
 
     overview = jwt_client.get("/v1/platform-admin/overview", headers=headers(admin))
     assert overview.status_code == 200
+    assert overview.json()["retention"]["day_7"]["definition"] == "Any authenticated activity on or after day 7"
     promo = jwt_client.post(
         "/v1/platform-admin/promo-codes",
         headers=headers(admin),
@@ -160,6 +163,9 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
     )
     assert redeemed.status_code == 200, redeemed.text
     assert redeemed.json()["balance_tokens"] == 1_720
+    redemption_history = jwt_client.get("/v1/billing/promo-codes/redemptions", headers=headers(customer))
+    assert redemption_history.status_code == 200
+    assert redemption_history.json()["items"][0]["credit_tokens"] == 750
     assert jwt_client.post(
         "/v1/billing/promo-codes/redeem",
         headers=headers(customer),
@@ -178,6 +184,75 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
     ledger = jwt_client.get("/v1/billing/ledger", headers=headers(customer)).json()["items"]
     assert any(item["feature_key"] == "video.generate" and item["amount_tokens"] == -500 for item in ledger)
 
+    # Native-audio UGC must use a tenant-owned reusable character and its own editable price rule.
+    missing_character = jwt_client.post(
+        f"/v1/projects/{customer['default_project_id']}/generation-jobs",
+        headers=headers(customer),
+        json={"title": "Native UGC", "visual_mode": "ugc_native_audio"},
+    )
+    assert missing_character.status_code == 422
+    reference_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    uploaded = jwt_client.post(
+        f"/v1/projects/{customer['default_project_id']}/characters/upload",
+        headers=headers(customer),
+        files={"image": ("creator.png", reference_png, "image/png")},
+        data={
+            "name": "Reusable creator",
+            "description": "Adult education creator in neutral casual clothing",
+            "rights_confirmed": "true",
+            "adult_confirmed": "true",
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    character = uploaded.json()
+    assert character["status"] == "ready"
+    native_generation = jwt_client.post(
+        f"/v1/projects/{customer['default_project_id']}/generation-jobs",
+        headers=headers(customer),
+        json={
+            "title": "Native UGC",
+            "visual_mode": "ugc_native_audio",
+            "character_id": character["id"],
+            "aspect_ratios": ["9:16"],
+            "variants": 1,
+        },
+    )
+    assert native_generation.status_code == 202, native_generation.text
+    native_job = jwt_client.get(
+        f"/v1/generation-jobs/{native_generation.json()['generation_job_id']}", headers=headers(customer)
+    ).json()
+    assert native_job["title"] == "Native UGC"
+    assert native_job["visual_mode"] == "ugc_native_audio"
+    assert native_job["character_id"] == character["id"]
+    assert native_job["estimated_cost"]["basis"] == "video.generate_native_audio"
+
+    # Provider spend is a cost, never a customer deposit. Only explicit paid/admin top-ups count as cash.
+    customer_user = None
+    with SessionLocal() as session:
+        customer_user = session.scalar(select(User).where(User.email == customer["email"]))
+        assert customer_user
+        customer_user.created_at = datetime.now(UTC) - timedelta(days=31)
+        session.add(customer_user)
+        session.commit()
+    topup = jwt_client.post(
+        f"/v1/platform-admin/users/{customer_user.id}/credits",
+        headers=headers(admin),
+        json={"amount_tokens": 100, "deposited_usd": 12.5, "description": "Recorded customer payment"},
+    )
+    assert topup.status_code == 200
+    overview = jwt_client.get("/v1/platform-admin/overview", headers=headers(admin)).json()
+    assert overview["money"]["deposited_usd"] >= 12.5
+    assert overview["money"]["provider_cost_usd"] > 0
+    assert overview["retention"]["day_30"]["retained"] >= 1
+    assert any(item["feature_key"] == "video.generate_native_audio" for item in overview["usage_by_feature"])
+
+    prices = jwt_client.get("/v1/platform-admin/pricing", headers=headers(admin)).json()["items"]
+    native_price = next(item for item in prices if item["feature_key"] == "video.generate_native_audio")
+    assert native_price["provider"] == "Google + Parallel"
+    assert "veo-3.1" in native_price["model_id"]
+
 
 def test_public_pricing_exposes_customer_rates_without_internal_economics(jwt_client: TestClient):
     response = jwt_client.get("/v1/billing/public-pricing")
@@ -189,6 +264,9 @@ def test_public_pricing_exposes_customer_rates_without_internal_economics(jwt_cl
         "project.website_analysis",
         "research.run",
         "video.generate",
+        "video.generate_native_audio",
         "video.scene_regenerate",
+        "video.scene_regenerate_native_audio",
+        "character.generate",
     }
     assert all("provider_cost_usd" not in item and "margin_percent" not in item for item in payload["prices"])

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .billing import ensure_wallet, redeem_promo
 from .config import Settings, get_settings
 from .database import get_db
-from .models import CreditLedger, PriceRule, Subscription
+from .models import CreditLedger, PriceRule, PromoCode, PromoRedemption, Subscription
 from .security import Principal, get_principal
 
 router = APIRouter(prefix="/v1/billing", tags=["billing"])
@@ -110,3 +110,33 @@ def redeem(
         user_id=principal.actor_id,
         organization_id=principal.organization_id,
     )
+
+
+@router.get("/promo-codes/redemptions")
+def promo_redemptions(
+    principal: Principal = Depends(get_principal), session: Session = Depends(get_db)
+) -> dict[str, object]:
+    rows = list(
+        session.execute(
+            select(PromoRedemption, PromoCode)
+            .join(PromoCode, PromoCode.id == PromoRedemption.promo_code_id)
+            .where(
+                PromoRedemption.user_id == principal.actor_id,
+                PromoRedemption.organization_id == principal.organization_id,
+            )
+            .order_by(PromoRedemption.created_at.desc())
+        )
+    )
+    return {
+        "items": [
+            {
+                "id": redemption.id,
+                "code": promo.code_prefix,
+                "kind": promo.kind,
+                "credit_tokens": int(promo.credit_tokens),
+                "subscription_days": int(promo.subscription_days),
+                "redeemed_at": redemption.created_at.isoformat(),
+            }
+            for redemption, promo in rows
+        ]
+    }

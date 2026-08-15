@@ -23,7 +23,7 @@
 | Исследование темы | Parallel Search | raw result metadata, источники, claims |
 | Brief, сценарий, policy, storyboard | Gemini Structured Output | типизированный Editorial Package |
 | Видеосцены | Veo 3.1 | отдельный scene attempt для каждой сцены и aspect ratio |
-| Озвучка | Google Cloud Text-to-Speech | WAV в private storage |
+| Озвучка | Google Cloud Text-to-Speech либо native audio Veo | WAV в private storage либо speech/ambience внутри scene MP4 |
 | Монтаж | FFmpeg | MP4, VTT, render manifest и SHA-256 |
 | Визуальный QA | Gemini multimodal | issues, scene issues и независимые hard gates |
 | Публикация | YouTube Data API либо честный export workflow | publication job и provider status |
@@ -83,11 +83,13 @@ rules:
 - одну primary audience;
 - objective;
 - content format;
-- visual mode.
+- visual mode;
+- optional reusable character.
 
 Доступные visual modes:
 
 - `ugc_creator` — creator-led natural b-roll, режим по умолчанию;
+- `ugc_native_audio` — talking-head UGC с повторно используемым персонажем и речью, которую Veo генерирует сразу вместе с видео;
 - `product_demo` — creator-led демонстрация с approved product assets;
 - `cinematic` — naturalistic cinematic b-roll;
 - `motion_graphics` — только явный выбор пользователя, не скрытый fallback.
@@ -106,6 +108,8 @@ Workflow фиксирует snapshot:
   "requested_hook": "{idea.hook}",
   "content_format": "{idea.format}",
   "visual_mode": "{idea.visual_mode | ugc_creator}",
+  "audio_mode": "{veo_native | google_tts}",
+  "character_id": "{selected_character | null}",
   "aspect_ratios": ["9:16"]
 }
 ```
@@ -141,7 +145,7 @@ title: {title}
 audience: {audience}
 objective: {objective}
 duration_seconds: {8..60}
-visual_mode: {ugc_creator | product_demo | cinematic | motion_graphics}
+visual_mode: {ugc_creator | ugc_native_audio | product_demo | cinematic | motion_graphics}
 aspect_ratios: {aspect_ratios}
 requested_hook: {human_hook | null}
 content_format: {format}
@@ -158,9 +162,10 @@ requirements:
   creator_continuity: Define one specific recurring creator profile and reuse it verbatim across all relevant scenes
   visual_bible: 3 to 8 concise continuity rules covering creator, wardrobe, location, light, camera texture and palette
   generation_boundary: No readable text, captions, prices, logos, brands or invented UI inside generative video
-  audio_boundary: Plan silent visual performance; voiceover and captions are added after scene generation
+  audio_boundary: {Plan exact short direct speech for Veo | Plan silent performance for later TTS}
   cta: must match brand policy
 mode_direction: {VISUAL_MODE_DIRECTION}
+selected_creator: {saved_character_name_and_description | null}
 ```
 
 Gemini обязан вернуть:
@@ -187,7 +192,7 @@ Media generation не запускается, если выполняется х
 
 В этом случае job получает `blocked`, а Veo не вызывается и provider spend не происходит.
 
-### 7. Storyboard и UGC visual bible
+### 7. Storyboard, reusable character и UGC visual bible
 
 Для `ugc_creator` действует направление:
 
@@ -198,11 +203,18 @@ The creator must not visibly speak because narration is added separately. Avoid 
 abstract motion graphics, impossible camera moves and sterile studio staging.
 ```
 
-Почему «не должен visibly speak»: текущая архитектура использует отдельный Google TTS voiceover. Если Veo-человек будет говорить, движения губ не совпадут с финальной дорожкой. Поэтому текущий UGC — это creator-led b-roll с закадровым голосом, а не lip-synced testimonial.
+Это поведение сохранено для `ugc_creator`: человек выполняет действия, а Google TTS добавляется после Veo, поэтому человек не должен visibly speak.
+
+Для talking-head используется отдельный `ugc_native_audio`. Перед запуском пользователь выбирает reusable character:
+
+- загружает JPEG/PNG/WebP до 10 MB и подтверждает права на изображение и совершеннолетие всех узнаваемых людей; либо
+- просит Gemini 2.5 Flash Image создать оригинального синтетического взрослого персонажа без сходства со знаменитостью.
+
+Character хранится внутри конкретного tenant/project в private storage. В `ugc_native_audio` его изображение передаётся Veo как image-to-video input каждой сцены, а текстовое имя/описание — Gemini Director как обязательный creator profile. Без ready character такой job не создаётся.
 
 ### 8. Veo prompt каждой сцены
 
-Prompt version: `editorial-ugc-v2`.
+Prompt version: `editorial-ugc-v3`.
 
 ```text
 {VISUAL_MODE_DIRECTION}
@@ -215,7 +227,7 @@ Visible action: {scene.action}.
 Camera: {scene.camera_direction}.
 Performance: {scene.performance_direction}.
 Project palette reference: {brand.visual.palette | project-approved neutral palette}.
-Silent visual performance; relaxed mouth, no visible speaking.
+{AUDIO_DIRECTION}
 No readable screens, interfaces, letters, numbers, subtitles, prices, logos, brands or UI glyphs.
 Framing: {ASPECT_RATIO_DIRECTION}
 ```
@@ -227,11 +239,18 @@ Aspect suffixes:
 16:9  → Native horizontal 16:9 composition. Re-stage the action for the wider frame; do not crop a vertical shot.
 ```
 
-Для каждой сцены и каждого ratio создаётся отдельная Veo operation длительностью 8 секунд. `generate_audio=false`: звук создаётся отдельно. Если live Veo не вернул непустой файл, stage падает; motion graphics больше не подставляется как незаметный успешный результат.
+Для обычных режимов `AUDIO_DIRECTION` требует silent performance и Veo вызывается с `generate_audio=false`. Для `ugc_native_audio` направление имеет вид:
+
+```text
+The creator says exactly in the narration language: "{scene.narration}".
+Use clear synchronized direct speech, consistent voice identity and subtle natural room ambience.
+```
+
+В этом режиме Veo получает `image={character.reference}` и `generate_audio=true`. Для каждой сцены и каждого ratio создаётся отдельная operation длительностью 8 секунд. Если live Veo не вернул непустой файл, stage падает; motion graphics не подставляется как незаметный успешный результат.
 
 ### 9. Озвучка и captions
 
-Google TTS получает готовый `script.voiceover` без дополнительного LLM prompt:
+В `ugc_creator`, product demo, cinematic и motion graphics Google TTS получает готовый `script.voiceover` без дополнительного LLM prompt:
 
 ```text
 voice: {GOOGLE_TTS_VOICE}
@@ -243,6 +262,8 @@ effects_profile: small-bluetooth-speaker-class-device
 
 Из narration beats параллельно создаётся WebVTT. Сейчас точность тайминга — scene-level, не word-level forced alignment.
 
+В `ugc_native_audio` Google TTS полностью пропускается. Speech и ambience уже находятся внутри каждого Veo scene MP4; stage `voice_audio` явно сохраняет provider `veo_native_audio`.
+
 ### 10. FFmpeg assembly
 
 Для каждого ratio renderer:
@@ -251,7 +272,7 @@ effects_profile: small-bluetooth-speaker-class-device
 2. scale/crop приводит их к 720×1280 или 1280×720;
 3. trim выравнивает длительность сегментов;
 4. concat собирает сцену;
-5. добавляет Google TTS;
+5. добавляет Google TTS либо последовательно склеивает собственные audio streams сцен Veo;
 6. накладывает небольшой project label и максимум две строки captions в нижней safe-zone;
 7. кодирует H.264/AAC;
 8. сохраняет manifest и SHA-256.
@@ -310,13 +331,12 @@ Gemini возвращает общий pass, issues, scene issues, continuity и
 
 Это реальные ограничения текущей версии, а не скрытые моки:
 
-1. **Нет image-to-video reference asset.** Creator consistency задаётся текстовым visual bible. Для устойчивого лица/одежды нужен approved reference image или первый/last frame conditioning.
-2. **Нет lip sync.** Текущий UGC — действия человека + voiceover. Talking-head testimonial потребует нативного speech generation либо отдельного lip-sync этапа.
+1. **Identity continuity не абсолютна.** Каждая сцена использует тот же image-to-video input и visual bible, но отдельные Veo operations могут немного менять лицо, голос, одежду или помещение. Автоматического embedding-based continuity gate пока нет.
+2. **Одна reference pose.** Character library хранит одно изображение, а не полноценный character sheet с несколькими ракурсами и утверждённым voice profile.
 3. **Нет загрузки реальных customer clips.** Нужен asset intake и режим «собрать из моих исходников».
-4. **Нет word-level captions.** VTT привязан к сценам; нужен forced alignment.
+4. **Нет word-level captions.** VTT привязан к сценам; нужен forced alignment. Для native speech фактическое произношение Veo может немного отличаться от плановой строки.
 5. **Один editorial Gemini call.** Durable stages раздельные, но независимые agents пока не критикуют результаты друг друга.
-6. **Text-only continuity.** Нет automatic character sheet, shot reference board и embedding-based visual consistency comparison.
-7. **Product demo требует approved assets.** Veo специально запрещено изобретать читаемый интерфейс. Без реальных screenshots этот режим может показать только контекст использования продукта.
+6. **Product demo требует approved assets.** Veo специально запрещено изобретать читаемый интерфейс. Без реальных screenshots этот режим может показать только контекст использования продукта.
 
 ## Как конструктивно разбирать следующий ролик
 

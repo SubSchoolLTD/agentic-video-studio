@@ -45,6 +45,7 @@ def render_motion_video(
     output_path: Path,
     scene_video_paths: list[Path] | None = None,
     audio_path: Path | None = None,
+    use_scene_audio: bool = False,
 ) -> dict[str, Any]:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RenderError("FFmpeg and ffprobe are required")
@@ -132,22 +133,36 @@ def render_motion_video(
         for path in scene_video_paths:
             command.extend(["-stream_loop", "-1", "-i", str(path)])
         audio_input_index = len(scene_video_paths)
-        if audio_path and audio_path.exists():
-            command.extend(["-i", str(audio_path)])
-        else:
-            command.extend(["-f", "lavfi", "-i", f"sine=frequency=174:sample_rate=48000:duration={duration_seconds}"])
+        if not use_scene_audio:
+            if audio_path and audio_path.exists():
+                command.extend(["-i", str(audio_path)])
+            else:
+                command.extend(["-f", "lavfi", "-i", f"sine=frequency=174:sample_rate=48000:duration={duration_seconds}"])
         segment_duration = duration_seconds / len(scene_video_paths)
-        chains = [
-            f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
-            f"fps=30,trim=duration={segment_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
-            for index in range(len(scene_video_paths))
-        ]
-        concat_inputs = "".join(f"[v{index}]" for index in range(len(scene_video_paths)))
-        chains.append(f"{concat_inputs}concat=n={len(scene_video_paths)}:v=1:a=0[scene_base]")
+        chains = []
+        for index in range(len(scene_video_paths)):
+            chains.append(
+                f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+                f"fps=30,trim=duration={segment_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
+            )
+            if use_scene_audio:
+                chains.append(
+                    f"[{index}:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:"
+                    f"channel_layouts=stereo,atrim=duration={segment_duration:.3f},asetpts=PTS-STARTPTS[a{index}]"
+                )
+        if use_scene_audio:
+            concat_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(scene_video_paths)))
+            chains.append(
+                f"{concat_inputs}concat=n={len(scene_video_paths)}:v=1:a=1[scene_base][scene_audio]"
+            )
+        else:
+            concat_inputs = "".join(f"[v{index}]" for index in range(len(scene_video_paths)))
+            chains.append(f"{concat_inputs}concat=n={len(scene_video_paths)}:v=1:a=0[scene_base]")
         chains.append(f"[scene_base]{','.join(overlays)}[vout]")
-        volume = "1" if audio_path and audio_path.exists() else "0.035"
+        volume = "1" if use_scene_audio or (audio_path and audio_path.exists()) else "0.035"
+        audio_source = "[scene_audio]" if use_scene_audio else f"[{audio_input_index}:a]"
         chains.append(
-            f"[{audio_input_index}:a]volume={volume},apad,atrim=duration={duration_seconds},"
+            f"{audio_source}volume={volume},apad,atrim=duration={duration_seconds},"
             f"afade=t=in:st=0:d=0.4,afade=t=out:st={max(0, duration_seconds - 0.6)}:d=0.6[a]"
         )
         command.extend(["-filter_complex", ";".join(chains), "-map", "[vout]", "-map", "[a]"])
@@ -208,6 +223,7 @@ def render_motion_video(
         "scenes": scenes,
         "scene_video_paths": [str(path) for path in scene_video_paths],
         "audio_path": str(audio_path) if audio_path else None,
+        "audio_mode": "scene_native_audio" if use_scene_audio else "external_audio",
         "composition_mode": "generated_scenes" if scene_video_paths else "deterministic_test_fixture",
         "overlay_style": "minimal_ugc_captions" if scene_video_paths else "test_fixture_card",
         "brand_name": brand_name,

@@ -135,6 +135,13 @@ class ResourceRepository:
             payload["render_url"] = MediaStorage(get_settings()).signed_path(
                 str(payload["render_url"]), resource.organization_id
             )
+        if resource.kind == "character" and payload.get("reference_url"):
+            from .config import get_settings
+            from .storage import MediaStorage
+
+            payload["reference_url"] = MediaStorage(get_settings()).signed_path(
+                str(payload["reference_url"]), resource.organization_id
+            )
         if resource.kind == "publication" and payload.get("export_package_url"):
             from .config import get_settings
             from .storage import MediaStorage

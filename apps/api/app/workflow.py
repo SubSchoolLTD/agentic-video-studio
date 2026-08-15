@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from .database import SessionLocal
 from .events import EventSink
 from .models import Resource
 from .providers import (
+    CharacterImageProvider,
     EditorialProvider,
     MultimodalQAProvider,
     ParallelSearchProvider,
@@ -59,6 +61,7 @@ class WorkflowManager:
         self.multimodal_qa = MultimodalQAProvider(settings)
         self.veo = VeoProvider(settings)
         self.tts = TextToSpeechProvider(settings)
+        self.character_image = CharacterImageProvider(settings)
         self.storage = MediaStorage(settings)
         self.events = EventSink(settings)
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -80,6 +83,15 @@ class WorkflowManager:
             self.run_scene_regeneration(regeneration_id),
             name=task_key,
         )
+        self.tasks[task_key] = task
+        task.add_done_callback(lambda _: self.tasks.pop(task_key, None))
+
+    def schedule_character_generation(self, character_id: str) -> None:
+        task_key = f"character-generation:{character_id}"
+        existing = self.tasks.get(task_key)
+        if existing and not existing.done():
+            return
+        task = asyncio.create_task(self.run_character_generation(character_id), name=task_key)
         self.tasks[task_key] = task
         task.add_done_callback(lambda _: self.tasks.pop(task_key, None))
 
@@ -111,6 +123,86 @@ class WorkflowManager:
                 self.schedule_scene_regeneration,
                 regeneration.id,
             )
+        with SessionLocal() as session:
+            characters = list(
+                session.scalars(
+                    select(Resource).where(
+                        Resource.kind == "character",
+                        Resource.status.in_(["queued", "generating"]),
+                    )
+                )
+            )
+        for character in characters:
+            loop.call_later(
+                RESUME_GRACE_SECONDS,
+                self.schedule_character_generation,
+                character.id,
+            )
+
+    async def run_character_generation(self, character_id: str) -> None:
+        with SessionLocal() as session:
+            repo = ResourceRepository(session)
+            character = repo.get_any(character_id, kind="character")
+            if not character or character.status not in {"queued", "generating"}:
+                return
+            repo.update(character, status="generating", data={"started_at": datetime.now(UTC).isoformat()})
+            try:
+                output_base = (
+                    self.settings.storage_root
+                    / (character.project_id or "unknown")
+                    / "characters"
+                    / character.id
+                )
+                result = await self.character_image.generate(
+                    str(
+                        character.data.get("generation_prompt")
+                        or character.data.get("description")
+                        or character.data["name"]
+                    ),
+                    output_path=output_base,
+                )
+                demo_data = result is None
+                if result is None:
+                    # A valid deterministic PNG keeps local/CI explicit and never claims Gemini provenance.
+                    output_path = output_base.with_suffix(".png")
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(
+                        base64.b64decode(
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                        )
+                    )
+                    mime_type = "image/png"
+                else:
+                    output_path, mime_type = result
+                persisted = await asyncio.to_thread(
+                    self.storage.persist,
+                    output_path,
+                    content_type=mime_type,
+                )
+                repo.update(
+                    character,
+                    status="ready",
+                    data={
+                        "local_path": persisted["local_path"],
+                        "storage_uri": persisted["storage_uri"],
+                        "reference_url": persisted["public_path"],
+                        "mime_type": mime_type,
+                        "provider": "deterministic_test_fixture" if demo_data else "google",
+                        "model_id": (
+                            "deterministic-test-fixture"
+                            if demo_data
+                            else self.settings.google_image_model
+                        ),
+                        "demo_data": demo_data,
+                        "completed_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+            except Exception as exc:
+                repo.update(
+                    character,
+                    status="failed",
+                    data={"error": str(exc), "failed_at": datetime.now(UTC).isoformat()},
+                )
 
     async def run_scene_regeneration(self, regeneration_id: str) -> None:
         with SessionLocal() as session:
@@ -155,6 +247,7 @@ class WorkflowManager:
                 "stages": job.data.get("stages"),
             }
             try:
+                native_audio = job.data.get("audio_mode") == "veo_native"
                 for aspect_ratio in aspect_ratios:
                     output_uri = None
                     storage_uri = None
@@ -171,6 +264,9 @@ class WorkflowManager:
                             prompt,
                             aspect_ratio=aspect_ratio,
                             output_path=output_path,
+                            generate_audio=native_audio,
+                            reference_image_uri=job.data.get("reference_image_uri"),
+                            reference_image_mime_type=job.data.get("reference_image_mime_type"),
                         )
                         if generated is None:
                             raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
@@ -191,12 +287,14 @@ class WorkflowManager:
                             "attempt": attempt_number,
                             "aspect_ratio": aspect_ratio,
                             "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                            "prompt_version": "editorial-ugc-v2",
+                            "prompt_version": "editorial-ugc-v3",
                             "visual_prompt": prompt,
                             "output_uri": output_uri,
                             "storage_uri": storage_uri,
                             "qa_status": "pending" if self.settings.uses_live_video else "fixture",
                             "demo_data": not self.settings.uses_live_video,
+                            "audio_mode": "veo_native" if native_audio else "google_tts",
+                            "character_id": job.data.get("character_id"),
                             "regeneration_id": regeneration.id,
                         },
                     )
@@ -406,7 +504,7 @@ class WorkflowManager:
         objective = (input_resource.data.get("objective") if input_resource else None) or project.data.get("brief", {}).get("objective") or "awareness"
         requested_hook = str(input_resource.data.get("hook") or "").strip() if input_resource else ""
         content_format = str(input_resource.data.get("format") or "educational_explainer") if input_resource else "educational_explainer"
-        supported_visual_modes = {"ugc_creator", "product_demo", "cinematic", "motion_graphics"}
+        supported_visual_modes = {"ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"}
         visual_mode = str(
             job.data.get("visual_mode")
             or (input_resource.data.get("visual_mode") if input_resource else None)
@@ -415,12 +513,41 @@ class WorkflowManager:
         if visual_mode not in supported_visual_modes:
             raise RuntimeError(f"Unsupported visual mode: {visual_mode}")
         aspect_ratios = list(job.data.get("aspect_ratios") or ["9:16"])
+        character_id = job.data.get("character_id") or (input_resource.data.get("character_id") if input_resource else None)
+        character = repo.get_any(str(character_id), kind="character") if character_id else None
+        if character_id and (
+            not character
+            or character.organization_id != job.organization_id
+            or character.project_id != job.project_id
+            or character.status != "ready"
+        ):
+            raise RuntimeError("Selected reusable character is missing or not ready")
+        if visual_mode == "ugc_native_audio" and not character:
+            raise RuntimeError("UGC with native Veo speech requires a ready reusable character")
+        character_profile = (
+            f"Selected reusable creator named {character.data.get('name')}: {character.data.get('description')}"
+            if character
+            else ""
+        )
+        reference_image_uri = str(character.data.get("storage_uri") or "") if character else ""
+        reference_image_mime_type = str(character.data.get("mime_type") or "image/jpeg") if character else None
+        native_audio = visual_mode == "ugc_native_audio"
 
         self._set_stage(repo, job, "intake", "running")
         if project.data.get("autopilot_paused") and job.data.get("automatic", False):
             self._set_stage(repo, job, "intake", "blocked", error="Project autopilot is paused")
             raise RuntimeError("Project autopilot is paused")
-        repo.update(job, data={"visual_mode": visual_mode})
+        repo.update(
+            job,
+            data={
+                "visual_mode": visual_mode,
+                "audio_mode": "veo_native" if native_audio else "google_tts",
+                "character_id": character.id if character else None,
+                "character_profile": character_profile or None,
+                "reference_image_uri": reference_image_uri or None,
+                "reference_image_mime_type": reference_image_mime_type,
+            },
+        )
         self._set_stage(
             repo,
             job,
@@ -435,6 +562,8 @@ class WorkflowManager:
                     "aspect_ratios": aspect_ratios,
                     "requested_hook": requested_hook,
                     "content_format": content_format,
+                    "audio_mode": "veo_native" if native_audio else "google_tts",
+                    "character_id": character.id if character else None,
                 }
             },
         )
@@ -524,6 +653,7 @@ class WorkflowManager:
             aspect_ratios=aspect_ratios,
             requested_hook=requested_hook,
             content_format=content_format,
+            character_profile=character_profile,
         )
         await self._emit(
             session,
@@ -662,6 +792,9 @@ class WorkflowManager:
                         prompt,
                         aspect_ratio=aspect_ratio,
                         output_path=output_path,
+                        generate_audio=native_audio,
+                        reference_image_uri=reference_image_uri or None,
+                        reference_image_mime_type=reference_image_mime_type,
                     )
                     if generated is None:
                         raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
@@ -696,12 +829,14 @@ class WorkflowManager:
                         "attempt": 1,
                         "aspect_ratio": aspect_ratio,
                         "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-ugc-v2",
+                        "prompt_version": "editorial-ugc-v3",
                         "visual_prompt": prompt,
                         "output_uri": output_uri,
                         "storage_uri": scene_storage_uri,
                         "qa_status": "pending" if self.settings.uses_live_video else "fixture",
                         "demo_data": not self.settings.uses_live_video,
+                        "audio_mode": "veo_native" if native_audio else "google_tts",
+                        "character_id": character.id if character else None,
                         "cost_usd": None,
                     },
                 )
@@ -732,7 +867,7 @@ class WorkflowManager:
 
         self._set_stage(repo, job, "voice_audio", "running")
         audio_path = None
-        if self.settings.uses_live_video:
+        if self.settings.uses_live_video and not native_audio:
             voiceover = str((package.get("script") or {}).get("voiceover") or " ".join(scene.get("narration", "") for scene in scenes))
             audio_path = await self.tts.synthesize(
                 voiceover,
@@ -778,7 +913,13 @@ class WorkflowManager:
             "voice_audio",
             "completed",
             output={
-                "provider": "google_tts" if self.settings.uses_live_video else "deterministic_audio_bed",
+                "provider": (
+                    "veo_native_audio"
+                    if native_audio
+                    else "google_tts"
+                    if self.settings.uses_live_video
+                    else "deterministic_audio_bed"
+                ),
                 "audio_path": str(audio_path) if audio_path else None,
                 "audio_storage_uri": audio_storage_uri,
                 "caption_asset_id": caption_asset.id,
@@ -851,6 +992,9 @@ class WorkflowManager:
         self._set_stage(repo, job, "scene_generation", "running")
         scene_attempts: list[dict[str, Any]] = []
         aspect_ratios = list(job.data.get("aspect_ratios") or ["9:16"])
+        native_audio = job.data.get("audio_mode") == "veo_native"
+        reference_image_uri = job.data.get("reference_image_uri")
+        reference_image_mime_type = job.data.get("reference_image_mime_type")
         for scene in typed_scenes:
             prompt = str(scene.data.get("visual_prompt") or "").strip()
             if not prompt:
@@ -909,6 +1053,9 @@ class WorkflowManager:
                         prompt,
                         aspect_ratio=aspect_ratio,
                         output_path=output_path,
+                        generate_audio=native_audio,
+                        reference_image_uri=reference_image_uri,
+                        reference_image_mime_type=reference_image_mime_type,
                     )
                     if generated is None:
                         raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
@@ -944,12 +1091,14 @@ class WorkflowManager:
                         "attempt": attempt_number,
                         "aspect_ratio": aspect_ratio,
                         "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-ugc-v2",
+                        "prompt_version": "editorial-ugc-v3",
                         "visual_prompt": prompt,
                         "output_uri": output_uri,
                         "storage_uri": scene_storage_uri,
                         "qa_status": "pending" if self.settings.uses_live_video else "fixture",
                         "demo_data": not self.settings.uses_live_video,
+                        "audio_mode": "veo_native" if native_audio else "google_tts",
+                        "character_id": job.data.get("character_id"),
                         "cost_usd": None,
                     },
                 )
@@ -980,7 +1129,7 @@ class WorkflowManager:
 
         self._set_stage(repo, job, "voice_audio", "running")
         audio_path = None
-        if self.settings.uses_live_video:
+        if self.settings.uses_live_video and not native_audio:
             script_payload = dict(script.data.get("script") or {})
             voiceover = str(script_payload.get("voiceover") or " ".join(scene.get("narration", "") for scene in scenes))
             audio_path = await self.tts.synthesize(
@@ -1027,7 +1176,13 @@ class WorkflowManager:
             "voice_audio",
             "completed",
             output={
-                "provider": "google_tts" if self.settings.uses_live_video else "deterministic_audio_bed",
+                "provider": (
+                    "veo_native_audio"
+                    if native_audio
+                    else "google_tts"
+                    if self.settings.uses_live_video
+                    else "deterministic_audio_bed"
+                ),
                 "audio_path": str(audio_path) if audio_path else None,
                 "audio_storage_uri": audio_storage_uri,
                 "caption_asset_id": caption_asset.id,
@@ -1166,6 +1321,7 @@ class WorkflowManager:
                     and (path := Path(item["output_uri"]))
                 ],
                 audio_path=audio_path,
+                use_scene_audio=job.data.get("audio_mode") == "veo_native",
             )
             qa = await asyncio.to_thread(
                 technical_qa,

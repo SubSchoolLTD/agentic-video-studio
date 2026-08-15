@@ -57,9 +57,21 @@ async function approve() {
 async function regenerate(scene: any) {
   regenerateId.value = scene.id
   try {
-    await api(`/v1/scenes/${scene.id}/regenerate`, { method: 'POST', body: { reason: 'Scene-level review requested a cleaner visual' } })
-    show('Selective regeneration queued', 'Approved scenes remain locked and unchanged.', 'success')
-    await loadVideo()
+    const queued = await api<any>(`/v1/scenes/${scene.id}/regenerate`, { method: 'POST', body: { reason: 'Scene-level review requested a cleaner visual' } })
+    show('Selective regeneration queued', 'Veo will replace only this scene and append a new immutable video version.', 'success')
+    for (let poll = 0; poll < 240; poll += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      const state = await api<any>(`/v1/scene-regenerations/${queued.regeneration_id}`)
+      if (state.status === 'completed') {
+        await refreshJob()
+        await loadVideo()
+        selectedVersionId.value = video.value?.latest_version_id || selectedVersionId.value
+        show('Scene regenerated', 'The updated render is ready for review.', 'success')
+        return
+      }
+      if (state.status === 'failed') throw new Error(state.error || 'Scene regeneration failed')
+    }
+    show('Regeneration is still running', 'You can leave this page; the durable job will continue.', 'success')
   }
   catch (error: any) { show('Regeneration failed', error.message, 'error') }
   finally { regenerateId.value = null }
@@ -71,7 +83,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 <template>
   <div v-if="job">
     <div class="production-breadcrumb"><NuxtLink to="/productions"><ArrowLeft :size="14" /> Productions</NuxtLink><span>/</span><span>{{ job.id }}</span></div>
-    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · immutable brand profile v${job.brand_profile_version || 1}`">
+    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · ${(job.visual_mode || 'ugc_creator').replaceAll('_', ' ')} · immutable brand profile v${job.brand_profile_version || 1}`">
       <UiStatusBadge :status="job.status" />
       <button v-if="job.status === 'ready' && previewVersion?.status !== 'approved'" class="button button--primary" data-testid="approve-video" :disabled="approving" @click="approve"><Check :size="15" /> {{ approving ? 'Approving…' : 'Approve video' }}</button>
       <NuxtLink v-if="previewVersion?.status === 'approved'" :to="`/publishing?version=${previewVersion.id}`" class="button button--primary">Prepare publication <ExternalLink :size="14" /></NuxtLink>
@@ -87,7 +99,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
           <video v-if="previewUrl" :src="previewUrl" controls playsinline preload="metadata" data-testid="video-preview" />
           <div v-else class="video-placeholder"><span class="video-placeholder__rings"><WandSparkles :size="27" /></span><h3>{{ job.status === 'failed' ? 'Production stopped' : 'Building your production' }}</h3><p v-if="job.status !== 'failed'">{{ job.current_stage?.replaceAll('_', ' ') }} is in progress. Partial artifacts are already saved.</p><p v-else>{{ job.last_error?.message }}</p><UiProgressBar :value="job.progress || 0" /></div>
         </div>
-        <div class="preview-meta"><span><Film :size="13" /> H.264 / AAC</span><span><ShieldCheck :size="13" /> Deterministic overlays</span><span><Lock :size="13" /> Checksum saved</span></div>
+        <div class="preview-meta"><span><Film :size="13" /> H.264 / AAC</span><span><ShieldCheck :size="13" /> Minimal deterministic captions</span><span><Lock :size="13" /> Checksum saved</span></div>
       </UiAppCard>
 
       <UiAppCard class="timeline-card">
@@ -106,7 +118,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 
     <div v-if="activeTab === 'overview'" class="grid-three workspace-content">
       <UiAppCard><div class="detail-icon"><RadioTower :size="18" /></div><span class="eyebrow">Research</span><h3>{{ job.stages?.find((item:any) => item.name === 'research')?.output?.parallel_request_id || 'Pending' }}</h3><p>Parallel request ID and all retrieved evidence are persisted with the production.</p></UiAppCard>
-      <UiAppCard><div class="detail-icon"><CircleDollarSign :size="18" /></div><span class="eyebrow">Provider cost</span><h3>${{ Number(job.actual_cost_usd || 0).toFixed(2) }} actual</h3><p>Estimated range ${{ job.estimated_cost?.min }}–${{ job.estimated_cost?.max }}. AI token charges are recorded separately in Billing.</p></UiAppCard>
+      <UiAppCard><div class="detail-icon"><CircleDollarSign :size="18" /></div><span class="eyebrow">Provider cost</span><h3>{{ job.actual_cost_usd != null ? `$${Number(job.actual_cost_usd).toFixed(2)} actual` : job.provider_cost_estimate_usd != null ? `$${Number(job.provider_cost_estimate_usd).toFixed(2)} configured estimate` : 'Not reported' }}</h3><p>Budget guard range ${{ job.estimated_cost?.min }}–${{ job.estimated_cost?.max }}. Token charges and the admin price-rule cost basis are recorded in Billing.</p></UiAppCard>
       <UiAppCard><div class="detail-icon"><Sparkles :size="18" /></div><span class="eyebrow">Model trace</span><h3>{{ video?.script?.provider_trace?.model || 'Google pipeline' }}</h3><p>Prompt/model versions remain attached to immutable generation artifacts.</p></UiAppCard>
     </div>
 

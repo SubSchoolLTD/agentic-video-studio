@@ -22,6 +22,7 @@ def _approved_version(*, with_media: bool = False) -> str:
             video_path = root / "video.mp4"
             render_motion_video(
                 title="Safe export",
+                brand_name="SubSchool",
                 scenes=[{"purpose": "Test", "on_screen_text": "Export package"}],
                 aspect_ratio="9:16",
                 duration_seconds=2,

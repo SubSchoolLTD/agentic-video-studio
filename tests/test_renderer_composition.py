@@ -50,6 +50,7 @@ def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None
 
     manifest = render_motion_video(
         title="SubSchool clip composition",
+        brand_name="SubSchool",
         scenes=scenes,
         aspect_ratio="9:16",
         duration_seconds=4,
@@ -60,4 +61,6 @@ def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None
 
     assert manifest["scene_video_paths"] == [str(path) for path in clips]
     assert manifest["audio_path"] == str(audio)
+    assert manifest["composition_mode"] == "generated_scenes"
+    assert manifest["overlay_style"] == "minimal_ugc_captions"
     assert technical_qa(output, aspect_ratio="9:16", duration_target=4)["passed"] is True

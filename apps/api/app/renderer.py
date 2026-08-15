@@ -38,6 +38,7 @@ def _escape_drawtext(value: str) -> str:
 def render_motion_video(
     *,
     title: str,
+    brand_name: str,
     scenes: list[dict[str, Any]],
     aspect_ratio: str,
     duration_seconds: int,
@@ -52,53 +53,80 @@ def render_motion_video(
     safe_x = 56
     safe_width = width - safe_x * 2
     font = _font_path()
-    overlays = [
-        "format=yuv420p",
-        f"drawbox=x={safe_x}:y={round(height * 0.07)}:w={safe_width}:h={round(height * 0.86)}:color=0x271b31@0.76:t=fill",
-        f"drawbox=x={safe_x}:y={round(height * 0.07)}:w=12:h={round(height * 0.86)}:color=0xa24cb8@1:t=fill",
-        (
-            f"drawtext=fontfile='{font}':text='{_escape_drawtext('SUBSCHOOL · AGENTIC VIDEO STUDIO')}':"
-            f"fontsize={round(width * 0.025)}:fontcolor=0xdcb1e5:x={safe_x + 32}:y={round(height * 0.11)}"
-        ),
-    ]
-    for line_index, title_line in enumerate(textwrap.wrap(title, width=31)[:3]):
-        overlays.append(
-            f"drawtext=fontfile='{font}':text='{_escape_drawtext(title_line)}':"
-            f"fontsize={round(width * 0.045)}:fontcolor=white:x={safe_x + 32}:"
-            f"y={round(height * (0.16 + line_index * 0.045))}:fix_bounds=1"
-        )
+    scene_video_paths = [path for path in (scene_video_paths or []) if path.exists()]
+    overlays = ["format=yuv420p"]
     scene_count = max(1, len(scenes))
     segment = duration_seconds / scene_count
-    for index, scene in enumerate(scenes):
-        start = round(index * segment, 2)
-        end = round(min(duration_seconds, (index + 1) * segment), 2)
-        line = str(scene.get("on_screen_text") or scene.get("narration") or "").strip()
-        purpose_words = str(scene.get("purpose") or f"Scene {index + 1}").split()
-        purpose = " ".join(purpose_words[:4]).upper()[:32]
+    if scene_video_paths:
+        brand_label = str(brand_name or "Framewise").strip()[:42]
         overlays.append(
-            f"drawtext=fontfile='{font}':text='{_escape_drawtext(purpose)}':"
-            f"fontsize={round(width * 0.024)}:fontcolor=0xe9b44c:x={safe_x + 34}:y={round(height * 0.48)}:"
-            f"fix_bounds=1:enable='between(t,{start},{end})'"
+            f"drawbox=x={round(width * 0.045)}:y={round(height * 0.045)}:w={round(width * 0.42)}:"
+            f"h={round(height * 0.052)}:color=black@0.42:t=fill"
         )
-        for line_index, scene_line in enumerate(textwrap.wrap(line, width=29)[:3]):
+        overlays.append(
+            f"drawtext=fontfile='{font}':text='{_escape_drawtext(brand_label)}':"
+            f"fontsize={round(width * 0.026)}:fontcolor=white:x={round(width * 0.07)}:"
+            f"y={round(height * 0.059)}:fix_bounds=1"
+        )
+        wrap_width = 31 if aspect_ratio == "9:16" else 54
+        subtitle_x = round(width * 0.07)
+        subtitle_y = round(height * 0.76)
+        subtitle_width = round(width * 0.86)
+        subtitle_height = round(height * 0.145)
+        for index, scene in enumerate(scenes):
+            start = round(index * segment, 2)
+            end = round(min(duration_seconds, (index + 1) * segment), 2)
+            line = str(scene.get("on_screen_text") or scene.get("narration") or "").strip()
             overlays.append(
-                f"drawtext=fontfile='{font}':text='{_escape_drawtext(scene_line)}':"
-                f"fontsize={round(width * 0.038)}:fontcolor=white:x={safe_x + 34}:"
-                f"y={round(height * (0.54 + line_index * 0.045))}:fix_bounds=1:"
+                f"drawbox=x={subtitle_x}:y={subtitle_y}:w={subtitle_width}:h={subtitle_height}:"
+                f"color=black@0.52:t=fill:enable='between(t,{start},{end})'"
+            )
+            for line_index, scene_line in enumerate(textwrap.wrap(line, width=wrap_width)[:2]):
+                overlays.append(
+                    f"drawtext=fontfile='{font}':text='{_escape_drawtext(scene_line)}':"
+                    f"fontsize={round(width * 0.036)}:fontcolor=white:x={round(width * 0.1)}:"
+                    f"y={round(height * (0.79 + line_index * 0.045))}:fix_bounds=1:"
+                    f"enable='between(t,{start},{end})'"
+                )
+    else:
+        overlays.extend(
+            [
+                f"drawbox=x={safe_x}:y={round(height * 0.08)}:w={safe_width}:h={round(height * 0.84)}:color=0x271b31@0.9:t=fill",
+                f"drawbox=x={safe_x}:y={round(height * 0.08)}:w=10:h={round(height * 0.84)}:color=0xa24cb8@1:t=fill",
+                (
+                    f"drawtext=fontfile='{font}':text='LOCAL TEST FIXTURE':fontsize={round(width * 0.025)}:"
+                    f"fontcolor=0xdcb1e5:x={safe_x + 30}:y={round(height * 0.12)}"
+                ),
+            ]
+        )
+        for line_index, title_line in enumerate(textwrap.wrap(title, width=31)[:3]):
+            overlays.append(
+                f"drawtext=fontfile='{font}':text='{_escape_drawtext(title_line)}':"
+                f"fontsize={round(width * 0.045)}:fontcolor=white:x={safe_x + 30}:"
+                f"y={round(height * (0.18 + line_index * 0.045))}:fix_bounds=1"
+            )
+        for index, scene in enumerate(scenes):
+            start = round(index * segment, 2)
+            end = round(min(duration_seconds, (index + 1) * segment), 2)
+            line = str(scene.get("on_screen_text") or scene.get("narration") or "").strip()
+            for line_index, scene_line in enumerate(textwrap.wrap(line, width=31)[:3]):
+                overlays.append(
+                    f"drawtext=fontfile='{font}':text='{_escape_drawtext(scene_line)}':"
+                    f"fontsize={round(width * 0.036)}:fontcolor=white:x={safe_x + 30}:"
+                    f"y={round(height * (0.5 + line_index * 0.045))}:fix_bounds=1:"
+                    f"enable='between(t,{start},{end})'"
+                )
+            overlays.append(
+                f"drawbox=x={safe_x + 30}:y={round(height * 0.8)}:"
+                f"w={round((safe_width - 60) * ((index + 1) / scene_count))}:h=8:color=0xa24cb8@1:t=fill:"
                 f"enable='between(t,{start},{end})'"
             )
-        overlays.append(
-            f"drawbox=x={safe_x + 34}:y={round(height * 0.78)}:w={round(safe_width * ((index + 1) / scene_count))}:"
-            f"h=8:color=0xa24cb8@1:t=fill:enable='between(t,{start},{end})'"
-        )
     overlays.extend(
         [
-            f"drawtext=fontfile='{font}':text='Evidence checked · Human approval':fontsize={round(width * 0.02)}:fontcolor=0xa1a1aa:x={safe_x + 34}:y={round(height * 0.88)}",
             "fade=t=in:st=0:d=0.35",
             f"fade=t=out:st={max(0, duration_seconds - 0.5)}:d=0.5",
         ]
     )
-    scene_video_paths = [path for path in (scene_video_paths or []) if path.exists()]
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     if scene_video_paths:
         for path in scene_video_paths:
@@ -180,6 +208,9 @@ def render_motion_video(
         "scenes": scenes,
         "scene_video_paths": [str(path) for path in scene_video_paths],
         "audio_path": str(audio_path) if audio_path else None,
+        "composition_mode": "generated_scenes" if scene_video_paths else "deterministic_test_fixture",
+        "overlay_style": "minimal_ugc_captions" if scene_video_paths else "test_fixture_card",
+        "brand_name": brand_name,
         "output": str(output_path),
         "checksum": hashlib.sha256(output_path.read_bytes()).hexdigest(),
     }

@@ -23,6 +23,18 @@ def wait_for_job(client, job_id: str, headers: dict[str, str], timeout: float = 
     raise AssertionError(f"Job {job_id} did not complete before timeout")
 
 
+def wait_for_scene_regeneration(client, regeneration_id: str, headers: dict[str, str], timeout: float = 35) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/v1/scene-regenerations/{regeneration_id}", headers=headers)
+        assert response.status_code == 200
+        regeneration = response.json()
+        if regeneration["status"] in {"completed", "failed"}:
+            return regeneration
+        time.sleep(0.15)
+    raise AssertionError(f"Scene regeneration {regeneration_id} did not complete before timeout")
+
+
 def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
     idea = client.post(
         "/v1/projects/prj_subschool/ideas",
@@ -61,6 +73,12 @@ def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
     body = video.json()
     assert len(body["versions"]) == 2
     assert {item["aspect_ratio"] for item in body["versions"]} == {"9:16", "16:9"}
+    assert job["visual_mode"] == "ugc_creator"
+    assert body["storyboard"]["visual_mode"] == "ugc_creator"
+    assert body["storyboard"]["creator_profile"]
+    assert len(body["storyboard"]["visual_bible"]) >= 3
+    assert all("creator-shot UGC" in scene["visual_prompt"] for scene in body["scenes"])
+    assert body["script"]["script"]["hook"] == "One lesson can do more than you think."
     assert body["qa_report"]["hard_gate_passed"] is True
     assert body["score_report"]["publish_readiness"] >= 70
     assert body["score_report"]["confidence"] < 0.65
@@ -204,6 +222,53 @@ def test_retry_resumes_from_failed_render_checkpoint(client, auth_headers, monke
     assert attempts["research"] == 1
     assert attempts["scene_generation"] == 1
     assert attempts["render"] == 2
+
+
+def test_selective_scene_regeneration_executes_and_appends_video_version(client, auth_headers) -> None:
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Selective UGC scene regeneration",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "approval_mode": "final_only",
+            "visual_mode": "ugc_creator",
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-scene-regeneration-1"},
+    )
+    assert created.status_code == 202
+    job = wait_for_job(client, created.json()["generation_job_id"], auth_headers)
+    assert job["status"] == "ready"
+    original = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    assert len(original["versions"]) == 1
+    scene = original["scenes"][0]
+    assert scene["locked"] is False
+
+    queued = client.post(
+        f"/v1/scenes/{scene['id']}/regenerate",
+        json={
+            "reason": "Use a more authentic handheld creator action.",
+            "visual_prompt": (
+                "Authentic handheld creator-shot UGC b-roll in a daylight home office. "
+                "The recurring creator opens a notebook; no visible speaking, readable text or logos."
+            ),
+        },
+        headers=auth_headers,
+    )
+    assert queued.status_code == 202
+    regeneration = wait_for_scene_regeneration(client, queued.json()["regeneration_id"], auth_headers)
+    assert regeneration["status"] == "completed", regeneration.get("error")
+    assert regeneration["attempt_ids"]
+
+    refreshed_job = client.get(f"/v1/generation-jobs/{job['id']}", headers=auth_headers).json()
+    refreshed_video = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    assert refreshed_job["status"] == "ready"
+    assert len(refreshed_video["versions"]) == 2
+    assert refreshed_video["latest_version_id"] != original["latest_version_id"]
+    refreshed_scene = next(item for item in refreshed_video["scenes"] if item["id"] == scene["id"])
+    assert refreshed_scene["attempt"] == 2
+    assert "authentic handheld" in refreshed_scene["visual_prompt"].lower()
 
 
 def test_interrupted_job_resumes_from_scene_checkpoint_without_duplicate_provider_work(

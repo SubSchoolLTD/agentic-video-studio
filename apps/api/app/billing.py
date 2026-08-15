@@ -16,7 +16,7 @@ from .models import CreditLedger, PriceRule, PromoCode, PromoRedemption, Subscri
 DEFAULT_PRICES = (
     ("project.website_analysis", "Website and brand analysis", "analysis", Decimal("0.02"), 30, Decimal("66.67")),
     ("research.run", "Agentic web research", "research run", Decimal("0.05"), 75, Decimal("66.67")),
-    ("video.generate", "AI video production", "variant / aspect ratio", Decimal("2.50"), 500, Decimal("50.00")),
+    ("video.generate", "AI video production", "rendered aspect ratio", Decimal("2.50"), 500, Decimal("50.00")),
     ("video.scene_regenerate", "AI scene regeneration", "scene", Decimal("0.50"), 100, Decimal("50.00")),
 )
 
@@ -133,7 +133,9 @@ def charge_feature(
     reference_id: str | None,
 ) -> CreditLedger:
     rule = feature_price(session, feature_key)
-    amount = int(rule.charge_tokens) * max(1, int(quantity))
+    normalized_quantity = max(1, int(quantity))
+    amount = int(rule.charge_tokens) * normalized_quantity
+    provider_cost = float(rule.provider_cost_usd) * normalized_quantity
     return add_ledger_entry(
         session,
         organization_id=organization_id,
@@ -142,8 +144,14 @@ def charge_feature(
         event_type="ai_usage",
         feature_key=feature_key,
         reference_id=reference_id,
-        description=f"{rule.label} × {max(1, int(quantity))}",
-        metadata={"unit_tokens": int(rule.charge_tokens), "quantity": max(1, int(quantity))},
+        monetary_amount_usd=provider_cost,
+        description=f"{rule.label} × {normalized_quantity}",
+        metadata={
+            "unit_tokens": int(rule.charge_tokens),
+            "quantity": normalized_quantity,
+            "configured_provider_cost_usd": provider_cost,
+            "cost_basis": "admin_price_rule",
+        },
     )
 
 

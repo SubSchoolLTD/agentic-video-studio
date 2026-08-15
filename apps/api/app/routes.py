@@ -2138,7 +2138,7 @@ async def create_generation(
                 "current_stage": "cost_guard",
                 "progress": 0,
                 "estimated_cost": estimated,
-                "actual_cost_usd": 0,
+                "actual_cost_usd": None,
                 "max_cost_usd": payload.max_cost_usd,
                 "hard_gates": {"budget": False},
                 "idempotency_key": idempotency_key,
@@ -2172,7 +2172,7 @@ async def create_generation(
             "current_stage": "queued",
             "progress": 0,
             "estimated_cost": estimated,
-            "actual_cost_usd": 0,
+            "actual_cost_usd": None,
             "brand_profile_version": project.data.get("brand_profile_version", 1),
             "strategy_version": 1,
             "correlation_id": payload.source_item_id or payload.idea_id,
@@ -2180,18 +2180,29 @@ async def create_generation(
         },
     )
     try:
-        charge_feature(
+        usage_entry = charge_feature(
             session,
             organization_id=principal.organization_id,
             user_id=principal.actor_id,
             feature_key="video.generate",
-            quantity=len(payload.aspect_ratios) * payload.variants,
+            quantity=len(payload.aspect_ratios),
             reference_id=job.id,
         )
     except HTTPException:
         session.delete(job)
         session.commit()
         raise
+    repo.update(
+        job,
+        data={
+            "provider_cost_estimate_usd": (
+                float(usage_entry.monetary_amount_usd)
+                if usage_entry.monetary_amount_usd is not None
+                else None
+            ),
+            "provider_cost_basis": "admin_price_rule",
+        },
+    )
     response = {
         "generation_job_id": job.id,
         "status": "queued",
@@ -2452,11 +2463,13 @@ def request_video_changes(
 
 
 @router.post("/scenes/{scene_id}/regenerate", status_code=202, tags=["videos"])
-def regenerate_scene(
+async def regenerate_scene(
     scene_id: str,
     payload: SceneRegenerate,
+    request: Request,
     principal: Principal = Depends(get_principal),
     session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     principal.require("generations:write")
     repo = ResourceRepository(session)
@@ -2465,8 +2478,8 @@ def regenerate_scene(
         raise HTTPException(409, "Locked scenes cannot be regenerated until explicitly unlocked")
     attempt_no = int(scene.data.get("attempt", 0)) + 1
     prompt = payload.visual_prompt or scene.data.get("visual_prompt")
-    attempt = repo.add(
-        kind="scene_attempt",
+    regeneration = repo.add(
+        kind="scene_regeneration",
         organization_id=principal.organization_id,
         project_id=scene.project_id,
         status="queued",
@@ -2475,7 +2488,8 @@ def regenerate_scene(
             "attempt": attempt_no,
             "reason": payload.reason,
             "visual_prompt": prompt,
-            "model_id": "configured-veo-or-motion-fallback",
+            "model_id": settings.veo_model if settings.uses_live_video else "deterministic-test-fixture",
+            "provider_mode": settings.provider_mode,
             "selective": True,
         },
     )
@@ -2486,14 +2500,41 @@ def regenerate_scene(
             user_id=principal.actor_id,
             feature_key="video.scene_regenerate",
             quantity=1,
-            reference_id=attempt.id,
+            reference_id=regeneration.id,
         )
     except HTTPException:
-        session.delete(attempt)
+        session.delete(regeneration)
         session.commit()
         raise
-    repo.update(scene, status="regenerating", data={"attempt": attempt_no, "latest_attempt_id": attempt.id, "visual_prompt": prompt})
-    return {"scene_id": scene.id, "attempt_id": attempt.id, "status": "queued", "locked_other_scenes": True}
+    repo.update(
+        scene,
+        status="regenerating",
+        data={"pending_regeneration_id": regeneration.id, "visual_prompt": prompt},
+    )
+    request.app.state.workflow.schedule_scene_regeneration(regeneration.id)
+    return {
+        "scene_id": scene.id,
+        "regeneration_id": regeneration.id,
+        "status": "queued",
+        "locked_other_scenes": True,
+    }
+
+
+@router.get("/scene-regenerations/{regeneration_id}", tags=["videos"])
+def get_scene_regeneration(
+    regeneration_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:read")
+    return ResourceRepository.serialize(
+        require_resource(
+            ResourceRepository(session),
+            regeneration_id,
+            principal,
+            kind="scene_regeneration",
+        )
+    )
 
 
 @router.patch("/scripts/{script_id}", status_code=202, tags=["videos"])

@@ -359,6 +359,10 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
     assert run.status_code == 200
     assert run.json()["status"] == "completed"
     assert run.json()["trigger_type"] == "scheduled"
+    assert run.json()["current_stage"] == "completed"
+    assert run.json()["completed_at"]
+    assert run.json()["candidate_count"] >= 2
+    assert len(run.json()["candidate_ids"]) == run.json()["candidate_count"]
 
     candidates = [
         item
@@ -379,6 +383,10 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
     )
     assert muted.status_code == 200
     assert muted.json()["permanent"] is True
+    visible_candidates = client.get(
+        "/v1/projects/prj_subschool/topic-candidates", headers=auth_headers
+    ).json()["items"]
+    assert not any(item["id"] == candidates[1]["id"] for item in visible_candidates)
 
 
 def test_calendar_update_returns_cadence_warnings(client, auth_headers) -> None:

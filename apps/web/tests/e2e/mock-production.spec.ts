@@ -25,7 +25,15 @@ test('creates an idea, renders a mock production, approves and publishes it', as
 
   const card = page.locator('.idea-card').filter({ hasText: title })
   await expect(card).toBeVisible()
-  await card.getByRole('button', { name: 'Generate video' }).click()
+  await card.getByRole('button', { name: 'Configure video' }).click()
+  await expect(page.getByTestId('generation-config')).toBeVisible()
+  await page.getByLabel('Target duration').fill('8')
+  await page.getByLabel('Preferred scene count').fill('2')
+  await page.getByLabel(/Allow the director/).uncheck()
+  await page.getByTestId('start-generation').click()
+  const productionLink = card.getByRole('link', { name: 'Open production' })
+  await expect(productionLink).toBeVisible({ timeout: 15_000 })
+  await productionLink.click()
   await expect(page).toHaveURL(/\/productions\/[a-z]+_/)
 
   const approve = page.getByTestId('approve-video')
@@ -33,6 +41,14 @@ test('creates an idea, renders a mock production, approves and publishes it', as
   const video = page.getByTestId('video-preview')
   await expect(video).toBeVisible()
   await expect.poll(async () => video.evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 15_000 }).toBeGreaterThanOrEqual(1)
+
+  await page.getByRole('button', { name: 'storyboard', exact: true }).click()
+  const scenePreview = page.getByTestId('scene-preview-1')
+  await expect(scenePreview).toBeVisible()
+  await expect.poll(async () => scenePreview.evaluate((node: HTMLVideoElement) => node.readyState), { timeout: 15_000 }).toBeGreaterThanOrEqual(1)
+  await page.getByRole('button', { name: 'Open scene preview' }).first().click()
+  await expect(page.getByTestId('scene-modal-video')).toBeVisible()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
 
   await approve.click()
   const publicationLink = page.getByRole('link', { name: /Prepare publication/ })

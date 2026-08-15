@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 
 from sqlalchemy import func, select
@@ -55,6 +56,9 @@ def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
             "target_duration_seconds": 8,
             "approval_mode": "final_only",
             "variants": 3,
+            "scene_count_min": 4,
+            "scene_count_max": 4,
+            "scene_count_flex": 0,
             "max_cost_usd": 10,
         },
         headers={**auth_headers, "Idempotency-Key": "pipeline-e2e-1"},
@@ -77,9 +81,32 @@ def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
     assert body["storyboard"]["visual_mode"] == "ugc_creator"
     assert body["storyboard"]["creator_profile"]
     assert len(body["storyboard"]["visual_bible"]) >= 3
+    assert len(body["scenes"]) == 4
     assert all("creator-shot UGC" in scene["visual_prompt"] for scene in body["scenes"])
+    for scene_index, scene in enumerate(body["scenes"]):
+        assert len(scene["attempts"]) == 2
+        for attempt in scene["attempts"]:
+            assert attempt["last_frame_storage_uri"]
+            assert attempt["speech_qa"]["passed"] is True
+            assert attempt["speech_qa"]["mode"] == "preflight_timing"
+            assert attempt["preview_url"]
+            clip = client.get(attempt["preview_url"])
+            assert clip.status_code == 200
+            assert clip.headers["content-type"] == "video/mp4"
+            if scene_index == 0:
+                assert attempt["continuity_input_kind"] == "text_only"
+            else:
+                assert attempt["continuity_input_kind"] == "previous_scene_last_frame"
+                previous_attempt = next(
+                    item
+                    for item in body["scenes"][scene_index - 1]["attempts"]
+                    if item["aspect_ratio"] == attempt["aspect_ratio"]
+                )
+                assert attempt["continuity_input_uri"] == previous_attempt["last_frame_storage_uri"]
     assert body["script"]["script"]["hook"] == "One lesson can do more than you think."
     assert body["qa_report"]["hard_gate_passed"] is True
+    assert body["qa_report"]["hard_gates"]["speech_timing"] is True
+    assert body["qa_report"]["speech"]["mode"] == "preflight_timing"
     assert body["score_report"]["publish_readiness"] >= 70
     assert body["score_report"]["confidence"] < 0.65
 
@@ -183,6 +210,99 @@ def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
         old_version = next(item for item in revised_video["versions"] if item["id"] == immutable_id)
         assert old_version["checksum"] == immutable_checksum
     assert revised_video["latest_version_id"] not in original_versions
+
+
+def test_generation_rejects_an_inverted_scene_range(client, auth_headers) -> None:
+    response = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Invalid scene range",
+            "scene_count_min": 12,
+            "scene_count_max": 4,
+            "scene_count_flex": 0,
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_native_speech_qa_retries_a_clipped_scene_with_shorter_dialogue(
+    client, auth_headers, monkeypatch
+) -> None:
+    reference_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    uploaded = client.post(
+        "/v1/projects/prj_subschool/characters/upload",
+        files={"image": ("speech-qa-creator.png", reference_png, "image/png")},
+        data={
+            "name": "Speech QA creator",
+            "description": "Adult course creator for automatic speech QA testing",
+            "rights_confirmed": "true",
+            "adult_confirmed": "true",
+        },
+        headers=auth_headers,
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    calls = 0
+
+    async def fail_first_clip(*, video_uri, expected_text, duration_target):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "passed": False,
+                "transcript": " ".join(expected_text.split()[:-2]),
+                "coverage": 0.7,
+                "speech_present": True,
+                "last_phrase_complete": False,
+                "speech_end_seconds": duration_target,
+                "issues": ["The final phrase is incomplete or cut off"],
+                "provider": "deterministic_test_fixture",
+                "demo_data": True,
+            }
+        return {
+            "passed": True,
+            "transcript": expected_text,
+            "coverage": 1.0,
+            "speech_present": True,
+            "last_phrase_complete": True,
+            "speech_end_seconds": max(0.5, duration_target - 0.5),
+            "issues": [],
+            "provider": "deterministic_test_fixture",
+            "demo_data": True,
+        }
+
+    monkeypatch.setattr(client.app.state.workflow.speech_qa, "analyze", fail_first_clip)
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Speech QA automatic recovery",
+            "visual_mode": "ugc_native_audio",
+            "character_id": uploaded.json()["id"],
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "scene_count_min": 2,
+            "scene_count_max": 2,
+            "scene_count_flex": 0,
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-native-speech-retry-1"},
+    )
+    assert created.status_code == 202, created.text
+    job = wait_for_job(client, created.json()["generation_job_id"], auth_headers)
+    assert job["status"] == "ready", job.get("last_error")
+    video = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    first_scene = video["scenes"][0]
+    latest_attempt = first_scene["attempts"][0]
+    assert calls >= 3
+    assert first_scene["attempt"] == 2
+    assert latest_attempt["automatic_retry"] == 1
+    assert latest_attempt["speech_qa"]["passed"] is True
+    assert len(first_scene["narration"].split()) <= first_scene["speech_timing"]["word_budget"]
+    assert video["qa_report"]["speech"]["mode"] == "transcription"
+    assert video["qa_report"]["hard_gates"]["speech_timing"] is True
 
 
 def test_retry_resumes_from_failed_render_checkpoint(client, auth_headers, monkeypatch) -> None:

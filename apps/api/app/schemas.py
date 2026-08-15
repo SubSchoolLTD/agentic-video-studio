@@ -127,6 +127,17 @@ class IdeaCreate(BaseModel):
     research_required: bool = True
 
 
+class IdeaPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=300)
+    hook: str | None = Field(default=None, max_length=500)
+    audience: str | None = Field(default=None, min_length=2, max_length=200)
+    objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"] | None = None
+    format: str | None = Field(default=None, max_length=120)
+    visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
+    character_id: str | None = Field(default=None, max_length=64)
+    status: Literal["draft", "researching", "ready", "planned"] | None = None
+
+
 class GenerationCreate(BaseModel):
     idea_id: str | None = None
     source_item_id: str | None = None
@@ -137,12 +148,17 @@ class GenerationCreate(BaseModel):
     variants: int = Field(default=1, ge=1, le=3)
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
     character_id: str | None = Field(default=None, max_length=64)
+    scene_count_min: int = Field(default=4, ge=2, le=20)
+    scene_count_max: int = Field(default=6, ge=2, le=20)
+    scene_count_flex: int = Field(default=2, ge=0, le=2)
     max_cost_usd: float = Field(default=10, ge=0.1, le=1_000)
 
     @model_validator(mode="after")
     def require_input(self) -> GenerationCreate:
         if not (self.idea_id or self.source_item_id or self.title):
             raise ValueError("idea_id, source_item_id, or title is required")
+        if self.scene_count_min > self.scene_count_max:
+            raise ValueError("scene_count_min cannot be greater than scene_count_max")
         return self
 
 

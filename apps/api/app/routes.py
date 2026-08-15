@@ -70,6 +70,7 @@ from .schemas import (
     ConversionEventCreate,
     GenerationCreate,
     IdeaCreate,
+    IdeaPatch,
     OrganizationCreate,
     ProjectCreate,
     ProjectPatch,
@@ -135,6 +136,49 @@ def serialize_video(repo: ResourceRepository, video: Resource, *, organization_i
         version = repo.get(snapshot["id"], organization_id=organization_id, kind="video_version")
         versions.append(ResourceRepository.serialize(version) if version else snapshot)
     payload["versions"] = versions
+    return payload
+
+
+def serialize_idea(repo: ResourceRepository, idea: Resource, *, organization_id: str) -> dict[str, Any]:
+    payload = ResourceRepository.serialize(idea)
+    job_id = str(idea.data.get("generation_job_id") or "")
+    job = repo.get(job_id, organization_id=organization_id, kind="generation_job") if job_id else None
+    if job:
+        payload["production"] = {
+            "generation_job_id": job.id,
+            "video_id": job.data.get("video_id"),
+            "status": job.status,
+            "current_stage": job.data.get("current_stage"),
+            "progress": float(job.data.get("progress") or 0),
+            "last_error": job.data.get("last_error"),
+        }
+    else:
+        payload["production"] = None
+    return payload
+
+
+def serialize_scene(repo: ResourceRepository, scene: Resource, *, organization_id: str) -> dict[str, Any]:
+    payload = ResourceRepository.serialize(scene)
+    attempts: list[dict[str, Any]] = []
+    storage = MediaStorage(get_settings())
+    latest_ids = dict(scene.data.get("latest_attempt_ids") or {})
+    if not latest_ids and scene.data.get("latest_attempt_id"):
+        latest_ids["9:16"] = str(scene.data["latest_attempt_id"])
+    for _aspect_ratio, attempt_id in latest_ids.items():
+        attempt = repo.get(str(attempt_id), organization_id=organization_id, kind="scene_attempt")
+        if not attempt:
+            continue
+        serialized = ResourceRepository.serialize(attempt)
+        public_path = attempt.data.get("public_path") or storage.public_path_for(
+            storage_uri=attempt.data.get("storage_uri"),
+            local_path=attempt.data.get("output_uri"),
+        )
+        serialized["preview_url"] = (
+            storage.signed_path(str(public_path), organization_id) if public_path else None
+        )
+        attempts.append(serialized)
+    payload["attempts"] = attempts
+    payload["preview_url"] = attempts[0].get("preview_url") if attempts else None
     return payload
 
 
@@ -1712,13 +1756,13 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
             )
             repo.update(
                 run,
-                status="completed",
+                status="running",
                 data={
+                    "current_stage": "candidate_generation",
                     "parallel_request_ids": [packet.request_id],
                     "parallel_result_metadata": packet.raw,
                     "sources": packet.sources,
                     "claims": packet.claims,
-                    "completed_at": datetime.now(UTC).isoformat(),
                 },
             )
             brand_resource = session.scalar(
@@ -1739,6 +1783,7 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
             )
             score = min(92, 61 + len(packet.sources) * 7)
             created_count = 0
+            candidate_ids: list[str] = []
             for index, draft in enumerate(drafts):
                 title = draft["title"]
                 angle = draft["angle"]
@@ -1792,6 +1837,7 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                     },
                 )
                 created_count += 1
+                candidate_ids.append(candidate.id)
                 if run.data.get("trigger_type") == "backlog":
                     repo.add(
                         kind="idea",
@@ -1812,6 +1858,16 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                             "provenance": "scheduled_backlog_replenishment",
                         },
                     )
+            repo.update(
+                run,
+                status="completed",
+                data={
+                    "current_stage": "completed",
+                    "candidate_count": created_count,
+                    "candidate_ids": candidate_ids,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                },
+            )
             await EventSink(settings).emit(
                 session,
                 organization_id=run.organization_id,
@@ -1904,16 +1960,18 @@ def get_research_run(
 @router.get("/projects/{project_id}/topic-candidates", tags=["research"])
 def list_topic_candidates(
     project_id: str,
+    include_hidden: bool = Query(default=False),
     principal: Principal = Depends(get_principal),
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
     principal.require("research:read")
     require_project(ResourceRepository(session), project_id, principal)
-    return serialize_many(
-        ResourceRepository(session).list(
-            organization_id=principal.organization_id, project_id=project_id, kind="topic_candidate"
-        )
+    items = ResourceRepository(session).list(
+        organization_id=principal.organization_id, project_id=project_id, kind="topic_candidate"
     )
+    if not include_hidden:
+        items = [item for item in items if item.status not in {"muted", "rejected"}]
+    return serialize_many(items)
 
 
 @router.post("/topic-candidates/{candidate_id}/select", tags=["research"])
@@ -2038,29 +2096,40 @@ def list_ideas(
 ) -> dict[str, Any]:
     principal.require("generations:read")
     require_project(ResourceRepository(session), project_id, principal)
-    return serialize_many(
-        ResourceRepository(session).list(
-            organization_id=principal.organization_id, project_id=project_id, kind="idea"
-        )
+    repo = ResourceRepository(session)
+    items = repo.list(
+        organization_id=principal.organization_id, project_id=project_id, kind="idea"
     )
+    return {
+        "items": [serialize_idea(repo, item, organization_id=principal.organization_id) for item in items],
+        "next_cursor": None,
+    }
 
 
 @router.patch("/ideas/{idea_id}", tags=["ideas"])
 def patch_idea(
     idea_id: str,
-    payload: dict[str, Any],
+    payload: IdeaPatch,
     principal: Principal = Depends(get_principal),
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
     principal.require("generations:write")
     repo = ResourceRepository(session)
     idea = require_resource(repo, idea_id, principal, kind="idea")
-    allowed = {
-        key: value
-        for key, value in payload.items()
-        if key in {"title", "hook", "audience", "objective", "format", "visual_mode", "character_id", "status"}
-    }
+    allowed = payload.model_dump(exclude_unset=True)
     new_status = allowed.pop("status", None)
+    if allowed.get("character_id"):
+        require_resource(
+            repo,
+            str(allowed["character_id"]),
+            principal,
+            kind="character",
+            project_id=str(idea.project_id),
+        )
+    effective_visual_mode = str(allowed.get("visual_mode") or idea.data.get("visual_mode") or "ugc_creator")
+    effective_character_id = allowed.get("character_id", idea.data.get("character_id"))
+    if effective_visual_mode == "ugc_native_audio" and not effective_character_id:
+        raise HTTPException(422, "UGC with native Veo speech requires a reusable character")
     return ResourceRepository.serialize(repo.update(idea, data=allowed, status=new_status))
 
 
@@ -2336,6 +2405,12 @@ async def create_generation(
             "status_url": f"/v1/generation-jobs/{blocked.id}",
             "estimated_cost": estimated,
         }
+        if idea:
+            repo.update(
+                idea,
+                status="planned",
+                data={"generation_job_id": blocked.id, "production_requested_at": datetime.now(UTC).isoformat()},
+            )
         if idempotency_key:
             save_idempotent_response(
                 session,
@@ -2389,6 +2464,12 @@ async def create_generation(
             "provider_cost_basis": "admin_price_rule",
         },
     )
+    if idea:
+        repo.update(
+            idea,
+            status="planned",
+            data={"generation_job_id": job.id, "production_requested_at": datetime.now(UTC).isoformat()},
+        )
     response = {
         "generation_job_id": job.id,
         "status": "queued",
@@ -2516,7 +2597,7 @@ def get_video(
         resource = repo.get(resource_id, organization_id=principal.organization_id, kind=kind) if resource_id else None
         payload[key] = ResourceRepository.serialize(resource) if resource else None
     payload["scenes"] = [
-        ResourceRepository.serialize(item)
+        serialize_scene(repo, item, organization_id=principal.organization_id)
         for scene_id in video.data.get("scene_ids", [])
         if (item := repo.get(scene_id, organization_id=principal.organization_id, kind="scene"))
     ]

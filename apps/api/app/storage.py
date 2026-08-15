@@ -54,6 +54,22 @@ class MediaStorage:
         signature = hmac.new(self.settings.jwt_secret.encode(), message, hashlib.sha256).hexdigest()
         return f"{clean}?org={quote(organization_id, safe='')}&expires={expires}&sig={signature}"
 
+    def public_path_for(self, *, storage_uri: str | None = None, local_path: str | None = None) -> str | None:
+        """Resolve a persisted private object to the authenticated media route."""
+        if storage_uri and storage_uri.startswith("gs://"):
+            prefix = f"gs://{self.settings.google_cloud_storage_bucket}/"
+            if storage_uri.startswith(prefix):
+                relative = storage_uri.removeprefix(prefix)
+                return f"/media/{relative}"
+        raw_path = local_path or storage_uri
+        if raw_path:
+            candidate = Path(raw_path)
+            try:
+                return f"/media/{self.relative_path(candidate)}"
+            except (ValueError, OSError):
+                return None
+        return None
+
     def verify_signed_path(self, public_path: str, organization_id: str, expires: int, signature: str) -> bool:
         if expires < int(time.time()) or expires > int(time.time()) + 86400:
             return False

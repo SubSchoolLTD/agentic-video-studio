@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
+import math
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -96,7 +99,7 @@ class EditorialPolicy(BaseModel):
 
 
 class EditorialStoryboard(BaseModel):
-    scenes: list[EditorialScene] = Field(min_length=4, max_length=6)
+    scenes: list[EditorialScene] = Field(min_length=2, max_length=20)
     visual_mode: VisualMode
     creator_profile: str
     visual_bible: list[str] = Field(min_length=3, max_length=8)
@@ -119,6 +122,68 @@ class MultimodalQAAssessment(BaseModel):
     brand_passed: bool
     platform_safe: bool
     rights_safe: bool
+
+
+class SceneSpeechAssessment(BaseModel):
+    transcript: str
+    speech_present: bool
+    last_phrase_complete: bool
+    speech_end_seconds: float | None = None
+    issues: list[str] = Field(default_factory=list)
+    recommended_narration: str = ""
+
+
+class DialogueFitItem(BaseModel):
+    scene_id: str
+    narration: str
+
+
+class DialogueFitSet(BaseModel):
+    scenes: list[DialogueFitItem] = Field(min_length=1, max_length=20)
+
+
+def speech_word_budget(duration_seconds: float, *, safety_seconds: float = 0.65) -> int:
+    """Conservative conversational budget that leaves a natural pause before the cut."""
+    usable = max(1.0, float(duration_seconds) - safety_seconds)
+    return max(2, math.floor(usable * 2.15))
+
+
+def compact_narration(text: str, max_words: int) -> str:
+    words = str(text or "").strip().split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", " ".join(words)) if part.strip()]
+    selected: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join([*selected, sentence]).split()
+        if len(candidate) > max_words:
+            break
+        selected.append(sentence)
+    if selected:
+        return " ".join(selected)
+    clause = re.split(r"[,;:—–]", " ".join(words), maxsplit=1)[0].strip()
+    clause_words = clause.split()
+    fitted = clause if 2 <= len(clause_words) <= max_words else " ".join(words[:max_words])
+    return fitted.rstrip(" ,;:—–.!?") + "."
+
+
+def apply_narration_to_scene(scene: dict[str, Any], narration: str, *, native_audio: bool) -> dict[str, Any]:
+    updated = {**scene, "narration": narration}
+    base = str(scene.get("visual_prompt_base") or scene.get("visual_prompt") or "").strip()
+    if native_audio:
+        audio_direction = (
+            f'The creator says exactly in the narration language: "{narration}". '
+            "Finish the complete line before the cut, with synchronized natural speech, a short final pause, "
+            "consistent voice identity and subtle room ambience."
+        )
+    else:
+        audio_direction = "Silent visual performance; relaxed mouth, no visible speaking."
+    updated["visual_prompt_base"] = base
+    updated["visual_prompt"] = (
+        f"{base} {audio_direction} "
+        "No readable screens, interfaces, letters, numbers, subtitles, prices, logos, brands or UI glyphs."
+    ).strip()
+    return updated
 
 
 VISUAL_MODE_DIRECTIONS = {
@@ -579,6 +644,9 @@ class EditorialProvider:
         requested_hook: str = "",
         content_format: str = "educational_explainer",
         character_profile: str = "",
+        scene_count_min: int = 4,
+        scene_count_max: int = 6,
+        scene_count_flex: int = 2,
     ) -> dict[str, Any]:
         if not self.settings.uses_live_research:
             return self._mock_package(
@@ -593,6 +661,9 @@ class EditorialProvider:
                 requested_hook,
                 content_format,
                 character_profile,
+                scene_count_min,
+                scene_count_max,
+                scene_count_flex,
             )
         if not self.settings.google_cloud_project:
             raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for hybrid/live editorial generation")
@@ -609,7 +680,95 @@ class EditorialProvider:
             requested_hook,
             content_format,
             character_profile,
+            scene_count_min,
+            scene_count_max,
+            scene_count_flex,
         )
+
+    async def fit_dialogue(
+        self,
+        scenes: list[dict[str, Any]],
+        *,
+        native_audio: bool,
+        compression: float = 1.0,
+    ) -> list[dict[str, Any]]:
+        budgets = {
+            str(scene.get("id")): max(
+                2,
+                math.floor(speech_word_budget(float(scene.get("duration_target") or 4)) * compression),
+            )
+            for scene in scenes
+        }
+        needs_rewrite = [
+            scene
+            for scene in scenes
+            if len(str(scene.get("narration") or "").split()) > budgets[str(scene.get("id"))]
+        ]
+        replacements: dict[str, str] = {}
+        if needs_rewrite and self.settings.uses_live_research:
+            replacements = await asyncio.to_thread(self._fit_dialogue_with_gemini, needs_rewrite, budgets)
+        for scene in needs_rewrite:
+            scene_id = str(scene.get("id"))
+            replacement = replacements.get(scene_id) or compact_narration(
+                str(scene.get("narration") or ""), budgets[scene_id]
+            )
+            scene.update(apply_narration_to_scene(scene, replacement, native_audio=native_audio))
+        for scene in scenes:
+            scene_id = str(scene.get("id"))
+            word_count = len(str(scene.get("narration") or "").split())
+            scene["speech_timing"] = {
+                "word_count": word_count,
+                "word_budget": budgets[scene_id],
+                "estimated_seconds": round(word_count / 2.15 + 0.65, 2),
+                "adjusted_before_generation": scene in needs_rewrite,
+            }
+        return scenes
+
+    def _fit_dialogue_with_gemini(
+        self,
+        scenes: list[dict[str, Any]],
+        budgets: dict[str, int],
+    ) -> dict[str, str]:
+        from google.genai import types
+
+        client = google_genai_client(self.settings)
+        prompt = {
+            "task": "Rewrite only the supplied narration lines so each is a complete, natural spoken sentence within max_words.",
+            "rules": [
+                "Preserve the scene purpose, factual meaning, language and call to action.",
+                "Do not add facts, claims, filler, stage directions or ellipses.",
+                "Every line must sound complete when the video cuts immediately after it.",
+            ],
+            "scenes": [
+                {
+                    "scene_id": scene.get("id"),
+                    "purpose": scene.get("purpose"),
+                    "narration": scene.get("narration"),
+                    "max_words": budgets[str(scene.get("id"))],
+                }
+                for scene in scenes
+            ],
+        }
+        response = client.models.generate_content(
+            model=self.settings.gemini_model,
+            contents=json.dumps(prompt, ensure_ascii=False),
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=DialogueFitSet,
+                temperature=0.2,
+                system_instruction="You are a precise short-form dialogue editor. Output JSON only.",
+            ),
+        )
+        parsed = (
+            response.parsed
+            if isinstance(response.parsed, DialogueFitSet)
+            else DialogueFitSet.model_validate_json(response.text or "{}")
+        )
+        return {
+            item.scene_id: compact_narration(item.narration, budgets[item.scene_id])
+            for item in parsed.scenes
+            if item.scene_id in budgets
+        }
 
 
     def _generate_with_gemini(
@@ -625,6 +784,9 @@ class EditorialProvider:
         requested_hook: str,
         content_format: str,
         character_profile: str,
+        scene_count_min: int,
+        scene_count_max: int,
+        scene_count_flex: int,
     ) -> dict[str, Any]:
         from google.genai import types
 
@@ -646,7 +808,16 @@ class EditorialProvider:
                 "human_hook": "Use the requested hook as the opening constraint when supplied; tighten wording only when needed for timing or policy",
                 "one_core_idea": True,
                 "cite_source_ids": True,
-                "scenes": "4 to 6 concrete, filmable scenes; every scene needs a subject, setting, action, camera and performance direction",
+                "scenes": {
+                    "preferred_min": scene_count_min,
+                    "preferred_max": scene_count_max,
+                    "allowed_min": max(2, scene_count_min - scene_count_flex),
+                    "allowed_max": min(20, scene_count_max + scene_count_flex),
+                    "selection_rule": (
+                        "Choose the smallest count that fully explains the idea, but add scenes when dialogue "
+                        "would otherwise be rushed. Every scene needs subject, setting, action, camera and performance."
+                    ),
+                },
                 "creator_continuity": "Define one specific recurring creator profile and reuse it verbatim across all relevant scenes",
                 "visual_bible": "3 to 8 concise continuity rules covering creator, wardrobe, location, light, camera texture and palette",
                 "generation_boundary": "No readable text, captions, prices, logos, brands or invented UI inside generative video",
@@ -674,6 +845,12 @@ class EditorialProvider:
         else:
             package = EditorialPackage.model_validate_json(response.text or "{}").model_dump()
         scenes = package["storyboard"]["scenes"]
+        allowed_min = max(2, scene_count_min - scene_count_flex)
+        allowed_max = min(20, scene_count_max + scene_count_flex)
+        if not allowed_min <= len(scenes) <= allowed_max:
+            raise RuntimeError(
+                f"Editorial provider returned {len(scenes)} scenes; allowed range is {allowed_min}-{allowed_max}"
+            )
         package["production_brief"]["visual_mode"] = visual_mode
         package["production_brief"]["aspect_ratios"] = aspect_ratios
         package["storyboard"]["visual_mode"] = visual_mode
@@ -692,11 +869,13 @@ class EditorialProvider:
                 package["concepts"][0]["hook"] = requested_hook
         for index, scene in enumerate(scenes):
             end = float(duration_seconds) if index == len(scenes) - 1 else round(cursor + per_scene, 3)
-            audio_direction = (
-                f'The creator says exactly in the narration language: "{scene["narration"]}". '
-                "Use clear synchronized direct speech, consistent voice identity and subtle natural room ambience."
-                if visual_mode == "ugc_native_audio"
-                else "Silent visual performance; relaxed mouth, no visible speaking."
+            visual_prompt_base = (
+                f"{VISUAL_MODE_DIRECTIONS[visual_mode]} "
+                f"Recurring creator: {creator_profile}. "
+                f"Continuity rules: {'; '.join(visual_bible)}. "
+                f"Shot: {scene['shot_type']}. Subject: {scene['subject']}. Setting: {scene['setting']}. "
+                f"Visible action: {scene['action']}. Camera: {scene['camera_direction']}. "
+                f"Performance: {scene['performance_direction']}. Project palette reference: {palette_hint}."
             )
             scene.update(
                 {
@@ -705,20 +884,18 @@ class EditorialProvider:
                     "start_sec": cursor,
                     "end_sec": end,
                     "duration_target": round(end - cursor, 3),
-                    "visual_prompt": (
-                        f"{VISUAL_MODE_DIRECTIONS[visual_mode]} "
-                        f"Recurring creator: {creator_profile}. "
-                        f"Continuity rules: {'; '.join(visual_bible)}. "
-                        f"Shot: {scene['shot_type']}. Subject: {scene['subject']}. Setting: {scene['setting']}. "
-                        f"Visible action: {scene['action']}. Camera: {scene['camera_direction']}. "
-                        f"Performance: {scene['performance_direction']}. Project palette reference: {palette_hint}. "
-                        f"{audio_direction} "
-                        "No readable screens, interfaces, letters, numbers, subtitles, prices, logos, brands or UI glyphs."
-                    ),
+                    "visual_prompt_base": visual_prompt_base,
                     "locked": False,
                     "status": "planned",
                     "attempt": 0,
                 }
+            )
+            scene.update(
+                apply_narration_to_scene(
+                    scene,
+                    str(scene.get("narration") or "").strip(),
+                    native_audio=visual_mode == "ugc_native_audio",
+                )
             )
             cursor = end
         package["script"]["voiceover"] = " ".join(
@@ -730,7 +907,7 @@ class EditorialProvider:
         package["provider_trace"] = {
             "provider": "google",
             "model": self.settings.gemini_model,
-            "prompt_version": "editorial-ugc-v3",
+            "prompt_version": "editorial-continuity-v4",
             "response_id": getattr(response, "response_id", None),
         }
         return package
@@ -748,19 +925,29 @@ class EditorialProvider:
         requested_hook: str,
         content_format: str,
         character_profile: str,
+        scene_count_min: int,
+        scene_count_max: int,
+        scene_count_flex: int,
     ) -> dict[str, Any]:
         cta = brand.get("cta", {}).get("primary", "Learn more")
         brand_name = brand.get("identity", {}).get("name", "your project")
         palette = brand.get("visual", {}).get("palette") or []
         palette_hint = ", ".join(str(value) for value in palette[:5]) or "a neutral project palette"
         hook = requested_hook.strip() or f"Here is the clearest way to understand {title}."
-        beats = [
+        base_beats = [
             ("hook", hook, "The creator opens a notebook and points to one practical takeaway"),
             ("problem", f"The audience needs a fast, credible reason to care about {title}.", "The creator compares a cluttered desk with one clear plan"),
             ("insight", "Use one supported fact and one concrete example to explain the core idea.", "Hands arrange three simple study materials into a repeatable workflow"),
+            ("example", "Here is one practical example you can try today.", "The creator demonstrates one simple action at the desk"),
+            ("proof", "The supporting evidence keeps the recommendation specific and credible.", "The creator checks one highlighted source beside the notebook"),
             ("payoff", f"The result is a concise story that stays aligned with {brand_name}.", "The creator completes the task and reacts with restrained satisfaction"),
             ("cta", f"{cta} with {brand_name}.", "The creator closes the notebook and leaves clean negative space for the CTA overlay"),
         ]
+        allowed_min = max(2, scene_count_min - scene_count_flex)
+        allowed_max = min(20, scene_count_max + scene_count_flex)
+        suggested_count = max(2, round(duration_seconds / 5))
+        scene_count = min(allowed_max, max(allowed_min, suggested_count))
+        beats = [base_beats[index % len(base_beats)] for index in range(scene_count)]
         creator_profile = character_profile or "One recurring adult creator in casual neutral clothing, natural appearance, no celebrity likeness"
         visual_bible = [
             "same creator and neutral wardrobe in every scene",
@@ -774,13 +961,11 @@ class EditorialProvider:
         cursor = 0.0
         for index, (purpose, narration, visual) in enumerate(beats):
             end = float(duration_seconds) if index == len(beats) - 1 else round(cursor + per_scene, 3)
-            audio_direction = (
-                f'The creator says exactly: "{narration}" with synchronized natural speech and quiet room ambience.'
-                if visual_mode == "ugc_native_audio"
-                else "No visible speaking; narration is added separately."
+            visual_prompt_base = (
+                f"{VISUAL_MODE_DIRECTIONS[visual_mode]} Recurring creator: {creator_profile}. "
+                f"Visible action: {visual}. Use {palette_hint} only as a subtle palette reference."
             )
-            scenes.append(
-                {
+            scene = {
                     "id": f"scene_{index + 1}",
                     "position": index + 1,
                     "start_sec": cursor,
@@ -789,11 +974,7 @@ class EditorialProvider:
                     "purpose": purpose,
                     "narration": narration,
                     "on_screen_text": narration.split(".")[0][:64],
-                    "visual_prompt": (
-                        f"{VISUAL_MODE_DIRECTIONS[visual_mode]} Recurring creator: {creator_profile}. "
-                        f"Visible action: {visual}. Use {palette_hint} only as a subtle palette reference. "
-                        f"{audio_direction} No readable text, logos or invented UI."
-                    ),
+                    "visual_prompt_base": visual_prompt_base,
                     "continuity_notes": "; ".join(visual_bible),
                     "shot_type": "creator-led medium shot" if index in {0, 3, 4} else "handheld detail shot",
                     "subject": creator_profile,
@@ -809,6 +990,12 @@ class EditorialProvider:
                     "status": "planned",
                     "attempt": 0,
                 }
+            scenes.append(
+                apply_narration_to_scene(
+                    scene,
+                    narration,
+                    native_audio=visual_mode == "ugc_native_audio",
+                )
             )
             cursor = end
         scenes[-1]["end_sec"] = duration_seconds
@@ -832,7 +1019,7 @@ class EditorialProvider:
             "script": {
                 "title": title,
                 "hook": hook,
-                "voiceover": " ".join(item[1] for item in beats),
+                "voiceover": " ".join(str(item.get("narration") or "") for item in scenes),
                 "duration_target": duration_seconds,
                 "beats": scenes,
                 "cta": cta,
@@ -856,7 +1043,7 @@ class EditorialProvider:
                 "provider": "google",
                 "mode": "mock",
                 "model": "mock-gemini",
-                "prompt_version": "editorial-ugc-v3",
+                "prompt_version": "editorial-continuity-v4",
             },
         }
 
@@ -965,6 +1152,130 @@ class MultimodalQAProvider:
         }
 
 
+class SpeechQAProvider:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def analyze(
+        self,
+        *,
+        video_uri: str | None,
+        expected_text: str,
+        duration_target: float,
+    ) -> dict[str, Any]:
+        if not self.settings.uses_live_video:
+            return {
+                "passed": True,
+                "transcript": expected_text,
+                "coverage": 1.0,
+                "speech_present": bool(expected_text.strip()),
+                "last_phrase_complete": True,
+                "speech_end_seconds": min(duration_target, max(0.5, len(expected_text.split()) / 2.15)),
+                "issues": [],
+                "provider": "deterministic_test_fixture",
+                "model_id": None,
+                "demo_data": True,
+            }
+        if not video_uri or not video_uri.startswith("gs://"):
+            return {
+                "passed": False,
+                "transcript": "",
+                "coverage": 0.0,
+                "speech_present": False,
+                "last_phrase_complete": False,
+                "speech_end_seconds": None,
+                "issues": ["Scene clip is unavailable in private Cloud Storage for speech QA"],
+                "provider": "gemini",
+                "model_id": self.settings.gemini_model,
+                "availability": "missing",
+            }
+        return await asyncio.to_thread(
+            self._analyze_with_gemini,
+            video_uri,
+            expected_text,
+            duration_target,
+        )
+
+    def _analyze_with_gemini(
+        self,
+        video_uri: str,
+        expected_text: str,
+        duration_target: float,
+    ) -> dict[str, Any]:
+        from google.genai import types
+
+        client = google_genai_client(self.settings)
+        prompt = {
+            "task": "Transcribe only the spoken dialogue in this short clip and verify that the expected line finishes before the edit point.",
+            "expected_dialogue": expected_text,
+            "edit_point_seconds": duration_target,
+            "rules": [
+                "Return the actual words heard, including omissions or substitutions.",
+                "Ignore music and room ambience.",
+                "last_phrase_complete is false when speech is cut off, trails into the edit point, or ends mid-thought.",
+                "speech_end_seconds is the end time of the last spoken word when measurable.",
+            ],
+        }
+        response = client.models.generate_content(
+            model=self.settings.gemini_model,
+            contents=[
+                types.Part.from_uri(file_uri=video_uri, mime_type="video/mp4"),
+                json.dumps(prompt, ensure_ascii=False),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=SceneSpeechAssessment,
+                audio_timestamp=True,
+                temperature=0,
+            ),
+        )
+        parsed = (
+            response.parsed
+            if isinstance(response.parsed, SceneSpeechAssessment)
+            else SceneSpeechAssessment.model_validate_json(response.text or "{}")
+        )
+        def normalize(value: str) -> str:
+            return " ".join(re.findall(r"\w+", value.lower(), flags=re.UNICODE))
+        expected_normalized = normalize(expected_text)
+        actual_normalized = normalize(parsed.transcript)
+        coverage = (
+            difflib.SequenceMatcher(None, expected_normalized, actual_normalized).ratio()
+            if expected_normalized and actual_normalized
+            else 0.0
+        )
+        finishes_in_time = (
+            parsed.speech_end_seconds is None
+            or parsed.speech_end_seconds <= float(duration_target) - 0.1
+        )
+        passed = bool(
+            parsed.speech_present
+            and parsed.last_phrase_complete
+            and finishes_in_time
+            and coverage >= 0.82
+        )
+        issues = list(parsed.issues)
+        if coverage < 0.82:
+            issues.append(f"Expected-dialogue coverage is {round(coverage * 100)}%")
+        if not finishes_in_time:
+            issues.append("Speech reaches or exceeds the planned edit point")
+        if not parsed.last_phrase_complete:
+            issues.append("The final phrase is incomplete or cut off")
+        return {
+            "passed": passed,
+            "transcript": parsed.transcript,
+            "coverage": round(coverage, 4),
+            "speech_present": parsed.speech_present,
+            "last_phrase_complete": parsed.last_phrase_complete,
+            "speech_end_seconds": parsed.speech_end_seconds,
+            "issues": list(dict.fromkeys(issues)),
+            "recommended_narration": parsed.recommended_narration,
+            "provider": "gemini",
+            "model_id": self.settings.gemini_model,
+            "provider_response_id": getattr(response, "response_id", None),
+            "demo_data": False,
+        }
+
+
 class VeoProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -978,6 +1289,7 @@ class VeoProvider:
         generate_audio: bool = False,
         reference_image_uri: str | None = None,
         reference_image_mime_type: str | None = None,
+        duration_seconds: float = 8,
     ) -> Path | None:
         if not self.settings.uses_live_video:
             return None
@@ -997,6 +1309,7 @@ class VeoProvider:
             generate_audio,
             reference_image_uri,
             reference_image_mime_type,
+            duration_seconds,
         )
         if not generated.exists() or generated.stat().st_size == 0:
             raise RuntimeError("Veo completed without a usable scene file")
@@ -1010,6 +1323,7 @@ class VeoProvider:
         generate_audio: bool,
         reference_image_uri: str | None,
         reference_image_mime_type: str | None,
+        duration_seconds: float,
     ) -> Path:
         from google.genai import types
 
@@ -1023,6 +1337,7 @@ class VeoProvider:
                 )
             else:
                 image = types.Image.from_file(location=reference_image_uri)
+        veo_duration = next((value for value in (4, 6, 8) if duration_seconds <= value), 8)
         operation = client.models.generate_videos(
             model=self.settings.veo_model,
             prompt=prompt,
@@ -1030,7 +1345,7 @@ class VeoProvider:
             config=types.GenerateVideosConfig(
                 aspect_ratio=aspect_ratio,
                 number_of_videos=1,
-                duration_seconds=8,
+                duration_seconds=veo_duration,
                 generate_audio=generate_audio,
                 person_generation="allow_adult",
             ),

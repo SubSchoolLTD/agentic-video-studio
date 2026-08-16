@@ -19,10 +19,17 @@ from .providers import (
     EditorialProvider,
     MultimodalQAProvider,
     ParallelSearchProvider,
+    SpeechQAProvider,
     TextToSpeechProvider,
     VeoProvider,
 )
-from .renderer import render_motion_video, technical_qa, write_webvtt
+from .renderer import (
+    extract_last_frame,
+    render_motion_video,
+    render_scene_fixture,
+    technical_qa,
+    write_webvtt,
+)
 from .repository import ResourceRepository
 from .scoring import final_scores, topic_score
 from .storage import MediaStorage
@@ -59,6 +66,7 @@ class WorkflowManager:
         self.parallel = ParallelSearchProvider(settings)
         self.editorial = EditorialProvider(settings)
         self.multimodal_qa = MultimodalQAProvider(settings)
+        self.speech_qa = SpeechQAProvider(settings)
         self.veo = VeoProvider(settings)
         self.tts = TextToSpeechProvider(settings)
         self.character_image = CharacterImageProvider(settings)
@@ -204,6 +212,233 @@ class WorkflowManager:
                     data={"error": str(exc), "failed_at": datetime.now(UTC).isoformat()},
                 )
 
+    def _continuity_input(
+        self,
+        repo: ResourceRepository,
+        *,
+        scene: Resource,
+        aspect_ratio: str,
+        default_uri: str | None,
+        default_mime_type: str | None,
+    ) -> tuple[str | None, str | None, str]:
+        storyboard_id = str(scene.data.get("storyboard_id") or "")
+        position = int(scene.data.get("position") or 1)
+        previous = next(
+            (
+                item
+                for item in repo.list(
+                    organization_id=scene.organization_id,
+                    project_id=scene.project_id,
+                    kind="scene",
+                    limit=200,
+                )
+                if str(item.data.get("storyboard_id") or "") == storyboard_id
+                and int(item.data.get("position") or 0) == position - 1
+            ),
+            None,
+        )
+        if previous:
+            attempt_ids = dict(previous.data.get("latest_attempt_ids") or {})
+            attempt_id = attempt_ids.get(aspect_ratio) or previous.data.get("latest_attempt_id")
+            attempt = repo.get(
+                str(attempt_id or ""),
+                organization_id=scene.organization_id,
+                project_id=scene.project_id,
+                kind="scene_attempt",
+            )
+            if attempt and attempt.data.get("last_frame_storage_uri"):
+                return (
+                    str(attempt.data["last_frame_storage_uri"]),
+                    str(attempt.data.get("last_frame_mime_type") or "image/jpeg"),
+                    "previous_scene_last_frame",
+                )
+        if default_uri:
+            return default_uri, default_mime_type or "image/jpeg", "character_reference"
+        return None, None, "text_only"
+
+    async def _generate_scene_with_qa(
+        self,
+        *,
+        session: Any,
+        repo: ResourceRepository,
+        job: Resource,
+        scene: Resource,
+        aspect_ratios: list[str],
+        initial_attempt_number: int,
+        native_audio: bool,
+        default_reference_uri: str | None,
+        default_reference_mime_type: str | None,
+        regeneration_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str | None]]:
+        max_automatic_retries = 2 if native_audio else 0
+        attempt_number = initial_attempt_number
+        for automatic_retry in range(max_automatic_retries + 1):
+            prompt = str(scene.data.get("visual_prompt") or "").strip()
+            if not prompt:
+                raise RuntimeError(f"Director returned no visual prompt for {scene.id}")
+            attempt_items: list[dict[str, Any]] = []
+            latest_attempt_ids: dict[str, str] = {}
+            output_uris: dict[str, str | None] = {}
+            speech_passed = True
+            for aspect_ratio in aspect_ratios:
+                ratio_slug = aspect_ratio.replace(":", "x")
+                suffix = f"_attempt_{attempt_number}" if attempt_number > 1 else ""
+                output_path = (
+                    self.settings.storage_root
+                    / (job.project_id or "unknown")
+                    / job.id
+                    / "scenes"
+                    / f"{scene.id}{suffix}_{ratio_slug}.mp4"
+                )
+                input_uri, input_mime_type, input_kind = self._continuity_input(
+                    repo,
+                    scene=scene,
+                    aspect_ratio=aspect_ratio,
+                    default_uri=default_reference_uri,
+                    default_mime_type=default_reference_mime_type,
+                )
+                scene_started = time.perf_counter()
+                if self.settings.uses_live_video:
+                    generated = await self.veo.generate_scene(
+                        prompt,
+                        aspect_ratio=aspect_ratio,
+                        output_path=output_path,
+                        generate_audio=native_audio,
+                        reference_image_uri=input_uri,
+                        reference_image_mime_type=input_mime_type,
+                        duration_seconds=float(scene.data.get("duration_target") or 8),
+                    )
+                    if generated is None:
+                        raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
+                else:
+                    generated = await asyncio.to_thread(
+                        render_scene_fixture,
+                        label=f"Scene {scene.data.get('position') or scene.id}",
+                        aspect_ratio=aspect_ratio,
+                        output_path=output_path,
+                        duration_seconds=min(2.0, float(scene.data.get("duration_target") or 2)),
+                    )
+                persisted = await asyncio.to_thread(self.storage.persist, generated, content_type="video/mp4")
+                last_frame_path = output_path.with_name(f"{output_path.stem}_last.jpg")
+                await asyncio.to_thread(extract_last_frame, generated, last_frame_path)
+                persisted_last_frame = await asyncio.to_thread(
+                    self.storage.persist,
+                    last_frame_path,
+                    content_type="image/jpeg",
+                )
+                if native_audio:
+                    speech_qa = await self.speech_qa.analyze(
+                        video_uri=persisted["storage_uri"],
+                        expected_text=str(scene.data.get("narration") or ""),
+                        duration_target=float(scene.data.get("duration_target") or 8),
+                    )
+                else:
+                    timing = dict(scene.data.get("speech_timing") or {})
+                    speech_qa = {
+                        "passed": bool(
+                            not timing
+                            or float(timing.get("estimated_seconds") or 0)
+                            <= float(scene.data.get("duration_target") or 8)
+                        ),
+                        "mode": "preflight_timing",
+                        "transcript": None,
+                        "coverage": None,
+                        "issues": [],
+                        "provider": "internal",
+                        "demo_data": not self.settings.uses_live_video,
+                    }
+                speech_passed = speech_passed and bool(speech_qa.get("passed"))
+                if self.settings.uses_live_video:
+                    await self._emit(
+                        session,
+                        job,
+                        "model.call.completed",
+                        {
+                            "stage": "scene_generation",
+                            "provider": "google",
+                            "model": self.settings.veo_model,
+                            "scene_id": scene.id,
+                            "aspect_ratio": aspect_ratio,
+                            "latency_ms": round((time.perf_counter() - scene_started) * 1000),
+                            "cost_usd": None,
+                            "speech_qa_passed": speech_qa.get("passed"),
+                        },
+                    )
+                attempt = repo.add(
+                    kind="scene_attempt",
+                    organization_id=job.organization_id,
+                    project_id=job.project_id,
+                    status="passed" if speech_qa.get("passed") else "speech_qa_failed",
+                    data={
+                        "scene_id": scene.id,
+                        "attempt": attempt_number,
+                        "automatic_retry": automatic_retry,
+                        "aspect_ratio": aspect_ratio,
+                        "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
+                        "prompt_version": "editorial-continuity-v4",
+                        "visual_prompt": prompt,
+                        "narration": scene.data.get("narration"),
+                        "output_uri": str(generated),
+                        "storage_uri": persisted["storage_uri"],
+                        "public_path": persisted["public_path"],
+                        "last_frame_storage_uri": persisted_last_frame["storage_uri"],
+                        "last_frame_public_path": persisted_last_frame["public_path"],
+                        "last_frame_mime_type": "image/jpeg",
+                        "continuity_input_uri": input_uri,
+                        "continuity_input_kind": input_kind,
+                        "speech_qa": speech_qa,
+                        "qa_status": "passed" if speech_qa.get("passed") else "failed",
+                        "demo_data": not self.settings.uses_live_video,
+                        "audio_mode": "veo_native" if native_audio else "google_tts",
+                        "character_id": job.data.get("character_id"),
+                        "regeneration_id": regeneration_id,
+                        "cost_usd": None,
+                    },
+                )
+                latest_attempt_ids[aspect_ratio] = attempt.id
+                output_uris[aspect_ratio] = str(generated)
+                attempt_items.append(
+                    {
+                        "scene_id": scene.id,
+                        "attempt_id": attempt.id,
+                        "attempt": attempt_number,
+                        "aspect_ratio": aspect_ratio,
+                        "model_id": attempt.data["model_id"],
+                        "demo_data": attempt.data["demo_data"],
+                        "output_uri": str(generated),
+                        "storage_uri": persisted["storage_uri"],
+                        "public_path": persisted["public_path"],
+                        "speech_qa": speech_qa,
+                        "continuity_input_kind": input_kind,
+                        "last_frame_storage_uri": persisted_last_frame["storage_uri"],
+                    }
+                )
+            if speech_passed:
+                return attempt_items, latest_attempt_ids, output_uris
+            if automatic_retry >= max_automatic_retries:
+                raise RuntimeError(
+                    f"Speech QA failed for {scene.id} after {max_automatic_retries + 1} attempts"
+                )
+            fitted = await self.editorial.fit_dialogue(
+                [dict(scene.data)],
+                native_audio=True,
+                compression=max(0.55, 0.78 - automatic_retry * 0.12),
+            )
+            updated_scene = fitted[0]
+            repo.update(
+                scene,
+                status="regenerating",
+                data={
+                    "narration": updated_scene.get("narration"),
+                    "visual_prompt": updated_scene.get("visual_prompt"),
+                    "visual_prompt_base": updated_scene.get("visual_prompt_base"),
+                    "speech_timing": updated_scene.get("speech_timing"),
+                    "automatic_speech_retries": automatic_retry + 1,
+                },
+            )
+            attempt_number += 1
+        raise RuntimeError(f"Scene generation did not produce a passing attempt for {scene.id}")
+
     async def run_scene_regeneration(self, regeneration_id: str) -> None:
         with SessionLocal() as session:
             repo = ResourceRepository(session)
@@ -248,69 +483,19 @@ class WorkflowManager:
             }
             try:
                 native_audio = job.data.get("audio_mode") == "veo_native"
-                for aspect_ratio in aspect_ratios:
-                    output_uri = None
-                    storage_uri = None
-                    if self.settings.uses_live_video:
-                        ratio_slug = aspect_ratio.replace(":", "x")
-                        output_path = (
-                            self.settings.storage_root
-                            / (job.project_id or "unknown")
-                            / job.id
-                            / "scenes"
-                            / f"{scene.id}_attempt_{attempt_number}_{ratio_slug}.mp4"
-                        )
-                        generated = await self.veo.generate_scene(
-                            prompt,
-                            aspect_ratio=aspect_ratio,
-                            output_path=output_path,
-                            generate_audio=native_audio,
-                            reference_image_uri=job.data.get("reference_image_uri"),
-                            reference_image_mime_type=job.data.get("reference_image_mime_type"),
-                        )
-                        if generated is None:
-                            raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
-                        output_uri = str(generated)
-                        persisted = await asyncio.to_thread(
-                            self.storage.persist,
-                            generated,
-                            content_type="video/mp4",
-                        )
-                        storage_uri = persisted["storage_uri"]
-                    attempt = repo.add(
-                        kind="scene_attempt",
-                        organization_id=job.organization_id,
-                        project_id=job.project_id,
-                        status="passed",
-                        data={
-                            "scene_id": scene.id,
-                            "attempt": attempt_number,
-                            "aspect_ratio": aspect_ratio,
-                            "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                            "prompt_version": "editorial-ugc-v3",
-                            "visual_prompt": prompt,
-                            "output_uri": output_uri,
-                            "storage_uri": storage_uri,
-                            "qa_status": "pending" if self.settings.uses_live_video else "fixture",
-                            "demo_data": not self.settings.uses_live_video,
-                            "audio_mode": "veo_native" if native_audio else "google_tts",
-                            "character_id": job.data.get("character_id"),
-                            "regeneration_id": regeneration.id,
-                        },
-                    )
-                    latest_attempt_ids[aspect_ratio] = attempt.id
-                    output_uris[aspect_ratio] = output_uri
-                    replacement_attempts.append(
-                        {
-                            "scene_id": scene.id,
-                            "attempt_id": attempt.id,
-                            "aspect_ratio": aspect_ratio,
-                            "model_id": attempt.data["model_id"],
-                            "demo_data": attempt.data["demo_data"],
-                            "output_uri": output_uri,
-                            "storage_uri": storage_uri,
-                        }
-                    )
+                replacement_attempts, latest_attempt_ids, output_uris = await self._generate_scene_with_qa(
+                    session=session,
+                    repo=repo,
+                    job=job,
+                    scene=scene,
+                    aspect_ratios=aspect_ratios,
+                    initial_attempt_number=attempt_number,
+                    native_audio=native_audio,
+                    default_reference_uri=job.data.get("reference_image_uri"),
+                    default_reference_mime_type=job.data.get("reference_image_mime_type"),
+                    regeneration_id=regeneration.id,
+                )
+                attempt_number = max(int(item.get("attempt") or attempt_number) for item in replacement_attempts)
 
                 generation_output = self._completed_stage_output(job, "scene_generation")
                 retained_attempts = [
@@ -341,9 +526,26 @@ class WorkflowManager:
                         "latest_attempt_ids": latest_attempt_ids,
                         "output_uri": output_uris.get(aspect_ratios[0]),
                         "output_uris": output_uris,
-                        "visual_prompt": prompt,
                     },
                 )
+                storyboard_scenes = [dict(item) for item in storyboard.data.get("scenes", [])]
+                for index, item in enumerate(storyboard_scenes):
+                    if int(item.get("position") or 0) == int(scene.data.get("position") or 0):
+                        storyboard_scenes[index] = dict(scene.data)
+                repo.update(storyboard, data={"scenes": storyboard_scenes})
+                script_stage = self._completed_stage_output(job, "script")
+                script = repo.get_any(str(script_stage.get("script_id") or ""), kind="script")
+                if script:
+                    script_payload = dict(script.data.get("script") or {})
+                    script_payload.update(
+                        {
+                            "beats": storyboard_scenes,
+                            "voiceover": " ".join(
+                                str(item.get("narration") or "").strip() for item in storyboard_scenes
+                            ).strip(),
+                        }
+                    )
+                    repo.update(script, data={"script": script_payload})
                 repo.update(
                     job,
                     status="running",
@@ -654,7 +856,19 @@ class WorkflowManager:
             requested_hook=requested_hook,
             content_format=content_format,
             character_profile=character_profile,
+            scene_count_min=int(job.data.get("scene_count_min", 4)),
+            scene_count_max=int(job.data.get("scene_count_max", 6)),
+            scene_count_flex=int(job.data.get("scene_count_flex", 2)),
         )
+        package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
+        await self.editorial.fit_dialogue(package_scenes, native_audio=native_audio)
+        if package.get("storyboard") is not None:
+            package["storyboard"]["scenes"] = package_scenes
+        if package.get("script") is not None:
+            package["script"]["beats"] = package_scenes
+            package["script"]["voiceover"] = " ".join(
+                str(scene.get("narration") or "").strip() for scene in package_scenes
+            ).strip()
         await self._emit(
             session,
             job,
@@ -679,6 +893,12 @@ class WorkflowManager:
                 "creator_profile": (package.get("storyboard") or {}).get("creator_profile"),
                 "visual_bible": (package.get("storyboard") or {}).get("visual_bible", []),
                 "prompt_version": (package.get("provider_trace") or {}).get("prompt_version"),
+                "scene_count": len(package_scenes),
+                "requested_scene_range": {
+                    "min": int(job.data.get("scene_count_min", 4)),
+                    "max": int(job.data.get("scene_count_max", 6)),
+                    "flex": int(job.data.get("scene_count_flex", 2)),
+                },
             },
         )
 
@@ -770,99 +990,40 @@ class WorkflowManager:
         self._set_stage(repo, job, "scene_generation", "running")
         scene_attempts: list[dict[str, Any]] = []
         for scene in scene_resources:
-            prompt = str(scene.data.get("visual_prompt") or "").strip()
-            if not prompt:
-                raise RuntimeError(f"Director returned no visual prompt for {scene.id}")
-            latest_attempt_ids: dict[str, str] = {}
-            output_uris: dict[str, str | None] = {}
-            for aspect_ratio in aspect_ratios:
-                output_uri = None
-                scene_storage_uri = None
-                if self.settings.uses_live_video:
-                    ratio_slug = aspect_ratio.replace(":", "x")
-                    output_path = (
-                        self.settings.storage_root
-                        / (job.project_id or "unknown")
-                        / job.id
-                        / "scenes"
-                        / f"{scene.id}_{ratio_slug}.mp4"
-                    )
-                    scene_started = time.perf_counter()
-                    generated = await self.veo.generate_scene(
-                        prompt,
-                        aspect_ratio=aspect_ratio,
-                        output_path=output_path,
-                        generate_audio=native_audio,
-                        reference_image_uri=reference_image_uri or None,
-                        reference_image_mime_type=reference_image_mime_type,
-                    )
-                    if generated is None:
-                        raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
-                    output_uri = str(generated)
-                    persisted_scene = await asyncio.to_thread(
-                        self.storage.persist,
-                        generated,
-                        content_type="video/mp4",
-                    )
-                    scene_storage_uri = persisted_scene["storage_uri"]
-                    await self._emit(
-                        session,
-                        job,
-                        "model.call.completed",
-                        {
-                            "stage": "scene_generation",
-                            "provider": "google",
-                            "model": self.settings.veo_model,
-                            "scene_id": scene.id,
-                            "aspect_ratio": aspect_ratio,
-                            "latency_ms": round((time.perf_counter() - scene_started) * 1000),
-                            "cost_usd": None,
-                        },
-                    )
-                attempt = repo.add(
-                    kind="scene_attempt",
-                    organization_id=job.organization_id,
-                    project_id=job.project_id,
-                    status="passed",
-                    data={
-                        "scene_id": scene.id,
-                        "attempt": 1,
-                        "aspect_ratio": aspect_ratio,
-                        "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-ugc-v3",
-                        "visual_prompt": prompt,
-                        "output_uri": output_uri,
-                        "storage_uri": scene_storage_uri,
-                        "qa_status": "pending" if self.settings.uses_live_video else "fixture",
-                        "demo_data": not self.settings.uses_live_video,
-                        "audio_mode": "veo_native" if native_audio else "google_tts",
-                        "character_id": character.id if character else None,
-                        "cost_usd": None,
-                    },
-                )
-                latest_attempt_ids[aspect_ratio] = attempt.id
-                output_uris[aspect_ratio] = output_uri
-                scene_attempts.append(
-                    {
-                        "scene_id": scene.id,
-                        "attempt_id": attempt.id,
-                        "aspect_ratio": aspect_ratio,
-                        "model_id": attempt.data["model_id"],
-                        "output_uri": output_uri,
-                        "storage_uri": scene_storage_uri,
-                    }
-                )
+            attempts, latest_attempt_ids, output_uris = await self._generate_scene_with_qa(
+                session=session,
+                repo=repo,
+                job=job,
+                scene=scene,
+                aspect_ratios=aspect_ratios,
+                initial_attempt_number=1,
+                native_audio=native_audio,
+                default_reference_uri=reference_image_uri or None,
+                default_reference_mime_type=reference_image_mime_type,
+            )
+            scene_attempts.extend(attempts)
+            final_attempt_number = max(int(item.get("attempt") or 1) for item in attempts)
             repo.update(
                 scene,
                 status="generated",
                 data={
-                    "attempt": 1,
+                    "attempt": final_attempt_number,
                     "latest_attempt_id": latest_attempt_ids.get(aspect_ratios[0]),
                     "latest_attempt_ids": latest_attempt_ids,
                     "output_uri": output_uris.get(aspect_ratios[0]),
                     "output_uris": output_uris,
                 },
             )
+        scenes = [dict(item.data) for item in scene_resources]
+        repo.update(storyboard, data={"scenes": scenes})
+        current_script = dict(script.data.get("script") or {})
+        current_script.update(
+            {
+                "beats": scenes,
+                "voiceover": " ".join(str(item.get("narration") or "").strip() for item in scenes).strip(),
+            }
+        )
+        repo.update(script, data={"script": current_script})
         self._set_stage(repo, job, "scene_generation", "completed", output={"attempts": scene_attempts})
 
         self._set_stage(repo, job, "voice_audio", "running")
@@ -996,16 +1157,13 @@ class WorkflowManager:
         reference_image_uri = job.data.get("reference_image_uri")
         reference_image_mime_type = job.data.get("reference_image_mime_type")
         for scene in typed_scenes:
-            prompt = str(scene.data.get("visual_prompt") or "").strip()
-            if not prompt:
-                raise RuntimeError(f"Director returned no visual prompt for {scene.id}")
             latest_attempt_ids = dict(scene.data.get("latest_attempt_ids") or {})
             legacy_attempt_id = scene.data.get("latest_attempt_id")
             if legacy_attempt_id and aspect_ratios[0] not in latest_attempt_ids:
                 latest_attempt_ids[aspect_ratios[0]] = str(legacy_attempt_id)
             output_uris = dict(scene.data.get("output_uris") or {})
             attempt_number = int(scene.data.get("attempt", 0))
-            started_new_attempt = False
+            missing_ratios: list[str] = []
             for aspect_ratio in aspect_ratios:
                 latest_attempt_id = latest_attempt_ids.get(aspect_ratio)
                 latest_attempt = (
@@ -1022,98 +1180,54 @@ class WorkflowManager:
                             storage_uri=storage_uri,
                             local_path=Path(output_uri),
                         )
+                    if output_uri and not latest_attempt.data.get("last_frame_storage_uri"):
+                        last_frame_path = Path(output_uri).with_name(f"{Path(output_uri).stem}_last.jpg")
+                        await asyncio.to_thread(extract_last_frame, Path(output_uri), last_frame_path)
+                        persisted_last = await asyncio.to_thread(
+                            self.storage.persist,
+                            last_frame_path,
+                            content_type="image/jpeg",
+                        )
+                        repo.update(
+                            latest_attempt,
+                            data={
+                                "last_frame_storage_uri": persisted_last["storage_uri"],
+                                "last_frame_public_path": persisted_last["public_path"],
+                                "last_frame_mime_type": "image/jpeg",
+                            },
+                        )
                     scene_attempts.append(
                         {
                             "scene_id": scene.id,
                             "attempt_id": latest_attempt.id,
+                            "attempt": latest_attempt.data.get("attempt"),
                             "aspect_ratio": aspect_ratio,
                             "model_id": latest_attempt.data.get("model_id"),
                             "output_uri": output_uri,
                             "storage_uri": storage_uri,
+                            "public_path": latest_attempt.data.get("public_path"),
+                            "speech_qa": latest_attempt.data.get("speech_qa"),
+                            "last_frame_storage_uri": latest_attempt.data.get("last_frame_storage_uri"),
                         }
                     )
                     continue
-
-                output_uri = None
-                scene_storage_uri = None
-                if not started_new_attempt:
-                    attempt_number += 1
-                    started_new_attempt = True
-                if self.settings.uses_live_video:
-                    ratio_slug = aspect_ratio.replace(":", "x")
-                    output_path = (
-                        self.settings.storage_root
-                        / (job.project_id or "unknown")
-                        / job.id
-                        / "scenes"
-                        / f"{scene.id}_{ratio_slug}.mp4"
-                    )
-                    scene_started = time.perf_counter()
-                    generated = await self.veo.generate_scene(
-                        prompt,
-                        aspect_ratio=aspect_ratio,
-                        output_path=output_path,
-                        generate_audio=native_audio,
-                        reference_image_uri=reference_image_uri,
-                        reference_image_mime_type=reference_image_mime_type,
-                    )
-                    if generated is None:
-                        raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
-                    output_uri = str(generated)
-                    persisted_scene = await asyncio.to_thread(
-                        self.storage.persist,
-                        generated,
-                        content_type="video/mp4",
-                    )
-                    scene_storage_uri = persisted_scene["storage_uri"]
-                    await self._emit(
-                        session,
-                        job,
-                        "model.call.completed",
-                        {
-                            "stage": "scene_generation",
-                            "provider": "google",
-                            "model": self.settings.veo_model,
-                            "scene_id": scene.id,
-                            "aspect_ratio": aspect_ratio,
-                            "latency_ms": round((time.perf_counter() - scene_started) * 1000),
-                            "cost_usd": None,
-                            "resumed": True,
-                        },
-                    )
-                attempt = repo.add(
-                    kind="scene_attempt",
-                    organization_id=job.organization_id,
-                    project_id=job.project_id,
-                    status="passed",
-                    data={
-                        "scene_id": scene.id,
-                        "attempt": attempt_number,
-                        "aspect_ratio": aspect_ratio,
-                        "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-ugc-v3",
-                        "visual_prompt": prompt,
-                        "output_uri": output_uri,
-                        "storage_uri": scene_storage_uri,
-                        "qa_status": "pending" if self.settings.uses_live_video else "fixture",
-                        "demo_data": not self.settings.uses_live_video,
-                        "audio_mode": "veo_native" if native_audio else "google_tts",
-                        "character_id": job.data.get("character_id"),
-                        "cost_usd": None,
-                    },
+                missing_ratios.append(aspect_ratio)
+            if missing_ratios:
+                generated, generated_ids, generated_uris = await self._generate_scene_with_qa(
+                    session=session,
+                    repo=repo,
+                    job=job,
+                    scene=scene,
+                    aspect_ratios=missing_ratios,
+                    initial_attempt_number=attempt_number + 1,
+                    native_audio=native_audio,
+                    default_reference_uri=reference_image_uri,
+                    default_reference_mime_type=reference_image_mime_type,
                 )
-                latest_attempt_ids[aspect_ratio] = attempt.id
-                output_uris[aspect_ratio] = output_uri
-                scene_attempts.append(
-                    {
-                        "scene_id": scene.id,
-                        "attempt_id": attempt.id,
-                        "aspect_ratio": aspect_ratio,
-                        "model_id": attempt.data["model_id"],
-                        "output_uri": output_uri,
-                        "storage_uri": scene_storage_uri,
-                    }
-                )
+                scene_attempts.extend(generated)
+                latest_attempt_ids.update(generated_ids)
+                output_uris.update(generated_uris)
+                attempt_number = max(int(item.get("attempt") or attempt_number + 1) for item in generated)
             repo.update(
                 scene,
                 status="generated",
@@ -1125,6 +1239,16 @@ class WorkflowManager:
                     "output_uris": output_uris,
                 },
             )
+        scenes = [dict(item.data) for item in typed_scenes]
+        repo.update(storyboard, data={"scenes": scenes})
+        script_payload = dict(script.data.get("script") or {})
+        script_payload.update(
+            {
+                "beats": scenes,
+                "voiceover": " ".join(str(item.get("narration") or "").strip() for item in scenes).strip(),
+            }
+        )
+        repo.update(script, data={"script": script_payload})
         self._set_stage(repo, job, "scene_generation", "completed", output={"attempts": scene_attempts})
 
         self._set_stage(repo, job, "voice_audio", "running")
@@ -1412,6 +1536,9 @@ class WorkflowManager:
             item["multimodal_qa"].get("gates", {}).get("rights") is True for item in output_versions
         )
         duplicate_pass = all(item["duplicate_passed"] for item in output_versions)
+        speech_pass = bool(scene_attempts) and all(
+            bool((item.get("speech_qa") or {}).get("passed")) for item in scene_attempts
+        )
         script_resource = repo.get_any(script_id, kind="script")
         script_payload = dict(script_resource.data.get("script") or {}) if script_resource else {}
         cta_present = bool(str(script_payload.get("cta") or "").strip())
@@ -1426,6 +1553,7 @@ class WorkflowManager:
             "factual_confidence": claim_map_current,
             "technical_qa": technical_pass,
             "multimodal_qa": multimodal_pass,
+            "speech_timing": speech_pass,
             "content": content_pass and cta_present,
             "brand": brand_pass,
             "platform": platform_pass,
@@ -1441,6 +1569,18 @@ class WorkflowManager:
             "visual": {
                 "passed": multimodal_pass,
                 "outputs": [item["multimodal_qa"] for item in output_versions],
+            },
+            "speech": {
+                "passed": speech_pass,
+                "mode": "transcription" if job.data.get("audio_mode") == "veo_native" else "preflight_timing",
+                "scenes": [
+                    {
+                        "scene_id": item.get("scene_id"),
+                        "aspect_ratio": item.get("aspect_ratio"),
+                        **dict(item.get("speech_qa") or {}),
+                    }
+                    for item in scene_attempts
+                ],
             },
             "content": {
                 "passed": content_pass and cta_present,

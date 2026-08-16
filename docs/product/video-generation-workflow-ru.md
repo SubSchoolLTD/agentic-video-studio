@@ -94,7 +94,7 @@ rules:
 - `cinematic` — naturalistic cinematic b-roll;
 - `motion_graphics` — только явный выбор пользователя, не скрытый fallback.
 
-Generation request добавляет aspect ratios, duration, approval mode, script variant count и max cost. API сразу сохраняет durable job и возвращает job ID.
+Перед запуском открывается production setup: пользователь ещё раз выбирает video type, reusable character, aspect ratios, duration, approval mode, max cost и число сцен. Поле числа сцен принимает как точное значение (`4`), так и диапазон (`12-18`). Отдельный флаг разрешает режиссёру отклониться не более чем на ±2 сцены, если реплики иначе не помещаются или тема уже раскрыта. API сразу сохраняет durable job, связывает его с карточкой идеи и возвращает job ID; стадия и процент выполнения видны прямо на канбане.
 
 ### 3. Intake
 
@@ -158,7 +158,12 @@ requirements:
   human_hook: Use the requested hook as the opening constraint when supplied; tighten wording only when needed for timing or policy
   one_core_idea: true
   cite_source_ids: true
-  scenes: 4 to 6 concrete, filmable scenes; every scene needs a subject, setting, action, camera and performance direction
+  scenes:
+    preferred_min: {scene_count_min}
+    preferred_max: {scene_count_max}
+    allowed_min: {max(2, scene_count_min - scene_count_flex)}
+    allowed_max: {min(20, scene_count_max + scene_count_flex)}
+    selection_rule: Choose the smallest count that fully explains the idea, but add scenes when dialogue would otherwise be rushed
   creator_continuity: Define one specific recurring creator profile and reuse it verbatim across all relevant scenes
   visual_bible: 3 to 8 concise continuity rules covering creator, wardrobe, location, light, camera texture and palette
   generation_boundary: No readable text, captions, prices, logos, brands or invented UI inside generative video
@@ -174,7 +179,7 @@ Gemini обязан вернуть:
 - 2–4 concepts;
 - spoken script, CTA, captions и hashtags;
 - policy decision и unsupported claims;
-- 4–6 scenes;
+- допустимое пользователем число сцен (2–20, с опциональным отклонением до ±2);
 - один recurring creator profile;
 - visual bible;
 - для каждой сцены: narration, on-screen text, purpose, shot type, subject, setting, action, camera и performance direction.
@@ -210,11 +215,11 @@ abstract motion graphics, impossible camera moves and sterile studio staging.
 - загружает JPEG/PNG/WebP до 10 MB и подтверждает права на изображение и совершеннолетие всех узнаваемых людей; либо
 - просит Gemini 2.5 Flash Image создать оригинального синтетического взрослого персонажа без сходства со знаменитостью.
 
-Character хранится внутри конкретного tenant/project в private storage. В `ugc_native_audio` его изображение передаётся Veo как image-to-video input каждой сцены, а текстовое имя/описание — Gemini Director как обязательный creator profile. Без ready character такой job не создаётся.
+Character хранится внутри конкретного tenant/project в private storage. В `ugc_native_audio` его изображение передаётся Veo как image-to-video input первой сцены, а текстовое имя/описание — Gemini Director как обязательный creator profile. Для каждой следующей сцены workflow извлекает последний декодируемый кадр предыдущей сцены и использует его как first-frame input. Так одежда, положение героя, свет и пространство переходят между соседними сценами, а не начинаются заново с одного исходного портрета. Без ready character такой job не создаётся.
 
 ### 8. Veo prompt каждой сцены
 
-Prompt version: `editorial-ugc-v3`.
+Prompt version: `editorial-continuity-v4`.
 
 ```text
 {VISUAL_MODE_DIRECTION}
@@ -243,12 +248,32 @@ Aspect suffixes:
 
 ```text
 The creator says exactly in the narration language: "{scene.narration}".
-Use clear synchronized direct speech, consistent voice identity and subtle natural room ambience.
+Finish the complete line before the cut, with synchronized natural speech, a short final pause,
+consistent voice identity and subtle room ambience.
 ```
 
-В этом режиме Veo получает `image={character.reference}` и `generate_audio=true`. Для каждой сцены и каждого ratio создаётся отдельная operation длительностью 8 секунд. Если live Veo не вернул непустой файл, stage падает; motion graphics не подставляется как незаметный успешный результат.
+В первой сцене Veo получает `image={character.reference}`, в последующих — `image={previous_scene.last_frame}`; для `ugc_native_audio` также включён `generate_audio=true`. Длительность operation выбирается из поддерживаемых Veo значений 4/6/8 секунд как ближайшая не короче плановой сцены. Для каждой сцены и каждого ratio создаётся отдельная operation. После сохранения MP4 FFmpeg извлекает последний JPEG-кадр и сохраняет его вместе с immutable scene attempt. Если live Veo не вернул непустой файл, stage падает; motion graphics не подставляется как незаметный успешный результат.
 
-### 9. Озвучка и captions
+### 9. Проверка длительности и транскрибация каждой сцены
+
+До provider spend narration проходит консервативный timing preflight: система оставляет паузу перед монтажной склейкой и рассчитывает бюджет слов примерно по 2,15 слова в секунду. Если реплика длиннее бюджета, Gemini одним structured-output вызовом сокращает только нарушающие лимит сцены, сохраняя язык, смысл, факты и CTA. В mock/CI тот же контракт проверяется детерминированным сокращением.
+
+После каждого `ugc_native_audio` scene clip Gemini получает private `gs://` MP4 и шаблон:
+
+```yaml
+task: Transcribe only the spoken dialogue in this short clip and verify that the expected line finishes before the edit point.
+expected_dialogue: {scene.narration}
+edit_point_seconds: {scene.duration_target}
+rules:
+  - Return the actual words heard, including omissions or substitutions.
+  - Ignore music and room ambience.
+  - last_phrase_complete is false when speech is cut off, trails into the edit point, or ends mid-thought.
+  - speech_end_seconds is the end time of the last spoken word when measurable.
+```
+
+Pass требует наличия речи, завершённой последней фразы, окончания до edit point и сходства транскрипта с ожидаемым текстом не ниже 82%. При fail workflow сильнее сокращает narration и автоматически повторяет Veo до двух раз. Все неудачные и успешные попытки сохраняются, но в storyboard выводится последний актуальный attempt. Если три попытки подряд не проходят speech QA, production честно падает, а не монтирует оборванную речь.
+
+### 10. Озвучка и captions
 
 В `ugc_creator`, product demo, cinematic и motion graphics Google TTS получает готовый `script.voiceover` без дополнительного LLM prompt:
 
@@ -264,7 +289,7 @@ effects_profile: small-bluetooth-speaker-class-device
 
 В `ugc_native_audio` Google TTS полностью пропускается. Speech и ambience уже находятся внутри каждого Veo scene MP4; stage `voice_audio` явно сохраняет provider `veo_native_audio`.
 
-### 10. FFmpeg assembly
+### 11. FFmpeg assembly
 
 Для каждого ratio renderer:
 
@@ -277,9 +302,9 @@ effects_profile: small-bluetooth-speaker-class-device
 7. кодирует H.264/AAC;
 8. сохраняет manifest и SHA-256.
 
-Полупрозрачной плашки на 86% высоты кадра больше нет. Если scene videos отсутствуют в local/CI mock mode, renderer создаёт явно подписанный `LOCAL TEST FIXTURE`; этот путь невозможен в production, потому что production требует live provider mode.
+Полупрозрачной плашки на 86% высоты кадра больше нет. В local/CI mock mode каждая сцена является настоящим playable MP4, явно подписанным `DETERMINISTIC TEST SCENE`; этот путь невозможен в production, потому что production требует live provider mode.
 
-### 11. QA
+### 12. QA
 
 Технический QA проверяет:
 
@@ -309,11 +334,11 @@ planned_scenes: {storyboard.scenes}
 technical_probe: {ffprobe_result}
 ```
 
-Gemini возвращает общий pass, issues, scene issues, continuity и независимые `content`, `brand`, `platform`, `rights` gates. Эти gates больше не записываются как жёстко заданные `true`.
+Gemini возвращает общий pass, issues, scene issues, continuity и независимые `content`, `brand`, `platform`, `rights` gates. К ним добавлен обязательный `speech_timing` gate, собранный из транскрипции/тайминга всех фактических scene attempts. Эти gates больше не записываются как жёстко заданные `true`.
 
-### 12. Review, regeneration и publication
+### 13. Review, regeneration и publication
 
-Готовая версия всегда требует human approval. До approval пользователь может перегенерировать отдельную сцену:
+Готовая версия всегда требует human approval. В Storyboard каждая сцена имеет собственный playable preview и расширенное модальное окно с фактическим transcript/speech QA; поэтому решение о повторной генерации принимается после просмотра именно клипа, а не по заглушке. До approval пользователь может перегенерировать отдельную сцену:
 
 1. создаётся durable `scene_regeneration` job;
 2. токены списываются один раз;
@@ -331,10 +356,10 @@ Gemini возвращает общий pass, issues, scene issues, continuity и
 
 Это реальные ограничения текущей версии, а не скрытые моки:
 
-1. **Identity continuity не абсолютна.** Каждая сцена использует тот же image-to-video input и visual bible, но отдельные Veo operations могут немного менять лицо, голос, одежду или помещение. Автоматического embedding-based continuity gate пока нет.
+1. **Identity continuity не абсолютна.** Последний кадр предыдущей сцены и visual bible заметно усиливают связность, но отдельные Veo operations всё ещё могут менять лицо, голос, одежду или помещение. Автоматического embedding-based continuity gate пока нет.
 2. **Одна reference pose.** Character library хранит одно изображение, а не полноценный character sheet с несколькими ракурсами и утверждённым voice profile.
 3. **Нет загрузки реальных customer clips.** Нужен asset intake и режим «собрать из моих исходников».
-4. **Нет word-level captions.** VTT привязан к сценам; нужен forced alignment. Для native speech фактическое произношение Veo может немного отличаться от плановой строки.
+4. **Нет word-level captions.** Фактическая речь каждой native-audio сцены уже транскрибируется и проверяется, но VTT всё ещё привязан к сценам; для покадрового karaoke timing нужен forced alignment.
 5. **Один editorial Gemini call.** Durable stages раздельные, но независимые agents пока не критикуют результаты друг друга.
 6. **Product demo требует approved assets.** Veo специально запрещено изобретать читаемый интерфейс. Без реальных screenshots этот режим может показать только контекст использования продукта.
 

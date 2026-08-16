@@ -91,13 +91,22 @@ async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    errors = []
+    for item in exc.errors():
+        cleaned = dict(item)
+        if cleaned.get("ctx"):
+            cleaned["ctx"] = {
+                key: str(value) if isinstance(value, BaseException) else value
+                for key, value in cleaned["ctx"].items()
+            }
+        errors.append(cleaned)
     return JSONResponse(
         status_code=422,
         content={
             "error": {
                 "code": "validation_error",
                 "message": "Request validation failed.",
-                "details": {"errors": exc.errors()},
+                "details": {"errors": errors},
                 "request_id": request_id,
                 "retryable": False,
             }

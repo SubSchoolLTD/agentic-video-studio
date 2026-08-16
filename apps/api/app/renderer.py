@@ -13,6 +13,85 @@ class RenderError(RuntimeError):
     pass
 
 
+def render_scene_fixture(*, label: str, aspect_ratio: str, output_path: Path, duration_seconds: float = 2) -> Path:
+    """Create an explicit low-cost clip used only when PROVIDER_MODE=mock."""
+    if not shutil.which("ffmpeg"):
+        raise RenderError("FFmpeg is required")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    width, height = (270, 480) if aspect_ratio == "9:16" else (480, 270)
+    font = _font_path()
+    safe_label = _escape_drawtext(label[:48])
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=0x1f1728:s={width}x{height}:r=24:d={max(1, duration_seconds):.3f}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=196:sample_rate=48000:duration={max(1, duration_seconds):.3f}",
+        "-vf",
+        (
+            f"drawtext=fontfile='{font}':text='DETERMINISTIC TEST SCENE':fontcolor=0xdcb1e5:"
+            f"fontsize={max(12, round(width * 0.04))}:x=(w-text_w)/2:y=h*0.42,"
+            f"drawtext=fontfile='{font}':text='{safe_label}':fontcolor=white:"
+            f"fontsize={max(11, round(width * 0.035))}:x=(w-text_w)/2:y=h*0.52"
+        ),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "31",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "48k",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise RenderError(completed.stderr.strip() or "Scene fixture render failed")
+    return output_path
+
+
+def extract_last_frame(video_path: Path, output_path: Path) -> Path:
+    """Extract the final decodable frame so it can seed the following Veo scene."""
+    if not shutil.which("ffmpeg"):
+        raise RenderError("FFmpeg is required")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-sseof",
+        "-0.12",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        str(output_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output_path.exists():
+        raise RenderError(completed.stderr.strip() or "Could not extract the scene's final frame")
+    return output_path
+
+
 def _font_path() -> str:
     candidates = (
         "/System/Library/Fonts/SFNS.ttf",

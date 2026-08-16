@@ -319,7 +319,7 @@ useHead({
       <div class="landing-container landing-footer__grid">
         <div><NuxtLink class="landing-brand landing-brand--footer" to="/"><span class="landing-brand__mark"><Clapperboard :size="20" /></span><span><strong>Framewise</strong><small>Agentic video studio</small></span></NuxtLink><p>Evidence-first AI video production for teams that care what they publish.</p></div>
         <div><strong>Product</strong><a href="#workflow">How it works</a><a href="#pricing">Pricing</a><a href="#security">Security</a></div>
-        <div><strong>Workspace</strong><NuxtLink to="/register">Create account</NuxtLink><NuxtLink to="/login">Sign in</NuxtLink><a href="https://github.com/SubSchool/agentic-video-studio" rel="noopener">GitHub</a></div>
+        <div><strong>Workspace</strong><NuxtLink to="/register">Create account</NuxtLink><NuxtLink to="/login">Sign in</NuxtLink><a href="https://github.com/SubSchoolLTD/agentic-video-studio" rel="noopener">GitHub</a></div>
         <div><strong>Technology</strong><span>Parallel Search</span><span>Google Gemini</span><span>Google Veo</span></div>
       </div>
       <div class="landing-container landing-footer__bottom"><span>© {{ new Date().getFullYear() }} Framewise</span><span>Built for the Agentic Cinema Hackathon</span></div>

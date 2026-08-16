@@ -80,7 +80,7 @@ variable "labels" {
 }
 
 variable "github_repository" {
-  description = "Optional owner/repository allowed to deploy through GitHub OIDC, for example SubSchool/agentic-video-studio."
+  description = "Optional owner/repository allowed to deploy through GitHub OIDC, for example SubSchoolLTD/agentic-video-studio."
   type        = string
   default     = ""
 }

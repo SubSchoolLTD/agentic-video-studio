@@ -136,6 +136,56 @@ def serialize_video(repo: ResourceRepository, video: Resource, *, organization_i
         version = repo.get(snapshot["id"], organization_id=organization_id, kind="video_version")
         versions.append(ResourceRepository.serialize(version) if version else snapshot)
     payload["versions"] = versions
+    storage = MediaStorage(get_settings())
+    subtitle_assets = []
+    for subtitle_format, asset_id in (
+        ("srt", video.data.get("caption_srt_asset_id")),
+        ("vtt", video.data.get("caption_asset_id")),
+    ):
+        asset = (
+            repo.get(str(asset_id), organization_id=organization_id, kind="media_asset")
+            if asset_id
+            else None
+        )
+        if not asset:
+            continue
+        public_path = asset.data.get("public_path") or storage.public_path_for(
+            storage_uri=asset.data.get("storage_uri"),
+            local_path=asset.data.get("local_path"),
+        )
+        if public_path:
+            subtitle_assets.append(
+                {
+                    "format": subtitle_format,
+                    "language": asset.data.get("language", "en"),
+                    "mime_type": asset.data.get("mime_type"),
+                    "url": storage.signed_path(str(public_path), organization_id),
+                }
+            )
+    payload["subtitle_assets"] = subtitle_assets
+    return payload
+
+
+def serialize_brand_profile(resource: Resource) -> dict[str, Any]:
+    payload = ResourceRepository.serialize(resource)
+    visual = dict(payload.get("visual") or {})
+    storage = MediaStorage(get_settings())
+    logo_assets = []
+    for item in visual.get("logo_assets") or []:
+        if not isinstance(item, dict):
+            continue
+        public_path = item.get("public_path") or storage.public_path_for(
+            storage_uri=item.get("storage_uri"),
+            local_path=item.get("local_path"),
+        )
+        logo_assets.append(
+            {
+                **item,
+                "url": storage.signed_path(str(public_path), resource.organization_id) if public_path else None,
+            }
+        )
+    visual["logo_assets"] = logo_assets
+    payload["visual"] = visual
     return payload
 
 
@@ -718,7 +768,7 @@ def get_brand_profile(
     )
     if not resource:
         raise HTTPException(404, "Brand profile not found")
-    return ResourceRepository.serialize(resource)
+    return serialize_brand_profile(resource)
 
 
 @router.patch("/projects/{project_id}/brand-profile", tags=["projects"])
@@ -747,7 +797,87 @@ def patch_brand_profile(
         data=data,
     )
     repo.update(project, data={"brand_profile_version": version})
-    return ResourceRepository.serialize(profile)
+    return serialize_brand_profile(profile)
+
+
+@router.post("/projects/{project_id}/brand-profile/logo", status_code=201, tags=["projects"])
+async def upload_brand_logo(
+    project_id: str,
+    image: Annotated[UploadFile, File(description="PNG, JPEG or WebP brand logo")],
+    rights_confirmed: Annotated[bool, Form()],
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("projects:write")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    if not rights_confirmed:
+        raise HTTPException(422, "Logo rights confirmation is required")
+    content = await image.read(5 * 1024 * 1024 + 1)
+    if not content or len(content) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Logo image must be between 1 byte and 5 MB")
+    mime_type = str(image.content_type or "").lower()
+    signatures = {
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": content.startswith(b"RIFF") and content[8:12] == b"WEBP",
+    }
+    if not signatures.get(mime_type):
+        raise HTTPException(422, "Only valid PNG, JPEG or WebP logo images are accepted")
+    asset_id = ResourceRepository.new_id("logo")
+    extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[mime_type]
+    output_path = settings.storage_root / project_id / "brand" / "logos" / f"{asset_id}{extension}"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(content)
+    persisted = await asyncio.to_thread(MediaStorage(settings).persist, output_path, content_type=mime_type)
+    asset = repo.add(
+        resource_id=asset_id,
+        kind="media_asset",
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        status="ready",
+        data={
+            "type": "brand_logo",
+            **persisted,
+            "mime_type": mime_type,
+            "rights_status": "owned",
+            "created_by": principal.actor_id,
+        },
+    )
+    existing = session.scalar(
+        select(Resource)
+        .where(
+            Resource.organization_id == principal.organization_id,
+            Resource.project_id == project_id,
+            Resource.kind == "brand_profile",
+        )
+        .order_by(Resource.version.desc())
+    )
+    profile_data = dict(existing.data if existing else {})
+    visual = dict(profile_data.get("visual") or {})
+    visual["logo_assets"] = [
+        {
+            "asset_id": asset.id,
+            "storage_uri": persisted["storage_uri"],
+            "local_path": persisted["local_path"],
+            "public_path": persisted["public_path"],
+            "mime_type": mime_type,
+            "rights_status": "owned",
+        }
+    ]
+    profile_data["visual"] = visual
+    version = (existing.version + 1) if existing else 1
+    profile = repo.add(
+        kind="brand_profile",
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        status="confirmed",
+        version=version,
+        data=profile_data,
+    )
+    repo.update(project, data={"brand_profile_version": version})
+    return {"asset": ResourceRepository.serialize(asset), "profile": serialize_brand_profile(profile)}
 
 
 @router.post("/projects/{project_id}/activate", tags=["projects"])

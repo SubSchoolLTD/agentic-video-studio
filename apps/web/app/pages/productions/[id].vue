@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleDollarSign, Clock3, ExternalLink, FileText, Film, Lock, Maximize2, RadioTower, RotateCcw, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-vue-next'
+import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleDollarSign, Clock3, Download, ExternalLink, FileText, Film, ImageIcon, Lock, Maximize2, RadioTower, RotateCcw, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-vue-next'
 
 const route = useRoute()
 const { api, apiBase } = useApi()
@@ -22,6 +22,7 @@ const scenes = computed(() => video.value?.scenes || [])
 const score = computed(() => video.value?.score_report || {})
 const qa = computed(() => video.value?.qa_report || {})
 const script = computed(() => video.value?.script?.script || {})
+const subtitleAssets = computed(() => video.value?.subtitle_assets || [])
 
 async function loadVideo() {
   if (job.value?.video_id) {
@@ -82,6 +83,7 @@ function formatDuration(ms?: number) { return ms ? `${Math.round(ms / 1000)} sec
 function sceneAttempt(scene: any) { return scene.attempts?.find((item: any) => item.aspect_ratio === previewVersion.value?.aspect_ratio) || scene.attempts?.[0] }
 function scenePreviewUrl(scene: any) { const url = sceneAttempt(scene)?.preview_url || scene.preview_url; return url ? `${apiBase}${url}` : '' }
 function speechQa(scene: any) { return sceneAttempt(scene)?.speech_qa || {} }
+function subtitleUrl(format: string) { const item = subtitleAssets.value.find((asset: any) => asset.format === format); return item?.url ? `${apiBase}${item.url}` : '' }
 </script>
 
 <template>
@@ -89,6 +91,8 @@ function speechQa(scene: any) { return sceneAttempt(scene)?.speech_qa || {} }
     <div class="production-breadcrumb"><NuxtLink to="/productions"><ArrowLeft :size="14" /> Productions</NuxtLink><span>/</span><span>{{ job.id }}</span></div>
     <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · ${(job.visual_mode || 'ugc_creator').replaceAll('_', ' ')} · ${job.audio_mode === 'veo_native' ? 'Veo native speech' : 'Google TTS voiceover'} · immutable brand profile v${job.brand_profile_version || 1}`">
       <UiStatusBadge :status="job.status" />
+      <a v-if="subtitleUrl('srt')" :href="subtitleUrl('srt')" download="captions.srt" class="button" data-testid="download-captions-srt"><Download :size="14" /> Download SRT</a>
+      <a v-if="subtitleUrl('vtt')" :href="subtitleUrl('vtt')" download="captions.vtt" class="button" data-testid="download-captions-vtt"><Download :size="14" /> VTT</a>
       <button v-if="job.status === 'ready' && previewVersion?.status !== 'approved'" class="button button--primary" data-testid="approve-video" :disabled="approving" @click="approve"><Check :size="15" /> {{ approving ? 'Approving…' : 'Approve video' }}</button>
       <NuxtLink v-if="previewVersion?.status === 'approved'" :to="`/publishing?version=${previewVersion.id}`" class="button button--primary">Prepare publication <ExternalLink :size="14" /></NuxtLink>
     </UiPageHeader>
@@ -103,7 +107,7 @@ function speechQa(scene: any) { return sceneAttempt(scene)?.speech_qa || {} }
           <video v-if="previewUrl" :src="previewUrl" controls playsinline preload="metadata" data-testid="video-preview" />
           <div v-else class="video-placeholder"><span class="video-placeholder__rings"><WandSparkles :size="27" /></span><h3>{{ job.status === 'failed' ? 'Production stopped' : 'Building your production' }}</h3><p v-if="job.status !== 'failed'">{{ job.current_stage?.replaceAll('_', ' ') }} is in progress. Partial artifacts are already saved.</p><p v-else>{{ job.last_error?.message }}</p><UiProgressBar :value="job.progress || 0" /></div>
         </div>
-        <div class="preview-meta"><span><Film :size="13" /> H.264 / AAC</span><span><ShieldCheck :size="13" /> Minimal deterministic captions</span><span><Lock :size="13" /> Checksum saved</span></div>
+        <div class="preview-meta"><span><Film :size="13" /> H.264 / AAC</span><span><ShieldCheck :size="13" /> {{ previewVersion?.captions_burned_in ? 'Clean captions burned in · no panel' : 'Captions kept as separate SRT / VTT' }}</span><span v-if="previewVersion?.logo_applied"><ImageIcon :size="13" /> Uploaded logo applied</span><span><Lock :size="13" /> Checksum saved</span></div>
       </UiAppCard>
 
       <UiAppCard class="timeline-card">

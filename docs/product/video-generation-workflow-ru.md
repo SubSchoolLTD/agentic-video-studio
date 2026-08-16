@@ -285,7 +285,7 @@ speaking_rate: 1.05
 effects_profile: small-bluetooth-speaker-class-device
 ```
 
-Из narration beats параллельно создаётся WebVTT. Сейчас точность тайминга — scene-level, не word-level forced alignment.
+Из narration beats параллельно создаются отдельные SRT и WebVTT для скачивания. Сейчас точность тайминга — scene-level, не word-level forced alignment. По умолчанию субтитры не вшиваются в изображение: пользователь добавляет их на стороне соцсети. Burn-in включается только явным параметром генерации `burn_in_captions=true`.
 
 В `ugc_native_audio` Google TTS полностью пропускается. Speech и ambience уже находятся внутри каждого Veo scene MP4; stage `voice_audio` явно сохраняет provider `veo_native_audio`.
 
@@ -298,11 +298,12 @@ effects_profile: small-bluetooth-speaker-class-device
 3. trim выравнивает длительность сегментов;
 4. concat собирает сцену;
 5. добавляет Google TTS либо последовательно склеивает собственные audio streams сцен Veo;
-6. накладывает небольшой project label и максимум две строки captions в нижней safe-zone;
-7. кодирует H.264/AAC;
-8. сохраняет manifest и SHA-256.
+6. накладывает только настоящий загруженный logo asset; текстовое имя проекта никогда не имитирует логотип;
+7. только при `burn_in_captions=true` добавляет максимум две строки белого текста с тонкой обводкой, без фоновой плашки;
+8. кодирует H.264/AAC;
+9. сохраняет manifest и SHA-256.
 
-Полупрозрачной плашки на 86% высоты кадра больше нет. В local/CI mock mode каждая сцена является настоящим playable MP4, явно подписанным `DETERMINISTIC TEST SCENE`; этот путь невозможен в production, потому что production требует live provider mode.
+Ни brand label, ни подложка под captions больше не рисуются. Логотип загружается в Brand settings как PNG, JPEG или WebP с подтверждением прав. В local/CI mock mode каждая сцена является настоящим playable MP4, явно подписанным `DETERMINISTIC TEST SCENE`; этот путь невозможен в production, потому что production требует live provider mode.
 
 ### 12. QA
 
@@ -359,7 +360,7 @@ Gemini возвращает общий pass, issues, scene issues, continuity и
 1. **Identity continuity не абсолютна.** Последний кадр предыдущей сцены и visual bible заметно усиливают связность, но отдельные Veo operations всё ещё могут менять лицо, голос, одежду или помещение. Автоматического embedding-based continuity gate пока нет.
 2. **Одна reference pose.** Character library хранит одно изображение, а не полноценный character sheet с несколькими ракурсами и утверждённым voice profile.
 3. **Нет загрузки реальных customer clips.** Нужен asset intake и режим «собрать из моих исходников».
-4. **Нет word-level captions.** Фактическая речь каждой native-audio сцены уже транскрибируется и проверяется, но VTT всё ещё привязан к сценам; для покадрового karaoke timing нужен forced alignment.
+4. **Нет word-level captions.** Фактическая речь каждой native-audio сцены уже транскрибируется и проверяется, но SRT/VTT всё ещё привязаны к сценам; для покадрового karaoke timing нужен forced alignment.
 5. **Один editorial Gemini call.** Durable stages раздельные, но независимые agents пока не критикуют результаты друг друга.
 6. **Product demo требует approved assets.** Veo специально запрещено изобретать читаемый интерфейс. Без реальных screenshots этот режим может показать только контекст использования продукта.
 

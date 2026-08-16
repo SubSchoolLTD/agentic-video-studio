@@ -76,7 +76,7 @@ const workflow = [
 
 const features = [
   { title: 'Research with provenance', text: 'Fresh web research, source controls, deduplication and citations that remain attached from idea to script.', icon: Search },
-  { title: 'One production, every format', text: 'Generate native 9:16 and 16:9 versions with captions, narration, manifests and immutable revision history.', icon: Layers3 },
+  { title: 'One production, every format', text: 'Generate native 9:16 and 16:9 versions with narration, downloadable subtitles, optional clean captions, manifests and immutable revision history.', icon: Layers3 },
   { title: 'Durable agent workflows', text: 'Every expensive stage is checkpointed. Interrupted jobs resume without silently repeating finished provider work.', icon: RefreshCw },
   { title: 'Human approval gates', text: 'Pause automation, regenerate a scene, compare revisions and require explicit consent before external publication.', icon: BadgeCheck },
   { title: 'Private by architecture', text: 'Tenant-isolated projects, signed media links, scoped API keys and encrypted OAuth credentials protect every workspace.', icon: LockKeyhole },

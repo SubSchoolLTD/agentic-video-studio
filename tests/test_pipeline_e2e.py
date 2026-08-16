@@ -77,7 +77,15 @@ def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
     body = video.json()
     assert len(body["versions"]) == 2
     assert {item["aspect_ratio"] for item in body["versions"]} == {"9:16", "16:9"}
+    assert {item["format"] for item in body["subtitle_assets"]} == {"srt", "vtt"}
+    for subtitle in body["subtitle_assets"]:
+        downloaded = client.get(subtitle["url"])
+        assert downloaded.status_code == 200
+        assert downloaded.content
+    assert all(item["captions_burned_in"] is False for item in body["versions"])
+    assert all(item["logo_applied"] is False for item in body["versions"])
     assert job["visual_mode"] == "ugc_creator"
+    assert job["burn_in_captions"] is False
     assert body["storyboard"]["visual_mode"] == "ugc_creator"
     assert body["storyboard"]["creator_profile"]
     assert len(body["storyboard"]["visual_bible"]) >= 3
@@ -224,6 +232,27 @@ def test_generation_rejects_an_inverted_scene_range(client, auth_headers) -> Non
         headers=auth_headers,
     )
     assert response.status_code == 422
+
+
+def test_brand_logo_upload_creates_a_real_render_asset(client, auth_headers) -> None:
+    reference_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    uploaded = client.post(
+        "/v1/projects/prj_subschool/brand-profile/logo",
+        files={"image": ("subschool-logo.png", reference_png, "image/png")},
+        data={"rights_confirmed": "true"},
+        headers=auth_headers,
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    payload = uploaded.json()
+    assert payload["asset"]["type"] == "brand_logo"
+    logo = payload["profile"]["visual"]["logo_assets"][0]
+    assert logo["asset_id"] == payload["asset"]["id"]
+    assert logo["url"]
+    media = client.get(logo["url"])
+    assert media.status_code == 200
+    assert media.headers["content-type"] == "image/png"
 
 
 def test_native_speech_qa_retries_a_clipped_scene_with_shorter_dialogue(

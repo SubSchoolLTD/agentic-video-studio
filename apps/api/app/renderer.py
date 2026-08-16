@@ -125,6 +125,8 @@ def render_motion_video(
     scene_video_paths: list[Path] | None = None,
     audio_path: Path | None = None,
     use_scene_audio: bool = False,
+    logo_path: Path | None = None,
+    burn_in_captions: bool = False,
 ) -> dict[str, Any]:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RenderError("FFmpeg and ffprobe are required")
@@ -134,40 +136,25 @@ def render_motion_video(
     safe_width = width - safe_x * 2
     font = _font_path()
     scene_video_paths = [path for path in (scene_video_paths or []) if path.exists()]
+    logo_path = logo_path if logo_path and logo_path.exists() else None
     overlays = ["format=yuv420p"]
     scene_count = max(1, len(scenes))
     segment = duration_seconds / scene_count
     if scene_video_paths:
-        brand_label = str(brand_name or "Framewise").strip()[:42]
-        overlays.append(
-            f"drawbox=x={round(width * 0.045)}:y={round(height * 0.045)}:w={round(width * 0.42)}:"
-            f"h={round(height * 0.052)}:color=black@0.42:t=fill"
-        )
-        overlays.append(
-            f"drawtext=fontfile='{font}':text='{_escape_drawtext(brand_label)}':"
-            f"fontsize={round(width * 0.026)}:fontcolor=white:x={round(width * 0.07)}:"
-            f"y={round(height * 0.059)}:fix_bounds=1"
-        )
-        wrap_width = 31 if aspect_ratio == "9:16" else 54
-        subtitle_x = round(width * 0.07)
-        subtitle_y = round(height * 0.76)
-        subtitle_width = round(width * 0.86)
-        subtitle_height = round(height * 0.145)
-        for index, scene in enumerate(scenes):
-            start = round(index * segment, 2)
-            end = round(min(duration_seconds, (index + 1) * segment), 2)
-            line = str(scene.get("on_screen_text") or scene.get("narration") or "").strip()
-            overlays.append(
-                f"drawbox=x={subtitle_x}:y={subtitle_y}:w={subtitle_width}:h={subtitle_height}:"
-                f"color=black@0.52:t=fill:enable='between(t,{start},{end})'"
-            )
-            for line_index, scene_line in enumerate(textwrap.wrap(line, width=wrap_width)[:2]):
-                overlays.append(
-                    f"drawtext=fontfile='{font}':text='{_escape_drawtext(scene_line)}':"
-                    f"fontsize={round(width * 0.036)}:fontcolor=white:x={round(width * 0.1)}:"
-                    f"y={round(height * (0.79 + line_index * 0.045))}:fix_bounds=1:"
-                    f"enable='between(t,{start},{end})'"
-                )
+        if burn_in_captions:
+            wrap_width = 31 if aspect_ratio == "9:16" else 54
+            for index, scene in enumerate(scenes):
+                start = round(index * segment, 2)
+                end = round(min(duration_seconds, (index + 1) * segment), 2)
+                line = str(scene.get("on_screen_text") or scene.get("narration") or "").strip()
+                for line_index, scene_line in enumerate(textwrap.wrap(line, width=wrap_width)[:2]):
+                    overlays.append(
+                        f"drawtext=fontfile='{font}':text='{_escape_drawtext(scene_line)}':"
+                        f"fontsize={round(width * 0.036)}:fontcolor=white:borderw={max(2, round(width * 0.0025))}:"
+                        f"bordercolor=black@0.9:shadowx=1:shadowy=1:x=(w-text_w)/2:"
+                        f"y={round(height * (0.82 + line_index * 0.045))}:fix_bounds=1:"
+                        f"enable='between(t,{start},{end})'"
+                    )
     else:
         overlays.extend(
             [
@@ -211,7 +198,11 @@ def render_motion_video(
     if scene_video_paths:
         for path in scene_video_paths:
             command.extend(["-stream_loop", "-1", "-i", str(path)])
-        audio_input_index = len(scene_video_paths)
+        logo_input_index = None
+        if logo_path:
+            logo_input_index = len(scene_video_paths)
+            command.extend(["-loop", "1", "-i", str(logo_path)])
+        audio_input_index = len(scene_video_paths) + (1 if logo_input_index is not None else 0)
         if not use_scene_audio:
             if audio_path and audio_path.exists():
                 command.extend(["-i", str(audio_path)])
@@ -237,7 +228,18 @@ def render_motion_video(
         else:
             concat_inputs = "".join(f"[v{index}]" for index in range(len(scene_video_paths)))
             chains.append(f"{concat_inputs}concat=n={len(scene_video_paths)}:v=1:a=0[scene_base]")
-        chains.append(f"[scene_base]{','.join(overlays)}[vout]")
+        video_base = "[scene_base]"
+        if logo_input_index is not None:
+            chains.append(
+                f"[{logo_input_index}:v]scale=w={round(width * 0.18)}:h={round(height * 0.08)}:"
+                "force_original_aspect_ratio=decrease,format=rgba[brand_logo]"
+            )
+            chains.append(
+                f"[scene_base][brand_logo]overlay=x={round(width * 0.05)}:y={round(height * 0.045)}:"
+                "eof_action=repeat:shortest=1[scene_branded]"
+            )
+            video_base = "[scene_branded]"
+        chains.append(f"{video_base}{','.join(overlays)}[vout]")
         volume = "1" if use_scene_audio or (audio_path and audio_path.exists()) else "0.035"
         audio_source = "[scene_audio]" if use_scene_audio else f"[{audio_input_index}:a]"
         chains.append(
@@ -304,8 +306,23 @@ def render_motion_video(
         "audio_path": str(audio_path) if audio_path else None,
         "audio_mode": "scene_native_audio" if use_scene_audio else "external_audio",
         "composition_mode": "generated_scenes" if scene_video_paths else "deterministic_test_fixture",
-        "overlay_style": "minimal_ugc_captions" if scene_video_paths else "test_fixture_card",
+        "overlay_style": (
+            "+".join(
+                item
+                for item in (
+                    "uploaded_logo" if logo_path else "",
+                    "clean_text_captions" if burn_in_captions else "",
+                )
+                if item
+            )
+            or "none"
+            if scene_video_paths
+            else "test_fixture_card"
+        ),
         "brand_name": brand_name,
+        "logo_path": str(logo_path) if logo_path else None,
+        "logo_applied": bool(logo_path and scene_video_paths),
+        "captions_burned_in": bool(burn_in_captions and scene_video_paths),
         "output": str(output_path),
         "checksum": hashlib.sha256(output_path.read_bytes()).hexdigest(),
     }
@@ -327,6 +344,32 @@ def write_webvtt(*, scenes: list[dict[str, Any]], output_path: Path, duration_se
         start = float(scene.get("start_sec", index * segment))
         end = float(scene.get("end_sec", min(duration_seconds, (index + 1) * segment)))
         cues.extend([f"{stamp(start)} --> {stamp(end)}", str(scene.get("narration") or "").strip(), ""])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(cues), encoding="utf-8")
+    return output_path
+
+
+def write_srt(*, scenes: list[dict[str, Any]], output_path: Path, duration_seconds: int) -> Path:
+    def stamp(seconds: float) -> str:
+        milliseconds = max(0, round(seconds * 1000))
+        hours, remainder = divmod(milliseconds, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        secs, millis = divmod(remainder, 1000)
+        return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
+
+    segment = duration_seconds / max(1, len(scenes))
+    cues: list[str] = []
+    for index, scene in enumerate(scenes, start=1):
+        start = float(scene.get("start_sec", (index - 1) * segment))
+        end = float(scene.get("end_sec", min(duration_seconds, index * segment)))
+        cues.extend(
+            [
+                str(index),
+                f"{stamp(start)} --> {stamp(end)}",
+                str(scene.get("narration") or "").strip(),
+                "",
+            ]
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(cues), encoding="utf-8")
     return output_path

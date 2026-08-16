@@ -28,6 +28,7 @@ from .renderer import (
     render_motion_video,
     render_scene_fixture,
     technical_qa,
+    write_srt,
     write_webvtt,
 )
 from .repository import ResourceRepository
@@ -1042,32 +1043,7 @@ class WorkflowManager:
                 content_type="audio/wav",
             )
             audio_storage_uri = persisted_audio["storage_uri"]
-        captions_path = write_webvtt(
-            scenes=scenes,
-            output_path=self.settings.storage_root / job.project_id / job.id / "captions" / "captions.en.vtt",
-            duration_seconds=int(job.data.get("target_duration_seconds", 30)),
-        )
-        persisted_captions = await asyncio.to_thread(
-            self.storage.persist,
-            captions_path,
-            content_type="text/vtt",
-        )
-        caption_asset = repo.add(
-            kind="media_asset",
-            organization_id=job.organization_id,
-            project_id=job.project_id,
-            status="ready",
-            data={
-                "generation_job_id": job.id,
-                "type": "captions",
-                "storage_uri": persisted_captions["storage_uri"],
-                "local_path": persisted_captions["local_path"],
-                "public_path": persisted_captions["public_path"],
-                "mime_type": "text/vtt",
-                "language": "en",
-                "rights_status": "owned",
-            },
-        )
+        caption_asset_ids = await self._persist_caption_assets(repo=repo, job=job, scenes=scenes)
         self._set_stage(
             repo,
             job,
@@ -1083,7 +1059,8 @@ class WorkflowManager:
                 ),
                 "audio_path": str(audio_path) if audio_path else None,
                 "audio_storage_uri": audio_storage_uri,
-                "caption_asset_id": caption_asset.id,
+                "caption_asset_id": caption_asset_ids["vtt"],
+                "caption_srt_asset_id": caption_asset_ids["srt"],
                 "timestamps": True,
             },
         )
@@ -1103,7 +1080,8 @@ class WorkflowManager:
             script_id=script.id,
             storyboard_id=storyboard.id,
             scene_ids=[item.id for item in scene_resources],
-            caption_asset_id=caption_asset.id,
+            caption_asset_id=caption_asset_ids["vtt"],
+            caption_srt_asset_id=caption_asset_ids["srt"],
             research_run_id=research_run.id,
         )
 
@@ -1120,6 +1098,99 @@ class WorkflowManager:
         if not stage or not isinstance(stage.get("output"), dict):
             raise RuntimeError(f"Cannot resume: {stage_name} checkpoint is incomplete")
         return dict(stage["output"])
+
+    async def _persist_caption_assets(
+        self,
+        *,
+        repo: ResourceRepository,
+        job: Resource,
+        scenes: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        duration_seconds = int(job.data.get("target_duration_seconds", 30))
+        caption_root = self.settings.storage_root / str(job.project_id) / job.id / "captions"
+        outputs = (
+            (
+                "vtt",
+                write_webvtt(
+                    scenes=scenes,
+                    output_path=caption_root / "captions.en.vtt",
+                    duration_seconds=duration_seconds,
+                ),
+                "text/vtt",
+            ),
+            (
+                "srt",
+                write_srt(
+                    scenes=scenes,
+                    output_path=caption_root / "captions.en.srt",
+                    duration_seconds=duration_seconds,
+                ),
+                "application/x-subrip",
+            ),
+        )
+        asset_ids: dict[str, str] = {}
+        for subtitle_format, path, mime_type in outputs:
+            persisted = await asyncio.to_thread(self.storage.persist, path, content_type=mime_type)
+            asset = repo.add(
+                kind="media_asset",
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                status="ready",
+                data={
+                    "generation_job_id": job.id,
+                    "type": "captions",
+                    "format": subtitle_format,
+                    "storage_uri": persisted["storage_uri"],
+                    "local_path": persisted["local_path"],
+                    "public_path": persisted["public_path"],
+                    "mime_type": mime_type,
+                    "language": "en",
+                    "rights_status": "owned",
+                },
+            )
+            asset_ids[subtitle_format] = asset.id
+        return asset_ids
+
+    async def _materialize_brand_logo(
+        self,
+        *,
+        session: Any,
+        repo: ResourceRepository,
+        job: Resource,
+    ) -> Path | None:
+        profile = session.scalar(
+            select(Resource)
+            .where(
+                Resource.kind == "brand_profile",
+                Resource.organization_id == job.organization_id,
+                Resource.project_id == job.project_id,
+            )
+            .order_by(Resource.version.desc())
+        )
+        logo_refs = list(((profile.data if profile else {}).get("visual") or {}).get("logo_assets") or [])
+        for logo_ref in logo_refs:
+            asset_id = logo_ref.get("asset_id") if isinstance(logo_ref, dict) else None
+            if not asset_id:
+                continue
+            asset = repo.get(
+                str(asset_id),
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                kind="media_asset",
+            )
+            if not asset or asset.data.get("type") != "brand_logo":
+                continue
+            local_value = asset.data.get("local_path")
+            if not local_value:
+                continue
+            local_path = Path(str(local_value))
+            await asyncio.to_thread(
+                self.storage.materialize,
+                storage_uri=asset.data.get("storage_uri"),
+                local_path=local_path,
+            )
+            return local_path
+        return None
 
     async def _resume_from_scene_generation(
         self,
@@ -1268,32 +1339,7 @@ class WorkflowManager:
                 content_type="audio/wav",
             )
             audio_storage_uri = persisted_audio["storage_uri"]
-        captions_path = write_webvtt(
-            scenes=scenes,
-            output_path=self.settings.storage_root / job.project_id / job.id / "captions" / "captions.en.vtt",
-            duration_seconds=int(job.data.get("target_duration_seconds", 30)),
-        )
-        persisted_captions = await asyncio.to_thread(
-            self.storage.persist,
-            captions_path,
-            content_type="text/vtt",
-        )
-        caption_asset = repo.add(
-            kind="media_asset",
-            organization_id=job.organization_id,
-            project_id=job.project_id,
-            status="ready",
-            data={
-                "generation_job_id": job.id,
-                "type": "captions",
-                "storage_uri": persisted_captions["storage_uri"],
-                "local_path": persisted_captions["local_path"],
-                "public_path": persisted_captions["public_path"],
-                "mime_type": "text/vtt",
-                "language": "en",
-                "rights_status": "owned",
-            },
-        )
+        caption_asset_ids = await self._persist_caption_assets(repo=repo, job=job, scenes=scenes)
         self._set_stage(
             repo,
             job,
@@ -1309,7 +1355,8 @@ class WorkflowManager:
                 ),
                 "audio_path": str(audio_path) if audio_path else None,
                 "audio_storage_uri": audio_storage_uri,
-                "caption_asset_id": caption_asset.id,
+                "caption_asset_id": caption_asset_ids["vtt"],
+                "caption_srt_asset_id": caption_asset_ids["srt"],
                 "timestamps": True,
             },
         )
@@ -1329,7 +1376,8 @@ class WorkflowManager:
             script_id=script.id,
             storyboard_id=storyboard.id,
             scene_ids=[scene.id for scene in typed_scenes],
-            caption_asset_id=caption_asset.id,
+            caption_asset_id=caption_asset_ids["vtt"],
+            caption_srt_asset_id=caption_asset_ids["srt"],
             research_run_id=research_run.id,
         )
 
@@ -1385,6 +1433,7 @@ class WorkflowManager:
             storyboard_id=storyboard.id,
             scene_ids=list(storyboard_stage.get("scene_ids") or []),
             caption_asset_id=voice["caption_asset_id"],
+            caption_srt_asset_id=voice.get("caption_srt_asset_id"),
             research_run_id=research_run.id,
         )
 
@@ -1406,6 +1455,7 @@ class WorkflowManager:
         storyboard_id: str,
         scene_ids: list[str],
         caption_asset_id: str,
+        caption_srt_asset_id: str | None,
         research_run_id: str,
     ) -> None:
         self._set_stage(repo, job, "render", "running")
@@ -1413,6 +1463,7 @@ class WorkflowManager:
         duration_seconds = int(job.data.get("target_duration_seconds", 30))
         project = repo.get_any(job.project_id or "", kind="project")
         brand_name = str(project.data.get("name") if project else "Framewise")
+        logo_path = await self._materialize_brand_logo(session=session, repo=repo, job=job)
         existing_checksums = {
             str(item.data.get("checksum"))
             for item in repo.list(
@@ -1446,6 +1497,8 @@ class WorkflowManager:
                 ],
                 audio_path=audio_path,
                 use_scene_audio=job.data.get("audio_mode") == "veo_native",
+                logo_path=logo_path,
+                burn_in_captions=bool(job.data.get("burn_in_captions", False)),
             )
             qa = await asyncio.to_thread(
                 technical_qa,
@@ -1497,6 +1550,9 @@ class WorkflowManager:
                     "width": manifest["width"],
                     "height": manifest["height"],
                     "duration_ms": duration_seconds * 1000,
+                    "logo_applied": manifest["logo_applied"],
+                    "captions_burned_in": manifest["captions_burned_in"],
+                    "overlay_style": manifest["overlay_style"],
                     "provenance": "generated" if self.settings.uses_live_video else "deterministic_mock",
                     "rights_status": "owned",
                 },
@@ -1646,6 +1702,7 @@ class WorkflowManager:
                     "score_report_id": score_report.id,
                     "scene_ids": scene_ids,
                     "caption_asset_id": caption_asset_id,
+                    "caption_srt_asset_id": caption_srt_asset_id,
                 },
             )
         else:
@@ -1665,6 +1722,7 @@ class WorkflowManager:
                     "versions": [],
                     "latest_version_id": None,
                     "caption_asset_id": caption_asset_id,
+                    "caption_srt_asset_id": caption_srt_asset_id,
                 },
             )
         versions = []
@@ -1685,6 +1743,9 @@ class WorkflowManager:
                     "render_asset_id": item["asset_id"],
                     "render_url": item["asset"]["public_path"],
                     "checksum": item["asset"]["checksum"],
+                    "logo_applied": item["asset"].get("logo_applied", False),
+                    "captions_burned_in": item["asset"].get("captions_burned_in", False),
+                    "overlay_style": item["asset"].get("overlay_style", "none"),
                     "qa_report_id": qa_report.id,
                     "score_report_id": score_report.id,
                     "script_id": script_id,

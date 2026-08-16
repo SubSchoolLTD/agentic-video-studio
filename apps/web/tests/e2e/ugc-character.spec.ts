@@ -35,6 +35,7 @@ test('uploads a reusable character and starts native-audio UGC from an idea', as
   await expect(generatedCard).toContainText('Synthetic · deterministic-test-fixture', { timeout: 15_000 })
 
   await page.goto('/ideas')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   await page.getByTestId('new-idea').click()
   const title = `Native UGC workflow ${Date.now()}`
   await page.getByTestId('idea-title').fill(title)

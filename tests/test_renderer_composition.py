@@ -62,8 +62,51 @@ def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None
     assert manifest["scene_video_paths"] == [str(path) for path in clips]
     assert manifest["audio_path"] == str(audio)
     assert manifest["composition_mode"] == "generated_scenes"
-    assert manifest["overlay_style"] == "minimal_ugc_captions"
+    assert manifest["overlay_style"] == "none"
+    assert manifest["logo_applied"] is False
+    assert manifest["captions_burned_in"] is False
     assert technical_qa(output, aspect_ratio="9:16", duration_target=4)["passed"] is True
+
+
+def test_optional_overlays_use_uploaded_logo_and_clean_caption_text(tmp_path: Path) -> None:
+    clip = tmp_path / "scene.mp4"
+    run_ffmpeg(
+        [
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x205c8a:s=360x640:r=30:d=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ]
+    )
+    logo = tmp_path / "logo.png"
+    run_ffmpeg(["-f", "lavfi", "-i", "color=c=white:s=180x60", "-frames:v", "1", str(logo)])
+    audio = tmp_path / "voice.wav"
+    run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2", str(audio)])
+    output = tmp_path / "branded.mp4"
+
+    manifest = render_motion_video(
+        title="Optional overlays",
+        brand_name="This text must never be drawn as a logo",
+        scenes=[{"narration": "Readable text without a panel.", "on_screen_text": "Clean caption"}],
+        aspect_ratio="9:16",
+        duration_seconds=2,
+        output_path=output,
+        scene_video_paths=[clip],
+        audio_path=audio,
+        logo_path=logo,
+        burn_in_captions=True,
+    )
+
+    assert manifest["overlay_style"] == "uploaded_logo+clean_text_captions"
+    assert manifest["logo_path"] == str(logo)
+    assert manifest["logo_applied"] is True
+    assert manifest["captions_burned_in"] is True
+    assert technical_qa(output, aspect_ratio="9:16", duration_target=2)["passed"] is True
 
 
 def test_composes_native_audio_from_each_generated_scene(tmp_path: Path) -> None:

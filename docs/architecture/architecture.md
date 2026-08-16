@@ -35,7 +35,7 @@ flowchart LR
 - `application`: tenant-aware use cases, idempotency, audit trail, resource transitions.
 - `providers`: replaceable Parallel, Gemini/ADK, Veo/TTS, publishing, metrics adapters.
 - `workflow`: typed stages and retry-safe transitions; every stage output is persisted.
-- `rendering`: deterministic text/logo/subtitle/CTA overlays and final H.264/AAC output.
+- `rendering`: optional uploaded-logo and opt-in clean-caption overlays, downloadable subtitle assets, and final H.264/AAC output.
 - `web`: no provider secrets; consumes the public `/v1` contract and reflects partial states.
 - `mcp`: thin, scoped wrapper over the same application services; publication uses prepare/commit.
 

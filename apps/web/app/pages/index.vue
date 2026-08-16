@@ -76,7 +76,7 @@ const workflow = [
 
 const features = [
   { title: 'Research with provenance', text: 'Fresh web research, source controls, deduplication and citations that remain attached from idea to script.', icon: Search },
-  { title: 'One production, every format', text: 'Generate native 9:16 and 16:9 versions with captions, narration, manifests and immutable revision history.', icon: Layers3 },
+  { title: 'One production, every format', text: 'Generate native 9:16 and 16:9 versions with narration, downloadable subtitles, optional clean captions, manifests and immutable revision history.', icon: Layers3 },
   { title: 'Durable agent workflows', text: 'Every expensive stage is checkpointed. Interrupted jobs resume without silently repeating finished provider work.', icon: RefreshCw },
   { title: 'Human approval gates', text: 'Pause automation, regenerate a scene, compare revisions and require explicit consent before external publication.', icon: BadgeCheck },
   { title: 'Private by architecture', text: 'Tenant-isolated projects, signed media links, scoped API keys and encrypted OAuth credentials protect every workspace.', icon: LockKeyhole },
@@ -319,7 +319,7 @@ useHead({
       <div class="landing-container landing-footer__grid">
         <div><NuxtLink class="landing-brand landing-brand--footer" to="/"><span class="landing-brand__mark"><Clapperboard :size="20" /></span><span><strong>Framewise</strong><small>Agentic video studio</small></span></NuxtLink><p>Evidence-first AI video production for teams that care what they publish.</p></div>
         <div><strong>Product</strong><a href="#workflow">How it works</a><a href="#pricing">Pricing</a><a href="#security">Security</a></div>
-        <div><strong>Workspace</strong><NuxtLink to="/register">Create account</NuxtLink><NuxtLink to="/login">Sign in</NuxtLink><a href="https://github.com/SubSchool/agentic-video-studio" rel="noopener">GitHub</a></div>
+        <div><strong>Workspace</strong><NuxtLink to="/register">Create account</NuxtLink><NuxtLink to="/login">Sign in</NuxtLink><a href="https://github.com/SubSchoolLTD/agentic-video-studio" rel="noopener">GitHub</a></div>
         <div><strong>Technology</strong><span>Parallel Search</span><span>Google Gemini</span><span>Google Veo</span></div>
       </div>
       <div class="landing-container landing-footer__bottom"><span>© {{ new Date().getFullYear() }} Framewise</span><span>Built for the Agentic Cinema Hackathon</span></div>

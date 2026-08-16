@@ -1,0 +1,5 @@
+# Historical commit identifier documented as provenance, not an API key.
+cdb8637ba5529d862ecfcfac15b621a1371fcc33:docs/operations/live-validation.md:generic-api-key:32
+
+# Historical local-development placeholder, replaced before the first live deployment.
+df8e5a676edcb6aa804b8a1ccdd5503800e6b9eb:infra/terraform/main.tf:hashicorp-tf-password:83

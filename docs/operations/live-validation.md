@@ -47,10 +47,10 @@ The upload remains private intentionally; the rendered proof link above is the j
 
 ## GitHub automation
 
-- Private source repository: [SubSchool/agentic-video-studio](https://github.com/SubSchool/agentic-video-studio).
-- The complete CI workflow [run 31316853362](https://github.com/SubSchool/agentic-video-studio/actions/runs/31316853362) passed backend, frontend, mock browser E2E, Terraform, secret scanning, and container build jobs.
-- The account migration [run 31316128598](https://github.com/SubSchool/agentic-video-studio/actions/runs/31316128598) copied durable data and media into the new project without storing a service-account key.
-- The final keyless production deployment [run 31316858226](https://github.com/SubSchool/agentic-video-studio/actions/runs/31316858226) passed from commit `b32525f` and produced the API and web revisions above.
+- Private source repository: [SubSchoolLTD/agentic-video-studio](https://github.com/SubSchoolLTD/agentic-video-studio).
+- The complete CI workflow [run 31316853362](https://github.com/SubSchoolLTD/agentic-video-studio/actions/runs/31316853362) passed backend, frontend, mock browser E2E, Terraform, secret scanning, and container build jobs.
+- The account migration [run 31316128598](https://github.com/SubSchoolLTD/agentic-video-studio/actions/runs/31316128598) copied durable data and media into the new project without storing a service-account key.
+- The final keyless production deployment [run 31316858226](https://github.com/SubSchoolLTD/agentic-video-studio/actions/runs/31316858226) passed from commit `b32525f` and produced the API and web revisions above.
 - GitHub Actions authenticates through a repository-scoped Workload Identity Federation condition; no service-account JSON key is stored in GitHub.
 - Runtime Google, YouTube, and Parallel credentials remain in Google Secret Manager. GitHub holds only deployment configuration and Workload Identity identifiers.
 

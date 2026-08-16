@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { Check, CircleDollarSign, Pause, Pencil, Play, Save, Settings2, ShieldCheck, Volume2, X } from 'lucide-vue-next'
+import { Check, CircleDollarSign, ImageIcon, Pause, Pencil, Play, Save, Settings2, ShieldCheck, Upload, Volume2, X } from 'lucide-vue-next'
 
 type SettingsTab = 'general' | 'brand' | 'automation' | 'budget' | 'compliance'
-const { api, projectId } = useApi()
+const { api, apiBase, projectId } = useApi()
 const { show } = useToast()
 const activeTab = ref<SettingsTab>('general')
 const editing = ref(false)
 const saving = ref(false)
+const uploadingLogo = ref(false)
+const logoInput = ref<HTMLInputElement | null>(null)
+const logoRightsConfirmed = ref(false)
 const tabs: { key: SettingsTab, label: string }[] = [
   { key: 'general', label: 'General' },
   { key: 'brand', label: 'Brand voice' },
@@ -24,6 +27,8 @@ const { data, refresh } = await useAsyncData('settings', async () => {
 })
 const projectForm = reactive({ name: '', timezone: '', automation_mode: 'assisted', daily_cap: 1, weekly_cap: 3, minimum_gap_hours: 18, allowed_start: '09:00', allowed_end: '18:00', quiet_start: '', quiet_end: '', pause_all_publications: false, backlog_target: 7, research_recency_days: 30, monthly_budget: 120, readiness_manual: 70, readiness_autopublish: 88, confidence_threshold: 0.65 })
 const brandForm = reactive({ description: '', primaryAudiences: '', secondaryAudiences: '', valuePropositions: '', toneTraits: '', prohibitedTone: '', allowedClaims: '', prohibitedClaims: '', requireSourceClaims: '', primaryCta: '', alternativeCtas: '', mandatoryDisclosures: '', highRiskTopics: '', trustedDomains: '' })
+const logoAsset = computed(() => data.value?.brand?.visual?.logo_assets?.[0] || null)
+const logoUrl = computed(() => logoAsset.value?.url ? `${apiBase}${logoAsset.value.url}` : '')
 
 function lines(value: string) { return value.split('\n').map(item => item.trim()).filter(Boolean) }
 function lineValue(value: any) { return Array.isArray(value) ? value.join('\n') : '' }
@@ -72,6 +77,25 @@ async function save() {
   finally { saving.value = false }
 }
 
+async function uploadLogo() {
+  const file = logoInput.value?.files?.[0]
+  if (!file) return show('Choose a logo', 'PNG, JPEG or WebP up to 5 MB.', 'error')
+  if (!logoRightsConfirmed.value) return show('Confirm logo rights', 'Only upload a logo you own or may legally use.', 'error')
+  uploadingLogo.value = true
+  try {
+    const body = new FormData()
+    body.append('image', file)
+    body.append('rights_confirmed', 'true')
+    await api(`/v1/projects/${projectId.value}/brand-profile/logo`, { method: 'POST', body })
+    if (logoInput.value) logoInput.value.value = ''
+    logoRightsConfirmed.value = false
+    await refresh()
+    show('Logo uploaded', 'Future renders will use this image instead of a text label.', 'success')
+  }
+  catch (error: any) { show('Could not upload logo', error.message, 'error') }
+  finally { uploadingLogo.value = false }
+}
+
 async function toggleProject() {
   const action = data.value?.project.status === 'paused' ? 'resume' : 'pause'
   try {
@@ -102,8 +126,8 @@ async function toggleProject() {
 
         <UiAppCard v-else-if="activeTab === 'brand'">
           <div class="section-heading"><div><h2>Brand voice</h2><p>Positioning, audiences, tone and calls to action.</p></div><Volume2 :size="18" /></div>
-          <div v-if="editing" class="form-grid"><div class="field field--full"><label>Brand description</label><textarea v-model="brandForm.description" /></div><div class="field"><label>Primary audiences · one per line</label><textarea v-model="brandForm.primaryAudiences" /></div><div class="field"><label>Secondary audiences · one per line</label><textarea v-model="brandForm.secondaryAudiences" /></div><div class="field field--full"><label>Value propositions · one per line</label><textarea v-model="brandForm.valuePropositions" /></div><div class="field"><label>Tone traits</label><textarea v-model="brandForm.toneTraits" /></div><div class="field"><label>Prohibited tone</label><textarea v-model="brandForm.prohibitedTone" /></div><div class="field"><label>Primary call to action</label><input v-model="brandForm.primaryCta" /></div><div class="field"><label>Alternative CTAs · one per line</label><textarea v-model="brandForm.alternativeCtas" /></div></div>
-          <dl v-else class="settings-values settings-values--stacked"><div><dt>Description</dt><dd>{{ brandForm.description || 'Not configured' }}</dd></div><div><dt>Primary audiences</dt><dd>{{ displayLines(brandForm.primaryAudiences) }}</dd></div><div><dt>Secondary audiences</dt><dd>{{ displayLines(brandForm.secondaryAudiences) }}</dd></div><div><dt>Value propositions</dt><dd>{{ displayLines(brandForm.valuePropositions) }}</dd></div><div><dt>Tone</dt><dd>{{ displayLines(brandForm.toneTraits) }}</dd></div><div><dt>Avoid</dt><dd>{{ displayLines(brandForm.prohibitedTone) }}</dd></div><div><dt>Primary CTA</dt><dd>{{ brandForm.primaryCta || 'Not configured' }}</dd></div></dl>
+          <div v-if="editing" class="form-grid"><div class="brand-logo-editor field--full"><div class="brand-logo-preview"><img v-if="logoUrl" :src="logoUrl" alt="Current brand logo"><ImageIcon v-else :size="24" /></div><div><strong>Brand logo</strong><span>Shown without a generated label or background box. Transparent PNG or WebP works best.</span><input ref="logoInput" type="file" accept="image/png,image/jpeg,image/webp"><label class="checkbox-row"><input v-model="logoRightsConfirmed" type="checkbox"> I own this logo or have permission to use it.</label><button type="button" class="button button--small" :disabled="uploadingLogo" data-testid="upload-brand-logo" @click="uploadLogo"><Upload :size="13" /> {{ uploadingLogo ? 'Uploading…' : logoAsset ? 'Replace logo' : 'Upload logo' }}</button></div></div><div class="field field--full"><label>Brand description</label><textarea v-model="brandForm.description" /></div><div class="field"><label>Primary audiences · one per line</label><textarea v-model="brandForm.primaryAudiences" /></div><div class="field"><label>Secondary audiences · one per line</label><textarea v-model="brandForm.secondaryAudiences" /></div><div class="field field--full"><label>Value propositions · one per line</label><textarea v-model="brandForm.valuePropositions" /></div><div class="field"><label>Tone traits</label><textarea v-model="brandForm.toneTraits" /></div><div class="field"><label>Prohibited tone</label><textarea v-model="brandForm.prohibitedTone" /></div><div class="field"><label>Primary call to action</label><input v-model="brandForm.primaryCta" /></div><div class="field"><label>Alternative CTAs · one per line</label><textarea v-model="brandForm.alternativeCtas" /></div></div>
+          <dl v-else class="settings-values settings-values--stacked"><div><dt>Logo</dt><dd><img v-if="logoUrl" class="brand-logo-inline" :src="logoUrl" alt="Brand logo"><span v-else>Not uploaded · no logo overlay will be rendered</span></dd></div><div><dt>Description</dt><dd>{{ brandForm.description || 'Not configured' }}</dd></div><div><dt>Primary audiences</dt><dd>{{ displayLines(brandForm.primaryAudiences) }}</dd></div><div><dt>Secondary audiences</dt><dd>{{ displayLines(brandForm.secondaryAudiences) }}</dd></div><div><dt>Value propositions</dt><dd>{{ displayLines(brandForm.valuePropositions) }}</dd></div><div><dt>Tone</dt><dd>{{ displayLines(brandForm.toneTraits) }}</dd></div><div><dt>Avoid</dt><dd>{{ displayLines(brandForm.prohibitedTone) }}</dd></div><div><dt>Primary CTA</dt><dd>{{ brandForm.primaryCta || 'Not configured' }}</dd></div></dl>
         </UiAppCard>
 
         <UiAppCard v-else-if="activeTab === 'automation'">
@@ -130,5 +154,5 @@ async function toggleProject() {
 </template>
 
 <style scoped>
-.settings-grid{display:grid;grid-template-columns:190px minmax(0,1fr);gap:15px;align-items:start}.settings-nav{position:sticky;top:82px;display:grid!important;gap:4px;padding:11px!important}.settings-nav strong{padding:8px 9px;color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.1em}.settings-nav button{padding:9px;border:0;border-radius:8px;background:transparent;color:var(--muted-strong);font-size:10px;text-align:left}.settings-nav button:hover{background:var(--surface-soft)}.settings-nav button.active{background:var(--primary-50);color:var(--primary-700);font-weight:700}.settings-content{min-width:0}.settings-values{display:grid;margin:0}.settings-values div{display:grid;grid-template-columns:minmax(150px,.7fr) minmax(0,1.3fr);gap:18px;padding:12px 0;border-bottom:1px solid var(--border)}.settings-values div:last-child{border:0}.settings-values dt{color:var(--muted);font-size:9px}.settings-values dd{margin:0;color:var(--ink);font-size:9px;font-weight:650;text-align:right;text-transform:none}.settings-values--stacked div{grid-template-columns:150px minmax(0,1fr)}.settings-values--stacked dd{line-height:1.55;text-align:left}.protected-note{display:flex;align-items:center;gap:7px;margin-top:15px;padding:9px;border-radius:8px;background:var(--green-soft);color:var(--green);font-size:8px}.inline-inputs{display:grid;grid-template-columns:1fr 1fr;gap:6px}@media(max-width:800px){.settings-grid{grid-template-columns:1fr}.settings-nav{position:static;grid-template-columns:repeat(2,1fr)}.settings-nav strong{grid-column:1/-1}.settings-values div,.settings-values--stacked div{grid-template-columns:1fr;gap:5px}.settings-values dd{text-align:left}}
+.settings-grid{display:grid;grid-template-columns:190px minmax(0,1fr);gap:15px;align-items:start}.settings-nav{position:sticky;top:82px;display:grid!important;gap:4px;padding:11px!important}.settings-nav strong{padding:8px 9px;color:var(--muted);font-size:8px;text-transform:uppercase;letter-spacing:.1em}.settings-nav button{padding:9px;border:0;border-radius:8px;background:transparent;color:var(--muted-strong);font-size:10px;text-align:left}.settings-nav button:hover{background:var(--surface-soft)}.settings-nav button.active{background:var(--primary-50);color:var(--primary-700);font-weight:700}.settings-content{min-width:0}.settings-values{display:grid;margin:0}.settings-values div{display:grid;grid-template-columns:minmax(150px,.7fr) minmax(0,1.3fr);gap:18px;padding:12px 0;border-bottom:1px solid var(--border)}.settings-values div:last-child{border:0}.settings-values dt{color:var(--muted);font-size:9px}.settings-values dd{margin:0;color:var(--ink);font-size:9px;font-weight:650;text-align:right;text-transform:none}.settings-values--stacked div{grid-template-columns:150px minmax(0,1fr)}.settings-values--stacked dd{line-height:1.55;text-align:left}.brand-logo-editor{display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;padding:13px;border:1px solid var(--border);border-radius:11px;background:var(--surface-soft)}.brand-logo-preview{display:grid;height:90px;place-items:center;overflow:hidden;border:1px solid var(--border);border-radius:9px;background:white;color:var(--muted)}.brand-logo-preview img{max-width:88%;max-height:72px;object-fit:contain}.brand-logo-editor>div:last-child{display:grid;align-content:start;gap:7px}.brand-logo-editor strong{font-size:10px}.brand-logo-editor span{color:var(--muted);font-size:8px;line-height:1.45}.brand-logo-editor input[type=file]{font-size:8px}.brand-logo-editor .checkbox-row{font-size:8px}.brand-logo-editor .button{width:fit-content}.brand-logo-inline{display:block;max-width:150px;max-height:55px;object-fit:contain}.protected-note{display:flex;align-items:center;gap:7px;margin-top:15px;padding:9px;border-radius:8px;background:var(--green-soft);color:var(--green);font-size:8px}.inline-inputs{display:grid;grid-template-columns:1fr 1fr;gap:6px}@media(max-width:800px){.settings-grid{grid-template-columns:1fr}.settings-nav{position:static;grid-template-columns:repeat(2,1fr)}.settings-nav strong{grid-column:1/-1}.settings-values div,.settings-values--stacked div{grid-template-columns:1fr;gap:5px}.settings-values dd{text-align:left}.brand-logo-editor{grid-template-columns:1fr}}
 </style>

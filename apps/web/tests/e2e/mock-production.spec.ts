@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { registerThroughUi } from './helpers'
+import { creditTestBalance, registerThroughUi } from './helpers'
 
 test('creates an idea, renders a mock production, approves and publishes it', async ({ page }) => {
   const account = await registerThroughUi(page, 'Production')
+  await creditTestBalance(page.request, account.email, 10_000)
   let generationPayload: any
   await page.route('**/v1/projects/*/generation-jobs', async (route) => {
     const request = route.request()
@@ -29,9 +30,13 @@ test('creates an idea, renders a mock production, approves and publishes it', as
   await expect(card).toBeVisible()
   await card.getByRole('button', { name: 'Configure video' }).click()
   await expect(page.getByTestId('generation-config')).toBeVisible()
+  await expect(page.getByText('Maximum production charge')).toBeVisible()
+  await expect(page.getByText('$10.08', { exact: true })).toBeVisible()
+  await expect(page.getByText('Workspace balance')).toBeVisible()
   await page.getByLabel('Target duration').fill('8')
   await page.getByLabel('Preferred scene count').fill('2')
   await page.getByLabel(/Allow the director/).uncheck()
+  await expect(page.getByText('$1.92', { exact: true })).toBeVisible()
   await expect(page.getByLabel(/Burn captions into the video/)).not.toBeChecked()
   await page.getByTestId('start-generation').click()
   expect(generationPayload.burn_in_captions).toBe(false)
@@ -71,6 +76,14 @@ test('creates an idea, renders a mock production, approves and publishes it', as
     headers: { Authorization: `Bearer ${(await page.context().cookies()).find(item => item.name === 'avs_access')?.value}` },
   })
   expect(balance.status()).toBe(200)
-  expect((await balance.json()).balance_tokens).toBeLessThan(1000)
+  // Deterministic mock providers do not create a real provider bill: the reserve
+  // is visible in the ledger and reconciled back after the successful render.
+  expect((await balance.json()).balance_cents).toBe(10_000)
+  const ledger = await page.request.get(`${process.env.E2E_API_BASE || 'http://127.0.0.1:8100'}/v1/billing/ledger`, {
+    headers: { Authorization: `Bearer ${(await page.context().cookies()).find(item => item.name === 'avs_access')?.value}` },
+  })
+  expect(ledger.status()).toBe(200)
+  const eventTypes = (await ledger.json()).items.map((item: any) => item.event_type)
+  expect(eventTypes).toEqual(expect.arrayContaining(['ai_usage', 'ai_usage_refund']))
   expect(account.projectId).toMatch(/^prj_/)
 })

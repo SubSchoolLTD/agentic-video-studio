@@ -42,6 +42,14 @@ export async function registerThroughUi(page: Page, label = 'E2E') {
   return { email, password, projectName, projectId: projectId! }
 }
 
+export async function creditTestBalance(request: APIRequestContext, email: string, amountCents = 100_000) {
+  const response = await request.post(`${apiBase}/v1/auth/test-support/balance`, {
+    headers: { 'X-Test-Support-Secret': testSecret },
+    data: { email, amount_cents: amountCents },
+  })
+  expect(response.status(), await response.text()).toBe(200)
+}
+
 export async function registerThroughApi(request: APIRequestContext, label = 'API E2E') {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
   const email = `framewise-api-${suffix}@example.com`
@@ -60,5 +68,8 @@ export async function registerThroughApi(request: APIRequestContext, label = 'AP
   const token = await verificationToken(request, email)
   const verified = await request.post(`${apiBase}/v1/auth/verify-email`, { data: { token } })
   expect(verified.status(), await verified.text()).toBe(200)
-  return await verified.json() as { access_token: string, organization_id: string, default_project_id: string }
+  return {
+    ...(await verified.json() as { access_token: string, organization_id: string, default_project_id: string }),
+    email,
+  }
 }

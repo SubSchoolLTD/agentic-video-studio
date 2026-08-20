@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { registerThroughUi } from './helpers'
+import { registerThroughApi, registerThroughUi } from './helpers'
 
 const apiBase = process.env.E2E_API_BASE || 'http://127.0.0.1:8100'
 
-test('admin reviews analytics, changes model pricing, issues and redeems a promo code', async ({ page }) => {
+test('separate admin UI manages analytics, prices, promo bonuses and administrators', async ({ page, request }) => {
   const account = await registerThroughUi(page, 'Admin economics')
   const promoted = await page.request.post(`${apiBase}/v1/auth/test-support/platform-admin`, {
     headers: { 'X-Test-Support-Secret': 'framewise-e2e-support' },
@@ -11,17 +11,22 @@ test('admin reviews analytics, changes model pricing, issues and redeems a promo
   })
   expect(promoted.status(), await promoted.text()).toBe(200)
 
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  await page.getByLabel('Email').fill(account.email)
+  await page.getByLabel('Password').fill(account.password)
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page).toHaveURL('/app')
   await page.goto('/admin')
-  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
-  await expect(page.getByRole('heading', { name: 'Platform admin' })).toBeVisible()
+  await expect(page.locator('.admin-shell')).toHaveAttribute('data-hydrated', 'true')
+  await expect(page.getByRole('heading', { name: 'Platform analytics' })).toBeVisible()
   await expect(page.getByText('Any authenticated activity on or after day 7')).toBeVisible()
-  await expect(page.getByText('Paid/admin top-ups only')).toBeVisible()
+  await expect(page.getByText('Captured PayPal + admin records')).toBeVisible()
 
-  await page.getByRole('button', { name: 'Models & pricing' }).click()
-  const characterPrice = page.locator('.pricing-table tbody tr').filter({ hasText: 'character.generate' })
-  await expect(characterPrice.locator('input').nth(2)).toHaveValue('gemini-2.5-flash-image')
-  const charge = characterPrice.locator('input[type=number]').nth(1)
-  await charge.fill('26')
+  await page.goto('/admin/pricing')
+  await expect(page.locator('.admin-shell')).toHaveAttribute('data-hydrated', 'true')
+  const characterPrice = page.locator('.pricing-list article').filter({ hasText: 'character.generate' })
+  await expect(characterPrice.getByLabel('Model')).toHaveValue('gemini-2.5-flash-image')
+  await characterPrice.getByLabel('Customer charge / unit, USD').fill('0.26')
   const pricingResponse = page.waitForResponse(response => (
     response.url().endsWith('/v1/platform-admin/pricing/character.generate')
     && response.request().method() === 'PATCH'
@@ -30,22 +35,42 @@ test('admin reviews analytics, changes model pricing, issues and redeems a promo
   expect((await pricingResponse).status()).toBe(200)
   await expect(page.getByText('Price saved')).toBeVisible()
 
-  await page.getByRole('button', { name: 'Promo codes' }).click()
+  await page.goto('/admin/promos')
+  await expect(page.locator('.admin-shell')).toHaveAttribute('data-hydrated', 'true')
   const promo = `E2E-${Math.random().toString(16).slice(2, 10).toUpperCase()}`
-  const form = page.getByTestId('admin-promo-form')
-  await form.getByLabel('Custom code').fill(promo)
-  await form.getByRole('spinbutton', { name: 'AI tokens', exact: true }).fill('321')
-  await form.getByRole('spinbutton', { name: 'Maximum redemptions', exact: true }).fill('1')
-  await form.getByRole('button', { name: 'Create code' }).click()
-  await expect(page.locator('.created-code')).toHaveText(promo)
+  await page.getByLabel('Custom code optional').fill(promo)
+  await page.getByLabel('Fixed bonus, USD').fill('3.21')
+  await expect(page.getByLabel('Fixed bonus, USD')).toHaveValue('3.21')
+  await page.getByLabel('Maximum uses').fill('1')
+  await page.getByRole('button', { name: 'Create promo' }).click()
+  await expect(page.locator('.created-code')).toContainText(promo)
+  const promoRow = page.locator('.promo-list > div').filter({ hasText: promo })
+  await expect(promoRow).toContainText('$3.21 + 0.0%')
+
+  const futureAdmin = await registerThroughApi(request, 'Future admin')
+  await page.goto('/admin/admins')
+  await expect(page.locator('.admin-shell')).toHaveAttribute('data-hydrated', 'true')
+  const options = await page.locator('.grant-card select option').evaluateAll(nodes => nodes.map(node => ({
+    label: node.textContent || '',
+    value: (node as HTMLOptionElement).value,
+  })))
+  const candidate = options.find(item => item.label.includes(futureAdmin.email))
+  expect(candidate).toBeTruthy()
+  await page.locator('.grant-card select').selectOption(candidate!.value)
+  await page.getByRole('button', { name: 'Grant access' }).click()
+  await expect(page.getByText('Administrator added')).toBeVisible()
+  const removable = page.locator('.admin-list .app-card').filter({ hasText: futureAdmin.email })
+  await expect(removable).toBeVisible()
+  await removable.getByRole('button', { name: 'Revoke' }).click()
+  await expect(page.getByText('Administrator removed')).toBeVisible()
 
   await page.goto('/billing')
-  const balanceBefore = Number((await page.getByText('AI tokens', { exact: true }).locator('..').locator('strong').textContent())?.replaceAll(',', ''))
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   await page.getByLabel('Promo code').fill(promo)
-  await page.getByRole('button', { name: 'Apply code' }).click()
-  await expect(page.getByText('Promo code redeemed')).toBeVisible()
-  await expect(page.getByText('Previously redeemed')).toBeVisible()
-  await expect(page.getByText(promo)).toBeVisible()
-  const availableCard = page.locator('.metric-card').filter({ hasText: 'Available' })
-  await expect(availableCard.locator('strong')).toHaveText((balanceBefore + 321).toLocaleString())
+  await expect(page.getByLabel('Promo code')).toHaveValue(promo)
+  const checkoutRequest = page.waitForRequest(request => (
+    request.url().endsWith('/v1/billing/topups/paypal') && request.method() === 'POST'
+  ))
+  await page.getByRole('button', { name: /Continue to PayPal/ }).click()
+  expect((await checkoutRequest).postDataJSON().promo_code).toBe(promo)
 })

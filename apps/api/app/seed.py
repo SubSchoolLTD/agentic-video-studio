@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import hash_password
-from .billing import ensure_wallet, grant_signup_credit, seed_price_rules
+from .billing import ensure_wallet, seed_price_rules
 from .config import Settings
 from .models import Resource, User
 from .repository import ResourceRepository
@@ -223,8 +223,12 @@ def seed_application(session: Session, settings: Settings) -> None:
     seed_price_rules(session)
     if settings.seed_demo_data or settings.app_auth_mode == "demo":
         seed_demo(session)
-        ensure_wallet(session, "org_demo")
-        grant_signup_credit(session, "org_demo", "user_demo_owner", 1_000_000)
+        demo_wallet = ensure_wallet(session, "org_demo")
+        if settings.app_env == "test" and int(demo_wallet.balance_cents) == 0:
+            # Explicit test fixture: browser/pipeline tests exercise paid flows without a real checkout.
+            demo_wallet.balance_cents = 1_000_000
+            session.add(demo_wallet)
+            session.commit()
     email = settings.bootstrap_admin_email.strip().lower()
     if not email:
         return
@@ -307,4 +311,3 @@ def seed_application(session: Session, settings: Settings) -> None:
     session.add(existing_org)
     session.commit()
     ensure_wallet(session, "org_demo")
-    grant_signup_credit(session, "org_demo", user.id, settings.signup_credit_tokens)

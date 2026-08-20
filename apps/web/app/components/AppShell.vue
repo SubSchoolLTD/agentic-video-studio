@@ -20,7 +20,6 @@ import {
   Search,
   Settings,
   Sparkles,
-  ShieldCheck,
   UserRound,
   X,
 } from 'lucide-vue-next'
@@ -49,17 +48,18 @@ const baseNav = [
   { label: 'Connections', to: '/connections', icon: Link2 },
   { label: 'Developer', to: '/developer', icon: Braces },
   { label: 'Project settings', to: '/settings', icon: Settings },
-  { label: 'Billing & AI tokens', to: '/billing', icon: BadgeDollarSign },
+  { label: 'Balance & billing', to: '/billing', icon: BadgeDollarSign },
 ]
-const nav = computed(() => auth.user.value?.is_platform_admin
-  ? [...baseNav, { label: 'Platform admin', to: '/admin', icon: ShieldCheck }]
-  : baseNav)
+const nav = computed(() => baseNav)
 
 const { data: projects } = await useAsyncData('shell-projects', () => api<any>('/v1/projects'), {
   default: () => ({ items: [] }),
 })
 const { data: health } = await useAsyncData('shell-health', () => api<any>('/v1/health'), {
   default: () => ({ status: 'unknown', environment: 'unknown', provider_mode: 'unknown' }),
+})
+const { data: billingSummary } = await useAsyncData('billing-summary', () => api<any>('/v1/billing/summary'), {
+  default: () => ({ balance_cents: 0, balance_usd: 0, currency: 'USD', prices: [] }),
 })
 const activeProject = computed(() => projects.value?.items?.find((item: any) => item.id === projectId.value) || projects.value?.items?.[0])
 const initials = computed(() => (auth.user.value?.display_name || auth.user.value?.email || 'U').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase())
@@ -141,6 +141,10 @@ function switchProject(event: Event) {
         <button class="icon-button topbar__menu" aria-label="Open menu" @click="mobileOpen = true"><Menu :size="20" /></button>
         <div class="topbar__search"><Search :size="17" /><span>Search productions, ideas, sources…</span><kbd>⌘ K</kbd></div>
         <div class="topbar__actions">
+          <NuxtLink to="/billing" class="button button--ghost button--small" aria-label="Open billing balance">
+            <BadgeDollarSign :size="15" /> ${{ Number(billingSummary?.balance_usd || 0).toFixed(2) }}
+          </NuxtLink>
+          <NuxtLink v-if="auth.user.value?.is_platform_admin" to="/admin" class="button button--ghost button--small">Admin</NuxtLink>
           <NuxtLink to="/ideas?create=1" class="button button--primary button--small"><Plus :size="16" /> New idea</NuxtLink>
           <button class="avatar-button" :title="`Sign out ${auth.user.value?.email || ''}`" aria-label="Sign out" @click="auth.logout"><span>{{ initials }}</span><LogOut :size="13" /></button>
         </div>

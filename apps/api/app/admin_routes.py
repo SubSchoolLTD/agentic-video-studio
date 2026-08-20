@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -28,22 +28,30 @@ class UserPatch(BaseModel):
 
 
 class CreditAdjustment(BaseModel):
-    amount_tokens: int = Field(ge=-10_000_000, le=10_000_000)
+    amount_cents: int = Field(ge=-10_000_000, le=10_000_000)
     description: str = Field(min_length=3, max_length=300)
     deposited_usd: float | None = Field(default=None, ge=0, le=1_000_000)
 
 
 class PromoCreate(BaseModel):
     code: str | None = Field(default=None, min_length=3, max_length=64)
-    kind: str = Field(pattern=r"^(ai_tokens|subscription|bundle)$")
-    credit_tokens: int = Field(default=0, ge=0, le=100_000_000)
-    subscription_days: int = Field(default=0, ge=0, le=3650)
+    kind: str = Field(default="topup_bonus", pattern=r"^topup_bonus$")
+    bonus_cents: int = Field(default=0, ge=0, le=100_000_000)
+    bonus_percent: float = Field(default=0, ge=0, le=500)
     max_redemptions: int | None = Field(default=None, ge=1, le=10_000_000)
     expires_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def has_bonus(self) -> PromoCreate:
+        if self.bonus_cents <= 0 and self.bonus_percent <= 0:
+            raise ValueError("A promo must add a fixed or percentage balance bonus")
+        return self
 
 
 class PromoPatch(BaseModel):
     is_active: bool | None = None
+    bonus_cents: int | None = Field(default=None, ge=0, le=100_000_000)
+    bonus_percent: float | None = Field(default=None, ge=0, le=500)
     max_redemptions: int | None = Field(default=None, ge=1, le=10_000_000)
     expires_at: datetime | None = None
 
@@ -54,8 +62,8 @@ class PricePatch(BaseModel):
     provider: str | None = Field(default=None, min_length=2, max_length=96)
     integration: str | None = Field(default=None, min_length=2, max_length=160)
     model_id: str | None = Field(default=None, min_length=2, max_length=200)
-    provider_cost_usd: float | None = Field(default=None, ge=0, le=1_000_000)
-    charge_tokens: int | None = Field(default=None, ge=0, le=100_000_000)
+    provider_cost_per_unit_usd: float | None = Field(default=None, ge=0, le=1_000_000)
+    charge_cents: int | None = Field(default=None, ge=0, le=100_000_000)
     margin_percent: float | None = Field(default=None, ge=-100, le=100_000)
     is_active: bool | None = None
 
@@ -111,11 +119,13 @@ def _serialize_user(
             session.scalars(select(CreditLedger).where(CreditLedger.organization_id == membership.organization_id))
         )
     topped_up = sum(
-        int(item.amount_tokens)
+        int(item.amount_cents)
         for item in ledger
-        if item.amount_tokens > 0 and item.event_type in {"admin_topup", "balance_topup", "promo_credit"}
+        if item.amount_cents > 0 and item.event_type in {"admin_topup", "balance_topup", "promo_bonus"}
     )
-    spent = abs(sum(int(item.amount_tokens) for item in ledger if item.event_type == "ai_usage"))
+    gross_spent = abs(sum(int(item.amount_cents) for item in ledger if item.event_type == "ai_usage"))
+    refunded = sum(int(item.amount_cents) for item in ledger if item.event_type == "ai_usage_refund")
+    spent = max(0, gross_spent - refunded)
     deposited = sum(
         float(item.monetary_amount_usd or 0)
         for item in ledger
@@ -134,9 +144,9 @@ def _serialize_user(
         "organization_id": membership.organization_id if membership else None,
         "organization_name": organization.data.get("name") if organization else None,
         "role": membership.data.get("role") if membership else None,
-        "balance_tokens": int(wallet.balance_tokens) if wallet else 0,
-        "tokens_topped_up": topped_up,
-        "tokens_spent": spent,
+        "balance_cents": int(wallet.balance_cents) if wallet else 0,
+        "cents_topped_up": topped_up,
+        "cents_spent": spent,
         "deposited_usd": round(deposited, 2),
         "last_activity_at": activity.isoformat() if activity else None,
     }
@@ -157,11 +167,33 @@ def overview(
         session.scalar(select(func.count()).select_from(Resource).where(Resource.kind == "organization")) or 0
     )
     credited = int(
-        session.scalar(select(func.coalesce(func.sum(CreditLedger.amount_tokens), 0)).where(CreditLedger.amount_tokens > 0)) or 0
+        session.scalar(
+            select(func.coalesce(func.sum(CreditLedger.amount_cents), 0)).where(
+                CreditLedger.amount_cents > 0,
+                CreditLedger.event_type != "ai_usage_refund",
+            )
+        )
+        or 0
     )
-    spent = abs(
-        int(session.scalar(select(func.coalesce(func.sum(CreditLedger.amount_tokens), 0)).where(CreditLedger.amount_tokens < 0)) or 0)
+    gross_spent = abs(
+        int(
+            session.scalar(
+                select(func.coalesce(func.sum(CreditLedger.amount_cents), 0)).where(
+                    CreditLedger.event_type == "ai_usage"
+                )
+            )
+            or 0
+        )
     )
+    refunded = int(
+        session.scalar(
+            select(func.coalesce(func.sum(CreditLedger.amount_cents), 0)).where(
+                CreditLedger.event_type == "ai_usage_refund"
+            )
+        )
+        or 0
+    )
+    spent = max(0, gross_spent - refunded)
     deposits = float(
         session.scalar(
             select(func.coalesce(func.sum(CreditLedger.monetary_amount_usd), 0)).where(
@@ -180,19 +212,30 @@ def overview(
         )
         or 0
     )
-    token_sources: dict[str, int] = defaultdict(int)
+    balance_sources: dict[str, int] = defaultdict(int)
     for event_type, amount in session.execute(
-        select(CreditLedger.event_type, func.coalesce(func.sum(CreditLedger.amount_tokens), 0))
-        .where(CreditLedger.amount_tokens > 0)
+        select(CreditLedger.event_type, func.coalesce(func.sum(CreditLedger.amount_cents), 0))
+        .where(CreditLedger.amount_cents > 0, CreditLedger.event_type != "ai_usage_refund")
         .group_by(CreditLedger.event_type)
     ):
-        token_sources[str(event_type)] = int(amount)
+        balance_sources[str(event_type)] = int(amount)
     usage_by_feature = []
     rules = {rule.feature_key: rule for rule in session.scalars(select(PriceRule))}
+    refunds_by_feature = {
+        str(feature_key or "unattributed"): int(amount)
+        for feature_key, amount in session.execute(
+            select(
+                CreditLedger.feature_key,
+                func.coalesce(func.sum(CreditLedger.amount_cents), 0),
+            )
+            .where(CreditLedger.event_type == "ai_usage_refund")
+            .group_by(CreditLedger.feature_key)
+        )
+    }
     for feature_key, amount, cost, operations in session.execute(
         select(
             CreditLedger.feature_key,
-            func.coalesce(func.sum(CreditLedger.amount_tokens), 0),
+            func.coalesce(func.sum(CreditLedger.amount_cents), 0),
             func.coalesce(func.sum(CreditLedger.monetary_amount_usd), 0),
             func.count(CreditLedger.id),
         )
@@ -207,7 +250,7 @@ def overview(
                 "label": rule.label if rule else key,
                 "provider": rule.provider if rule else "unknown",
                 "model_id": rule.model_id if rule else None,
-                "tokens_spent": abs(int(amount)),
+                "cents_spent": max(0, abs(int(amount)) - refunds_by_feature.get(key, 0)),
                 "provider_cost_usd": round(float(cost or 0), 4),
                 "operations": int(operations),
             }
@@ -225,14 +268,21 @@ def overview(
         },
         "organizations": organizations,
         "retention": {"day_7": _retention(customer_users, activity, days=7, now=now), "day_30": _retention(customer_users, activity, days=30, now=now)},
-        "tokens": {"credited": credited, "spent": spent, "outstanding": credited - spent, "sources": dict(token_sources)},
+        "balance": {
+            "credited": credited,
+            "spent": spent,
+            "refunded": refunded,
+            "outstanding": credited - spent,
+            "sources": dict(balance_sources),
+            "currency": "USD",
+        },
         "money": {
             "deposited_usd": round(deposits, 2),
             "provider_cost_usd": round(provider_cost, 2),
             "cash_after_provider_cost_usd": round(deposits - provider_cost, 2),
-            "note": "Deposits include paid/admin top-ups only; signup and promo credits are excluded from cash.",
+            "note": "Deposits include captured PayPal and recorded admin top-ups; promo bonuses are excluded from cash.",
         },
-        "usage_by_feature": sorted(usage_by_feature, key=lambda item: item["tokens_spent"], reverse=True),
+        "usage_by_feature": sorted(usage_by_feature, key=lambda item: item["cents_spent"], reverse=True),
     }
 
 
@@ -298,15 +348,15 @@ def adjust_credits(
         session,
         organization_id=membership.organization_id,
         user_id=user.id,
-        amount_tokens=payload.amount_tokens,
-        event_type="admin_topup" if payload.amount_tokens >= 0 else "admin_debit",
+        amount_cents=payload.amount_cents,
+        event_type="admin_topup" if payload.amount_cents >= 0 else "admin_debit",
         reference_id=principal.actor_id,
         description=payload.description,
         monetary_amount_usd=payload.deposited_usd,
         allow_negative_balance=False,
     )
     wallet = ensure_wallet(session, membership.organization_id)
-    return {"ledger_id": entry.id, "balance_tokens": int(wallet.balance_tokens)}
+    return {"ledger_id": entry.id, "balance_cents": int(wallet.balance_cents)}
 
 
 @router.get("/promo-codes")
@@ -320,8 +370,8 @@ def promo_codes(
                 "id": item.id,
                 "code": item.code_prefix,
                 "kind": item.kind,
-                "credit_tokens": int(item.credit_tokens),
-                "subscription_days": item.subscription_days,
+                "bonus_cents": int(item.bonus_cents),
+                "bonus_percent": float(item.bonus_percent),
                 "max_redemptions": item.max_redemptions,
                 "redemption_count": item.redemption_count,
                 "expires_at": item.expires_at.isoformat() if item.expires_at else None,
@@ -347,8 +397,8 @@ def create_promo(
         code_hash=hash_promo(raw),
         code_prefix=raw if len(raw) <= 16 else f"{raw[:12]}…",
         kind=payload.kind,
-        credit_tokens=payload.credit_tokens,
-        subscription_days=payload.subscription_days,
+        bonus_cents=payload.bonus_cents,
+        bonus_percent=payload.bonus_percent,
         max_redemptions=payload.max_redemptions,
         expires_at=payload.expires_at,
         created_by_user_id=principal.actor_id,
@@ -389,8 +439,8 @@ def pricing(
                 "provider": item.provider,
                 "integration": item.integration,
                 "model_id": item.model_id,
-                "provider_cost_usd": float(item.provider_cost_usd),
-                "charge_tokens": int(item.charge_tokens),
+                "provider_cost_per_unit_usd": float(item.provider_cost_per_unit_usd),
+                "charge_cents": int(item.charge_cents),
                 "margin_percent": float(item.margin_percent),
                 "is_active": item.is_active,
             }
@@ -418,8 +468,60 @@ def patch_price(
         "provider": rule.provider,
         "integration": rule.integration,
         "model_id": rule.model_id,
-        "charge_tokens": int(rule.charge_tokens),
-        "provider_cost_usd": float(rule.provider_cost_usd),
+        "charge_cents": int(rule.charge_cents),
+        "provider_cost_per_unit_usd": float(rule.provider_cost_per_unit_usd),
         "margin_percent": float(rule.margin_percent),
         "is_active": rule.is_active,
     }
+
+
+@router.get("/admins")
+def admins(
+    _: Principal = Depends(platform_admin), session: Session = Depends(get_db)
+) -> dict[str, object]:
+    items = list(
+        session.scalars(select(User).where(User.is_platform_admin.is_(True)).order_by(User.created_at))
+    )
+    return {"items": [_serialize_user(session, item) for item in items], "count": len(items)}
+
+
+@router.post("/admins/{user_id}")
+def grant_admin(
+    user_id: str,
+    _: Principal = Depends(platform_admin),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.status != "active" or user.email_verified_at is None:
+        raise HTTPException(409, "Only an active verified user can become an administrator")
+    if not user.is_platform_admin:
+        user.is_platform_admin = True
+        user.token_version += 1
+        session.add(user)
+        session.commit()
+    return _serialize_user(session, user)
+
+
+@router.delete("/admins/{user_id}")
+def revoke_admin(
+    user_id: str,
+    principal: Principal = Depends(platform_admin),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    if user_id == principal.actor_id:
+        raise HTTPException(409, "You cannot remove your own administrator access")
+    user = session.get(User, user_id)
+    if not user or not user.is_platform_admin:
+        raise HTTPException(404, "Administrator not found")
+    admin_count = int(
+        session.scalar(select(func.count()).select_from(User).where(User.is_platform_admin.is_(True))) or 0
+    )
+    if admin_count <= 1:
+        raise HTTPException(409, "The platform must keep at least one administrator")
+    user.is_platform_admin = False
+    user.token_version += 1
+    session.add(user)
+    session.commit()
+    return {"id": user.id, "is_platform_admin": False}

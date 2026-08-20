@@ -3,6 +3,8 @@ export interface ApiError {
     code?: string
     message?: string
     request_id?: string
+    details?: Record<string, unknown>
+    retryable?: boolean
   }
 }
 
@@ -30,7 +32,13 @@ export function useApi() {
       }
       const payload = error?.data as ApiError | undefined
       const message = payload?.error?.message || error?.message || 'The request could not be completed.'
-      throw Object.assign(new Error(message), { requestId: payload?.error?.request_id })
+      throw Object.assign(new Error(message), {
+        requestId: payload?.error?.request_id,
+        status: error?.response?.status,
+        code: payload?.error?.code,
+        details: payload?.error?.details,
+        retryable: payload?.error?.retryable,
+      })
     }
   }
 

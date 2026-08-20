@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { registerThroughUi } from './helpers'
+import { creditTestBalance, registerThroughUi } from './helpers'
 
 test('research persists candidates, exposes details and hides rejected cards', async ({ page }) => {
-  await registerThroughUi(page, 'Research UX')
+  const account = await registerThroughUi(page, 'Research UX')
+  await creditTestBalance(page.request, account.email, 1_000)
   await page.goto('/research')
   await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
 

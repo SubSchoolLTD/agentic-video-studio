@@ -17,6 +17,9 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `JWT_SECRET` | `jwt-secret` |
 | `SENDPULSE_ID` | `sendpulse-id` |
 | `SENDPULSE_SECRET` | `sendpulse-secret` |
+| `PAYPAL_CLIENT_ID` | `paypal-client-id` |
+| `PAYPAL_SECRET` | `paypal-secret` |
+| `PAYPAL_WEBHOOK_ID` | `paypal-webhook-id` (optional; capture return remains authoritative) |
 | `CLOUD_SQL_PASSWORD` | `CLOUD_SQL_PASSWORD` |
 | `YOUTUBE_CLIENT_ID` | `YOUTUBE_CLIENT_ID` |
 | `YOUTUBE_CLIENT_SECRET` | `YOUTUBE_CLIENT_SECRET` |
@@ -27,7 +30,7 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `WEBHOOK_SIGNING_SECRET` | `WEBHOOK_SIGNING_SECRET` |
 | `API_KEY_PEPPER` | `API_KEY_PEPPER` |
 
-Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, and a strong `JWT_SECRET`. Demo authentication is accepted only in explicit local/test environments. The MCP process requires `APP_API_TOKEN` containing a tenant-scoped API key or access token; it has no shared default credential.
+Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, `PAYPAL_ENV=live`, PayPal server credentials, and a strong `JWT_SECRET`. PayPal credentials never reach the browser; Orders v2 create/capture and amount verification happen on the API. Demo authentication is accepted only in explicit local/test environments. The MCP process requires `APP_API_TOKEN` containing a tenant-scoped API key or access token; it has no shared default credential.
 
 Google runtime identity should use workload identity/service account credentials in deployment; do not place long-lived service-account JSON in GitHub when federation is available.
 

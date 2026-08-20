@@ -20,7 +20,7 @@ from .auth import (
     token_hash,
     verify_password,
 )
-from .billing import charge_feature, grant_signup_credit
+from .billing import add_ledger_entry, charge_feature
 from .config import Settings, get_settings
 from .database import get_db
 from .email_service import consume_email_token, issue_email_token, send_account_email, test_token
@@ -61,6 +61,10 @@ class PasswordResetConfirm(TokenRequest):
 
 class TestSupportAdminRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
+
+
+class TestSupportBalanceRequest(TestSupportAdminRequest):
+    amount_cents: int = Field(default=100_000, ge=1, le=10_000_000)
 
 
 def _normalize_email(raw: str) -> str:
@@ -201,7 +205,7 @@ def register(
             "generation_policy": "research_then_approval",
         },
     )
-    subscription = Resource(
+    onboarding = Resource(
         id=f"onb_{secrets.token_hex(12)}",
         organization_id=organization_id,
         project_id=project_id,
@@ -225,9 +229,9 @@ def register(
             project,
             brand_profile,
             source,
-            subscription,
+            onboarding,
             strategy,
-            Wallet(organization_id=organization_id, balance_tokens=0),
+            Wallet(organization_id=organization_id, balance_cents=0),
         ]
     )
     session.commit()
@@ -327,7 +331,6 @@ def verify_email(
     membership = active_membership(session, user.id)
     if not membership:
         raise HTTPException(409, "Workspace membership is missing")
-    grant_signup_credit(session, membership.organization_id, user.id, settings.signup_credit_tokens)
     project = session.scalar(
         select(Resource)
         .where(
@@ -473,3 +476,30 @@ def test_support_platform_admin(
     session.add(user)
     session.commit()
     return {"user_id": user.id, "status": "platform_admin"}
+
+
+@router.post("/test-support/balance", include_in_schema=False)
+def test_support_balance(
+    payload: TestSupportBalanceRequest,
+    x_test_support_secret: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_db),
+) -> dict[str, int | str]:
+    if settings.app_env != "test" or not secrets.compare_digest(
+        x_test_support_secret or "", settings.test_support_secret
+    ):
+        raise HTTPException(404, "Resource not found")
+    user = session.scalar(select(User).where(User.email == payload.email.lower()))
+    membership = active_membership(session, user.id) if user else None
+    if not user or not membership:
+        raise HTTPException(404, "Active user not found")
+    add_ledger_entry(
+        session,
+        organization_id=membership.organization_id,
+        user_id=user.id,
+        amount_cents=payload.amount_cents,
+        event_type="test_fixture",
+        description="E2E balance fixture",
+        reference_id="test-support",
+    )
+    return {"status": "credited", "amount_cents": payload.amount_cents}

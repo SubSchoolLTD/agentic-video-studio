@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { registerThroughUi } from './helpers'
+import { creditTestBalance, registerThroughUi } from './helpers'
 
 const referencePng = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -7,7 +7,8 @@ const referencePng = Buffer.from(
 )
 
 test('uploads a reusable character and starts native-audio UGC from an idea', async ({ page }) => {
-  await registerThroughUi(page, 'Native UGC')
+  const account = await registerThroughUi(page, 'Native UGC')
+  await creditTestBalance(page.request, account.email, 10_000)
   await page.goto('/characters')
   await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   const upload = page.getByTestId('character-upload-form')

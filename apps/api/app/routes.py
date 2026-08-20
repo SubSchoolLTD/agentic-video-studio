@@ -6,6 +6,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,7 +32,14 @@ from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .billing import charge_feature, feature_price
+from .billing import (
+    charge_feature,
+    estimate_veo_billable_seconds,
+    outstanding_charge_cents,
+    quote_feature,
+    refund_feature_charges,
+    veo_request_duration,
+)
 from .cloud_auth import require_google_service_identity
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db
@@ -93,6 +101,8 @@ from .security import ALL_SCOPES, Principal, get_principal, validate_public_url
 from .storage import MediaStorage
 from .strategy_defaults import cold_start_strategy
 from .workflow import WorkflowManager, initial_stage_state
+
+logger = logging.getLogger("avs.routes")
 
 router = APIRouter(prefix="/v1")
 
@@ -544,7 +554,17 @@ async def _analyze_project_task(
             )
             repo.update(project, status="review_required", data={"brand_profile_version": version})
         except Exception as exc:
+            logger.exception(
+                "project_analysis_failed",
+                extra={"project_id": project_id, "analysis_id": analysis_id},
+            )
             repo.update(analysis, status="failed", data={"error": str(exc), "retryable": True})
+            refund_feature_charges(
+                session,
+                organization_id=organization_id,
+                reference_id=analysis_id,
+                reason="Project analysis failed",
+            )
 
 
 @router.post("/projects/{project_id}/analyze-website", status_code=202, tags=["projects"])
@@ -2009,7 +2029,14 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                 correlation_id=run.id,
             )
         except Exception as exc:
+            logger.exception("research_run_failed", extra={"research_run_id": run.id})
             repo.update(run, status="failed", data={"error": str(exc), "retryable": True})
+            refund_feature_charges(
+                session,
+                organization_id=run.organization_id,
+                reference_id=run.id,
+                reason="Research run failed",
+            )
             await EventSink(settings).emit(
                 session,
                 organization_id=run.organization_id,
@@ -2504,12 +2531,25 @@ async def create_generation(
     if payload.source_item_id:
         require_resource(repo, payload.source_item_id, principal, kind="source_item", project_id=project_id)
     pricing_feature = "video.generate_native_audio" if effective_visual_mode == "ugc_native_audio" else "video.generate"
-    configured_cost = float(feature_price(session, pricing_feature).provider_cost_usd) * len(payload.aspect_ratios)
+    billable_seconds = estimate_veo_billable_seconds(
+        target_duration_seconds=payload.target_duration_seconds,
+        scene_count_min=payload.scene_count_min,
+        scene_count_max=payload.scene_count_max,
+        scene_count_flex=payload.scene_count_flex,
+    )
+    billable_units = billable_seconds * len(payload.aspect_ratios)
+    price_quote = quote_feature(session, pricing_feature, billable_units)
+    configured_cost = float(price_quote["provider_cost_usd"])
+    customer_price = float(price_quote["charge_usd"])
     estimated = {
         "currency": "USD",
-        "min": round(configured_cost * 0.8, 2),
-        "max": round(configured_cost * 1.5, 2),
+        "min": customer_price,
+        "max": customer_price,
         "basis": pricing_feature,
+        "billable_seconds_per_aspect_ratio": billable_seconds,
+        "aspect_ratio_count": len(payload.aspect_ratios),
+        "provider_cost_usd": round(configured_cost, 4),
+        "markup_percent": 20,
     }
     if estimated["max"] > payload.max_cost_usd:
         blocked = repo.add(
@@ -2576,7 +2616,7 @@ async def create_generation(
             organization_id=principal.organization_id,
             user_id=principal.actor_id,
             feature_key=pricing_feature,
-            quantity=len(payload.aspect_ratios),
+            quantity=billable_units,
             reference_id=job.id,
         )
     except HTTPException:
@@ -2657,12 +2697,19 @@ def cancel_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.status not in {"queued", "running"}:
+        raise HTTPException(409, f"Job cannot be cancelled from {job.status}")
     task = request.app.state.workflow.tasks.get(job_id)
     if task and not task.done():
         task.cancel()
-    return ResourceRepository.serialize(
-        repo.update(job, status="cancelled", data={"cancel_requested_at": datetime.now(UTC).isoformat()})
+    cancelled = repo.update(job, status="cancelled", data={"cancel_requested_at": datetime.now(UTC).isoformat()})
+    refund_feature_charges(
+        session,
+        organization_id=principal.organization_id,
+        reference_id=job.id,
+        reason="Generation cancelled before completion",
     )
+    return ResourceRepository.serialize(cancelled)
 
 
 @router.post("/generation-jobs/{job_id}/retry", status_code=202, tags=["generations"])
@@ -2677,6 +2724,28 @@ async def retry_generation(
     job = require_resource(repo, job_id, principal, kind="generation_job")
     if job.status not in {"failed", "blocked", "cancelled"}:
         raise HTTPException(409, f"Job cannot be retried from {job.status}")
+    if outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
+        pricing_feature = str(
+            (job.data.get("estimated_cost") or {}).get("basis")
+            or ("video.generate_native_audio" if job.data.get("visual_mode") == "ugc_native_audio" else "video.generate")
+        )
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key=pricing_feature,
+            quantity=int(
+                (job.data.get("estimated_cost") or {}).get("billable_seconds_per_aspect_ratio")
+                or estimate_veo_billable_seconds(
+                    target_duration_seconds=int(job.data.get("target_duration_seconds", 30)),
+                    scene_count_min=int(job.data.get("scene_count_min", 4)),
+                    scene_count_max=int(job.data.get("scene_count_max", 6)),
+                    scene_count_flex=int(job.data.get("scene_count_flex", 2)),
+                )
+            )
+            * len(job.data.get("aspect_ratios") or ["9:16"]),
+            reference_id=job.id,
+        )
     repo.update(job, status="queued", data={"last_error": None, "retry_requested_at": datetime.now(UTC).isoformat()})
     request.app.state.workflow.schedule(job.id)
     return {"generation_job_id": job.id, "status": "queued"}
@@ -2907,7 +2976,10 @@ async def regenerate_scene(
             feature_key=(
                 "video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate"
             ),
-            quantity=1,
+            quantity=veo_request_duration(
+                float(scene.data.get("duration_target") or 0)
+                or max(1.0, float(scene.data.get("end_sec") or 0) - float(scene.data.get("start_sec") or 0))
+            ),
             reference_id=regeneration.id,
         )
     except HTTPException:

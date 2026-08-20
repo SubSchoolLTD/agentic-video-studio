@@ -43,8 +43,8 @@ jobs:
           --region=us-central1
           --no-invoker-iam-check
           --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/api:${{ github.sha }}
-          --update-env-vars='APP_ENV=production,APP_AUTH_MODE=jwt,PROVIDER_MODE=live,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,SENDPULSE_TEMPLATE_ID=266399,SENDPULSE_TEMPLATE_NAME=subschool_main,BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false'
-          --update-secrets='JWT_SECRET=jwt-secret:latest,SENDPULSE_ID=sendpulse-id:latest,SENDPULSE_SECRET=sendpulse-secret:latest'
+          --update-env-vars='APP_ENV=production,APP_AUTH_MODE=jwt,PROVIDER_MODE=live,PAYPAL_ENV=live,PAYPAL_MIN_TOPUP_USD=12,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,SENDPULSE_TEMPLATE_ID=266399,SENDPULSE_TEMPLATE_NAME=subschool_main,BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false'
+          --update-secrets='JWT_SECRET=jwt-secret:latest,SENDPULSE_ID=sendpulse-id:latest,SENDPULSE_SECRET=sendpulse-secret:latest,PAYPAL_CLIENT_ID=paypal-client-id:latest,PAYPAL_SECRET=paypal-secret:latest'
           --remove-env-vars=APP_DEMO_TOKEN
       - name: Deploy web
         run: >-
@@ -57,5 +57,6 @@ jobs:
       - name: Verify rollout
         run: |
           curl --fail --silent --show-error '${{ secrets.PRODUCTION_API_URL }}/v1/health'
+          test "$(curl --fail --silent --show-error '${{ secrets.PRODUCTION_API_URL }}/v1/billing/public-pricing' | python -c 'import json,sys; print(json.load(sys.stdin)["minimum_topup_usd"])')" = "12"
           curl --fail --silent --show-error '${{ secrets.PRODUCTION_WEB_URL }}/' >/dev/null
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' '${{ secrets.PRODUCTION_API_URL }}/v1/projects')" = "401"

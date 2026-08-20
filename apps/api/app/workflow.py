@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from .billing import refund_feature_charges, settle_feature_charge, veo_request_duration
 from .config import Settings
 from .database import SessionLocal
 from .events import EventSink
@@ -207,10 +208,17 @@ class WorkflowManager:
                     },
                 )
             except Exception as exc:
+                logger.exception("character_generation_failed", extra={"character_id": character_id})
                 repo.update(
                     character,
                     status="failed",
                     data={"error": str(exc), "failed_at": datetime.now(UTC).isoformat()},
+                )
+                refund_feature_charges(
+                    session,
+                    organization_id=character.organization_id,
+                    reference_id=character.id,
+                    reason="Character generation failed",
                 )
 
     def _continuity_input(
@@ -371,6 +379,7 @@ class WorkflowManager:
                     project_id=job.project_id,
                     status="passed" if speech_qa.get("passed") else "speech_qa_failed",
                     data={
+                        "generation_job_id": job.id,
                         "scene_id": scene.id,
                         "attempt": attempt_number,
                         "automatic_retry": automatic_retry,
@@ -393,6 +402,11 @@ class WorkflowManager:
                         "audio_mode": "veo_native" if native_audio else "google_tts",
                         "character_id": job.data.get("character_id"),
                         "regeneration_id": regeneration_id,
+                        "billable_seconds": (
+                            veo_request_duration(float(scene.data.get("duration_target") or 8))
+                            if self.settings.uses_live_video
+                            else 0
+                        ),
                         "cost_usd": None,
                     },
                 )
@@ -412,6 +426,7 @@ class WorkflowManager:
                         "speech_qa": speech_qa,
                         "continuity_input_kind": input_kind,
                         "last_frame_storage_uri": persisted_last_frame["storage_uri"],
+                        "billable_seconds": attempt.data["billable_seconds"],
                     }
                 )
             if speech_passed:
@@ -586,6 +601,12 @@ class WorkflowManager:
                         "last_regeneration_error": str(exc),
                     },
                 )
+                refund_feature_charges(
+                    session,
+                    organization_id=regeneration.organization_id,
+                    reference_id=regeneration.id,
+                    reason="Scene regeneration failed",
+                )
 
     @staticmethod
     def _set_stage(
@@ -664,6 +685,12 @@ class WorkflowManager:
                         "last_error": {"code": "generation_failed", "message": str(exc), "retryable": True},
                         "failed_at": datetime.now(UTC).isoformat(),
                     },
+                )
+                refund_feature_charges(
+                    session,
+                    organization_id=job.organization_id,
+                    reference_id=job.id,
+                    reason="Generation failed before a usable video was produced",
                 )
                 await self._emit(session, job, "generation.failed", {"stage": current_stage, "error": str(exc)})
 
@@ -1458,6 +1485,39 @@ class WorkflowManager:
         caption_srt_asset_id: str | None,
         research_run_id: str,
     ) -> None:
+        attempt_resources = repo.list(
+            organization_id=job.organization_id,
+            project_id=job.project_id,
+            kind="scene_attempt",
+            limit=200,
+        )
+        actual_billable_units = (
+            sum(
+                int(item.data.get("billable_seconds") or 0)
+                for item in attempt_resources
+                if item.data.get("generation_job_id") == job.id
+            )
+            if self.settings.uses_live_video
+            else 0
+        )
+        settlement = settle_feature_charge(
+            session,
+            organization_id=job.organization_id,
+            reference_id=job.id,
+            actual_quantity=actual_billable_units,
+        )
+        repo.update(
+            job,
+            data={
+                "actual_billable_units": actual_billable_units,
+                "actual_cost_usd": round(settlement["customer_charge_cents"] / 100, 2),
+                "actual_provider_cost_usd": settlement["provider_cost_usd"],
+                "billing_refund_usd": round(settlement["refunded_cents"] / 100, 2),
+                "platform_absorbed_customer_charge_usd": round(
+                    settlement["absorbed_customer_charge_cents"] / 100, 2
+                ),
+            },
+        )
         self._set_stage(repo, job, "render", "running")
         output_versions: list[dict[str, Any]] = []
         duration_seconds = int(job.data.get("target_duration_seconds", 30))

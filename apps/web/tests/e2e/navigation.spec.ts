@@ -95,7 +95,7 @@ test('registration reports a transactional email failure honestly', async ({ pag
   await expect(page.getByRole('heading', { name: 'Check your email' })).toHaveCount(0)
 })
 
-test('social connection buttons start the provider authorization page and export is not a connector', async ({ page }, testInfo) => {
+test('social connection buttons start the provider authorization page and export is not a connector', async ({ page }) => {
   await registerThroughUi(page, 'Social OAuth')
   let oauthStarted = false
   await page.route('**/v1/projects/*/connections/tiktok/authorize', async (route) => {
@@ -112,12 +112,10 @@ test('social connection buttons start the provider authorization page and export
   await page.goto('/connections')
   await expect(page.getByRole('heading', { name: 'Export' })).toHaveCount(0)
   const tiktok = page.locator('.connection-card').filter({ hasText: 'TikTok' })
-  if (testInfo.project.name.includes('mobile')) {
-    await expect(tiktok.getByRole('button', { name: 'Connect' })).toBeAttached()
-    return
-  }
-  const [popup, oauth] = await Promise.all([
-    page.waitForEvent('popup'),
+  await page.evaluate(() => {
+    window.open = () => null
+  })
+  const [oauth] = await Promise.all([
     page.waitForResponse(response => (
       response.url().includes('/connections/tiktok/authorize') && response.request().method() === 'POST'
     )),
@@ -125,5 +123,5 @@ test('social connection buttons start the provider authorization page and export
   ])
   expect(oauth.status()).toBe(200)
   expect(oauthStarted).toBe(true)
-  await expect(popup).toHaveURL(/tiktok\.com\/v2\/auth\/authorize/)
+  await expect(page).toHaveURL(/tiktok\.com\/v2\/auth\/authorize/)
 })

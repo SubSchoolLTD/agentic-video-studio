@@ -38,9 +38,13 @@ locals {
     "paypal-client-id",
     "paypal-secret",
     "jwt-secret",
+    "instagram-app-id",
+    "instagram-app-secret",
     "sendpulse-id",
     "sendpulse-secret",
     "secret-encryption-key",
+    "tiktok-client-key",
+    "tiktok-client-secret",
     "webhook-signing-secret",
     "youtube-client-id",
     "youtube-client-secret",
@@ -86,6 +90,9 @@ locals {
     GOOGLE_GENAI_USE_VERTEXAI      = "true"
     YOUTUBE_REDIRECT_URI           = "${var.app_base_url}/v1/connections/youtube/callback"
     YOUTUBE_REFRESH_TOKEN_SECRET   = "youtube-refresh-token"
+    INSTAGRAM_REDIRECT_URI         = "${var.app_base_url}/v1/connections/instagram/callback"
+    INSTAGRAM_GRAPH_VERSION        = "v24.0"
+    TIKTOK_REDIRECT_URI            = "${var.app_base_url}/v1/connections/tiktok/callback"
     STORAGE_ROOT                   = "/tmp/avs-media"
     CLICKHOUSE_USER                = "avs"
     GRAFANA_URL                    = var.deploy_runtime_services ? google_cloud_run_v2_service.grafana[0].uri : ""
@@ -100,9 +107,13 @@ locals {
     PAYPAL_CLIENT_ID       = "paypal-client-id"
     PAYPAL_SECRET          = "paypal-secret"
     JWT_SECRET             = "jwt-secret"
+    INSTAGRAM_APP_ID        = "instagram-app-id"
+    INSTAGRAM_APP_SECRET    = "instagram-app-secret"
     SENDPULSE_ID           = "sendpulse-id"
     SENDPULSE_SECRET       = "sendpulse-secret"
     SECRET_ENCRYPTION_KEY  = "secret-encryption-key"
+    TIKTOK_CLIENT_KEY      = "tiktok-client-key"
+    TIKTOK_CLIENT_SECRET   = "tiktok-client-secret"
     WEBHOOK_SIGNING_SECRET = "webhook-signing-secret"
     YOUTUBE_CLIENT_ID      = "youtube-client-id"
     YOUTUBE_CLIENT_SECRET  = "youtube-client-secret"

@@ -151,14 +151,26 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
         headers=headers(admin),
         json={
             "code": f"TEST-{uuid4().hex[:8]}",
-            "kind": "topup_bonus",
-            "bonus_cents": 100,
-            "bonus_percent": 10,
+            "amount_cents": 220,
             "max_redemptions": 1,
         },
     )
     assert promo.status_code == 201, promo.text
     promo_code = promo.json()["code"]
+    redeemed = jwt_client.post(
+        "/v1/billing/promo-codes/redeem",
+        headers=headers(customer),
+        json={"code": promo_code},
+    )
+    assert redeemed.status_code == 200, redeemed.text
+    assert redeemed.json()["credited_usd"] == 2.2
+    assert redeemed.json()["balance_usd"] == 2.2
+    repeated_redemption = jwt_client.post(
+        "/v1/billing/promo-codes/redeem",
+        headers=headers(customer),
+        json={"code": promo_code},
+    )
+    assert repeated_redemption.status_code == 409
 
     order_id = f"PAYPAL-{uuid4().hex[:12]}"
     monkeypatch.setattr(
@@ -180,11 +192,10 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     created_topup = jwt_client.post(
         "/v1/billing/topups/paypal",
         headers=headers(customer),
-        json={"amount_usd": "12.00", "promo_code": promo_code},
+        json={"amount_usd": "12.00"},
     )
     assert created_topup.status_code == 201, created_topup.text
     assert created_topup.json()["amount_usd"] == 12
-    assert created_topup.json()["bonus_usd"] == 2.2
     captured = jwt_client.post(
         "/v1/billing/topups/paypal/capture",
         headers=headers(customer),
@@ -195,7 +206,7 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     )
     assert captured.status_code == 200, captured.text
     assert captured.json()["balance_cents"] == 1_420
-    assert captured.json()["credited_usd"] == 14.2
+    assert captured.json()["credited_usd"] == 12
     repeated_capture = jwt_client.post(
         "/v1/billing/topups/paypal/capture",
         headers=headers(customer),

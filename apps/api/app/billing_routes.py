@@ -6,21 +6,19 @@ from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .billing import (
     add_ledger_entry,
     dollars,
-    ensure_promo_available,
     ensure_wallet,
-    promo_bonus_cents,
-    promo_for_topup,
+    promo_for_redemption,
 )
 from .config import Settings, get_settings
 from .database import get_db
-from .models import CreditLedger, PayPalTopup, PriceRule, PromoCode, PromoRedemption
+from .models import CreditLedger, PayPalTopup, PriceRule, PromoRedemption
 from .paypal import PayPalClient, PayPalError, PayPalOrderState
 from .security import Principal, get_principal
 
@@ -29,8 +27,9 @@ logger = logging.getLogger("avs.billing")
 
 
 class TopupCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     amount_usd: Decimal = Field(ge=Decimal("12.00"), le=Decimal("100000.00"))
-    promo_code: str | None = Field(default=None, min_length=3, max_length=64)
 
     @field_validator("amount_usd")
     @classmethod
@@ -42,8 +41,16 @@ class TopupCreateRequest(BaseModel):
 
 
 class TopupCaptureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     topup_id: str = Field(min_length=8, max_length=64)
     paypal_order_id: str = Field(min_length=8, max_length=64)
+
+
+class PromoRedeemRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=3, max_length=64)
 
 
 def _price(rule: PriceRule) -> dict[str, object]:
@@ -140,7 +147,6 @@ def topups(
             {
                 "id": item.id,
                 "amount_usd": dollars(item.amount_cents),
-                "bonus_usd": dollars(item.bonus_cents),
                 "status": item.status,
                 "paypal_order_id": item.paypal_order_id,
                 "captured_at": item.captured_at.isoformat() if item.captured_at else None,
@@ -162,18 +168,13 @@ def create_paypal_topup(
     minimum_cents = int(settings.paypal_min_topup_usd) * 100
     if amount_cents < minimum_cents:
         raise HTTPException(422, f"Minimum top-up is ${settings.paypal_min_topup_usd}")
-    promo = None
-    bonus_cents = 0
-    if payload.promo_code:
-        promo = promo_for_topup(session, raw_code=payload.promo_code, user_id=principal.actor_id)
-        bonus_cents = promo_bonus_cents(promo, amount_cents)
     topup = PayPalTopup(
         id=f"top_{secrets.token_hex(12)}",
         organization_id=principal.organization_id,
         user_id=principal.actor_id,
         amount_cents=amount_cents,
-        bonus_cents=bonus_cents,
-        promo_code_id=promo.id if promo else None,
+        bonus_cents=0,
+        promo_code_id=None,
         currency="USD",
         status="creating",
     )
@@ -201,8 +202,7 @@ def create_paypal_topup(
         "paypal_order_id": order_id,
         "approval_url": approval_url,
         "amount_usd": dollars(amount_cents),
-        "bonus_usd": dollars(bonus_cents),
-        "total_credit_usd": dollars(amount_cents + bonus_cents),
+        "total_credit_usd": dollars(amount_cents),
     }
 
 
@@ -218,7 +218,7 @@ def _finalize_topup(
             "status": "captured",
             "balance_cents": int(wallet.balance_cents),
             "balance_usd": dollars(wallet.balance_cents),
-            "credited_usd": dollars(topup.amount_cents + topup.bonus_cents),
+            "credited_usd": dollars(topup.amount_cents),
         }
     if state.status != "COMPLETED" or not state.capture_id:
         raise HTTPException(409, "PayPal order has not completed")
@@ -228,27 +228,6 @@ def _finalize_topup(
         session.add(topup)
         session.commit()
         raise HTTPException(409, "PayPal payment amount does not match this top-up")
-
-    bonus_cents = int(topup.bonus_cents)
-    promo = None
-    promo_failure: str | None = None
-    if topup.promo_code_id:
-        promo = session.scalar(
-            select(PromoCode).where(PromoCode.id == topup.promo_code_id).with_for_update()
-        )
-        if not promo:
-            bonus_cents = 0
-        else:
-            try:
-                ensure_promo_available(session, promo=promo, user_id=topup.user_id)
-            except HTTPException as exc:
-                # A completed payment must always credit its principal even if a promo became
-                # unavailable while the buyer was on PayPal.
-                promo_failure = str(exc.detail)
-                promo = None
-                bonus_cents = 0
-            else:
-                bonus_cents = promo_bonus_cents(promo, int(topup.amount_cents))
 
     add_ledger_entry(
         session,
@@ -262,37 +241,11 @@ def _finalize_topup(
         metadata={
             "paypal_order_id": topup.paypal_order_id,
             "paypal_capture_id": state.capture_id,
-            "promo_failure": promo_failure,
         },
         commit=False,
     )
-    if promo and bonus_cents:
-        add_ledger_entry(
-            session,
-            organization_id=topup.organization_id,
-            user_id=topup.user_id,
-            amount_cents=bonus_cents,
-            event_type="promo_bonus",
-            reference_id=topup.id,
-            description="Top-up promo bonus",
-            metadata={"promo_code_id": promo.id},
-            commit=False,
-        )
-        promo.redemption_count += 1
-        session.add_all(
-            [
-                promo,
-                PromoRedemption(
-                    id=f"red_{secrets.token_hex(12)}",
-                    promo_code_id=promo.id,
-                    user_id=topup.user_id,
-                    organization_id=topup.organization_id,
-                    topup_id=topup.id,
-                    bonus_cents=bonus_cents,
-                ),
-            ]
-        )
-    topup.bonus_cents = bonus_cents
+    topup.bonus_cents = 0
+    topup.promo_code_id = None
     topup.paypal_capture_id = state.capture_id
     topup.status = "captured"
     topup.captured_at = datetime.now(UTC)
@@ -304,8 +257,54 @@ def _finalize_topup(
         "balance_cents": int(wallet.balance_cents),
         "balance_usd": dollars(wallet.balance_cents),
         "amount_usd": dollars(topup.amount_cents),
-        "bonus_usd": dollars(bonus_cents),
-        "credited_usd": dollars(topup.amount_cents + bonus_cents),
+        "credited_usd": dollars(topup.amount_cents),
+    }
+
+
+@router.post("/promo-codes/redeem")
+def redeem_promo_code(
+    payload: PromoRedeemRequest,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, object]:
+    promo = promo_for_redemption(
+        session,
+        raw_code=payload.code,
+        user_id=principal.actor_id,
+        lock=True,
+    )
+    amount_cents = int(promo.bonus_cents)
+    if amount_cents <= 0:
+        raise HTTPException(409, "Promo code has no balance credit")
+    redemption = PromoRedemption(
+        id=f"red_{secrets.token_hex(12)}",
+        promo_code_id=promo.id,
+        user_id=principal.actor_id,
+        organization_id=principal.organization_id,
+        topup_id=None,
+        bonus_cents=amount_cents,
+    )
+    session.add(redemption)
+    session.flush()
+    promo.redemption_count += 1
+    session.add(promo)
+    add_ledger_entry(
+        session,
+        organization_id=principal.organization_id,
+        user_id=principal.actor_id,
+        amount_cents=amount_cents,
+        event_type="promo_credit",
+        reference_id=redemption.id,
+        description="Promo code balance credit",
+        metadata={"promo_code_id": promo.id},
+        commit=False,
+    )
+    session.commit()
+    wallet = ensure_wallet(session, principal.organization_id)
+    return {
+        "status": "redeemed",
+        "credited_usd": dollars(amount_cents),
+        "balance_usd": dollars(wallet.balance_cents),
     }
 
 

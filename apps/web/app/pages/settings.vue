@@ -4,7 +4,11 @@ import { Check, CircleDollarSign, ImageIcon, Pause, Pencil, Play, Save, Settings
 type SettingsTab = 'general' | 'brand' | 'automation' | 'budget' | 'compliance'
 const { api, apiBase, projectId } = useApi()
 const { show } = useToast()
-const activeTab = ref<SettingsTab>('general')
+const route = useRoute()
+const router = useRouter()
+const validTabs: SettingsTab[] = ['general', 'brand', 'automation', 'budget', 'compliance']
+const requestedTab = String(route.query.tab || '') as SettingsTab
+const activeTab = ref<SettingsTab>(validTabs.includes(requestedTab) ? requestedTab : 'general')
 const editing = ref(false)
 const saving = ref(false)
 const uploadingLogo = ref(false)
@@ -17,6 +21,38 @@ const tabs: { key: SettingsTab, label: string }[] = [
   { key: 'budget', label: 'Budget & limits' },
   { key: 'compliance', label: 'Compliance' },
 ]
+const help = {
+  projectName: 'Used in research prompts, generated scripts, project labels and publication metadata.',
+  timezone: 'Controls how publishing windows, blackout periods and schedules are interpreted.',
+  brand: 'Guides scripts, visuals and calls to action. Changing it affects future generations, not completed videos.',
+  automation: 'Manual never advances work automatically; assisted prepares work for review; auto-safe may publish only after every gate passes; draft-only stops before external publication.',
+  backlog: 'Research may create new ready ideas until this target is reached. A higher value increases research activity and potential spend.',
+  recency: 'Sets how old research sources may be before they are treated as stale for new ideas.',
+  publicationCaps: 'Hard limits for successful and pending publication attempts. New attempts are blocked when a cap is reached.',
+  gap: 'Prevents two publications from being scheduled too close together.',
+  window: 'Automatic publication is allowed only inside this local-time window.',
+  quiet: 'A one-off blackout interval. No external publication may start during it.',
+  pause: 'Immediately blocks every external publication attempt while leaving research and generation available.',
+  budget: 'Hard monthly provider-cost guard. New paid AI operations are blocked before they would exceed this amount; it does not add money to the wallet.',
+  manual: 'Readiness score at or above this value may enter the human review queue. Lower-scoring work stays blocked for revision.',
+  autopublish: 'Readiness score required for automatic publishing. Compliance, evidence, cadence, connection and budget gates still apply.',
+  confidence: 'Minimum confidence required for evidence-backed claims. Lower-confidence claims are blocked or routed for review.',
+  claims: 'Allowed claims guide generation; prohibited claims are rejected during compliance review.',
+  sourceClaims: 'Any matching claim must be linked to evidence before the content can pass review.',
+  disclosures: 'Required disclosure text is added to publication plans whenever applicable.',
+  risk: 'Topics listed here receive stricter review and cannot silently pass through automation.',
+  domains: 'Sources from these domains are preferred during evidence collection and validation.',
+}
+
+function selectTab(tab: SettingsTab) {
+  activeTab.value = tab
+  void router.replace({ query: { ...route.query, tab } })
+}
+
+watch(() => route.query.tab, (value) => {
+  const tab = String(value || '') as SettingsTab
+  if (validTabs.includes(tab)) activeTab.value = tab
+})
 
 const { data, refresh } = await useAsyncData('settings', async () => {
   const [project, brand] = await Promise.all([
@@ -116,12 +152,12 @@ async function toggleProject() {
     </UiPageHeader>
 
     <div class="settings-grid">
-      <UiAppCard class="settings-nav"><strong>Project</strong><button v-for="tab in tabs" :key="tab.key" :class="{ active: activeTab === tab.key }" :data-testid="`settings-tab-${tab.key}`" @click="activeTab = tab.key">{{ tab.label }}</button></UiAppCard>
+      <UiAppCard class="settings-nav"><strong>Project</strong><button v-for="tab in tabs" :key="tab.key" :class="{ active: activeTab === tab.key }" :data-testid="`settings-tab-${tab.key}`" @click="selectTab(tab.key)">{{ tab.label }}</button></UiAppCard>
       <div class="settings-content">
         <UiAppCard v-if="activeTab === 'general'">
           <div class="section-heading"><div><h2>General</h2><p>Shared identity and locale for every agent and adapter.</p></div><UiStatusBadge :status="data.project.status" /></div>
-          <div v-if="editing" class="form-grid"><div class="field"><label for="settings-project-name">Project name</label><input id="settings-project-name" v-model="projectForm.name" /></div><div class="field"><label for="settings-timezone">Timezone</label><input id="settings-timezone" v-model="projectForm.timezone" /></div></div>
-          <dl v-else class="settings-values"><div><dt>Project name</dt><dd>{{ projectForm.name }}</dd></div><div><dt>Timezone</dt><dd>{{ projectForm.timezone }}</dd></div><div><dt>Status</dt><dd>{{ data.project.status }}</dd></div><div><dt>Brand profile</dt><dd>Confirmed version {{ data.brand.version }}</dd></div></dl>
+          <div v-if="editing" class="form-grid"><div class="field"><label for="settings-project-name">Project name <UiSettingHelp :text="help.projectName" /></label><input id="settings-project-name" v-model="projectForm.name" /></div><div class="field"><label for="settings-timezone">Timezone <UiSettingHelp :text="help.timezone" /></label><input id="settings-timezone" v-model="projectForm.timezone" /></div></div>
+          <dl v-else class="settings-values"><div><dt>Project name <UiSettingHelp :text="help.projectName" /></dt><dd>{{ projectForm.name }}</dd></div><div><dt>Timezone <UiSettingHelp :text="help.timezone" /></dt><dd>{{ projectForm.timezone }}</dd></div><div><dt>Status</dt><dd>{{ data.project.status }}</dd></div><div><dt>Brand profile <UiSettingHelp :text="help.brand" /></dt><dd>Confirmed version {{ data.brand.version }}</dd></div></dl>
         </UiAppCard>
 
         <UiAppCard v-else-if="activeTab === 'brand'">
@@ -132,21 +168,21 @@ async function toggleProject() {
 
         <UiAppCard v-else-if="activeTab === 'automation'">
           <div class="section-heading"><div><h2>Automation</h2><p>Research backlog, publishing cadence and emergency controls.</p></div><Settings2 :size="18" /></div>
-          <div v-if="editing" class="form-grid"><div class="field field--full"><label>Automation mode</label><select v-model="projectForm.automation_mode"><option value="manual">Manual</option><option value="assisted">Assisted</option><option value="auto_safe">Auto-safe</option><option value="draft_only">Draft only</option></select></div><div class="field"><label>Ready-content backlog target</label><input v-model.number="projectForm.backlog_target" type="number" min="0" /></div><div class="field"><label>Research recency, days</label><input v-model.number="projectForm.research_recency_days" type="number" min="1" max="3650" /></div><div class="field"><label>Daily publication cap</label><input v-model.number="projectForm.daily_cap" type="number" min="0" /></div><div class="field"><label>Weekly publication cap</label><input v-model.number="projectForm.weekly_cap" type="number" min="0" /></div><div class="field"><label>Minimum gap, hours</label><input v-model.number="projectForm.minimum_gap_hours" type="number" min="0" /></div><div class="field"><label>Allowed start / end</label><div class="inline-inputs"><input v-model="projectForm.allowed_start" type="time" /><input v-model="projectForm.allowed_end" type="time" /></div></div><div class="field"><label>Quiet period start</label><input v-model="projectForm.quiet_start" type="datetime-local" /></div><div class="field"><label>Quiet period end</label><input v-model="projectForm.quiet_end" type="datetime-local" /></div><label class="checkbox-row field--full"><input v-model="projectForm.pause_all_publications" type="checkbox" /> Emergency pause for every publication attempt</label></div>
-          <dl v-else class="settings-values"><div><dt>Mode</dt><dd>{{ formatAutomation(projectForm.automation_mode) }}</dd></div><div><dt>Research backlog</dt><dd>{{ projectForm.backlog_target }} ready ideas</dd></div><div><dt>Research recency</dt><dd>{{ projectForm.research_recency_days }} days</dd></div><div><dt>Publication limits</dt><dd>{{ projectForm.daily_cap }}/day · {{ projectForm.weekly_cap }}/week</dd></div><div><dt>Minimum gap</dt><dd>{{ projectForm.minimum_gap_hours }} hours</dd></div><div><dt>Allowed window</dt><dd>{{ projectForm.allowed_start }}–{{ projectForm.allowed_end }}</dd></div><div><dt>Emergency publication pause</dt><dd>{{ projectForm.pause_all_publications ? 'Enabled' : 'Off' }}</dd></div></dl>
+          <div v-if="editing" class="form-grid"><div class="field field--full"><label>Automation mode <UiSettingHelp :text="help.automation" /></label><select v-model="projectForm.automation_mode"><option value="manual">Manual</option><option value="assisted">Assisted</option><option value="auto_safe">Auto-safe</option><option value="draft_only">Draft only</option></select></div><div class="field"><label>Ready-content backlog target <UiSettingHelp :text="help.backlog" /></label><input v-model.number="projectForm.backlog_target" type="number" min="0" /></div><div class="field"><label>Research recency, days <UiSettingHelp :text="help.recency" /></label><input v-model.number="projectForm.research_recency_days" type="number" min="1" max="3650" /></div><div class="field"><label>Daily publication cap <UiSettingHelp :text="help.publicationCaps" /></label><input v-model.number="projectForm.daily_cap" type="number" min="0" /></div><div class="field"><label>Weekly publication cap <UiSettingHelp :text="help.publicationCaps" /></label><input v-model.number="projectForm.weekly_cap" type="number" min="0" /></div><div class="field"><label>Minimum gap, hours <UiSettingHelp :text="help.gap" /></label><input v-model.number="projectForm.minimum_gap_hours" type="number" min="0" /></div><div class="field"><label>Allowed start / end <UiSettingHelp :text="help.window" /></label><div class="inline-inputs"><input v-model="projectForm.allowed_start" type="time" /><input v-model="projectForm.allowed_end" type="time" /></div></div><div class="field"><label>Quiet period start <UiSettingHelp :text="help.quiet" /></label><input v-model="projectForm.quiet_start" type="datetime-local" /></div><div class="field"><label>Quiet period end <UiSettingHelp :text="help.quiet" /></label><input v-model="projectForm.quiet_end" type="datetime-local" /></div><label class="checkbox-row field--full"><input v-model="projectForm.pause_all_publications" type="checkbox" /> Emergency pause for every publication attempt <UiSettingHelp :text="help.pause" /></label></div>
+          <dl v-else class="settings-values"><div><dt>Mode <UiSettingHelp :text="help.automation" /></dt><dd>{{ formatAutomation(projectForm.automation_mode) }}</dd></div><div><dt>Research backlog <UiSettingHelp :text="help.backlog" /></dt><dd>{{ projectForm.backlog_target }} ready ideas</dd></div><div><dt>Research recency <UiSettingHelp :text="help.recency" /></dt><dd>{{ projectForm.research_recency_days }} days</dd></div><div><dt>Publication limits <UiSettingHelp :text="help.publicationCaps" /></dt><dd>{{ projectForm.daily_cap }}/day · {{ projectForm.weekly_cap }}/week</dd></div><div><dt>Minimum gap <UiSettingHelp :text="help.gap" /></dt><dd>{{ projectForm.minimum_gap_hours }} hours</dd></div><div><dt>Allowed window <UiSettingHelp :text="help.window" /></dt><dd>{{ projectForm.allowed_start }}–{{ projectForm.allowed_end }}</dd></div><div><dt>Emergency publication pause <UiSettingHelp :text="help.pause" /></dt><dd>{{ projectForm.pause_all_publications ? 'Enabled' : 'Off' }}</dd></div></dl>
         </UiAppCard>
 
         <UiAppCard v-else-if="activeTab === 'budget'">
           <div class="section-heading"><div><h2>Budget & limits</h2><p>Cost and decision thresholds that every automatic action must respect.</p></div><CircleDollarSign :size="18" /></div>
-          <div v-if="editing" class="form-grid"><div class="field"><label>Monthly budget, USD</label><input v-model.number="projectForm.monthly_budget" type="number" min="0" /></div><div class="field"><label>Manual-review readiness</label><input v-model.number="projectForm.readiness_manual" type="number" min="70" max="100" /></div><div class="field"><label>Auto-publish readiness</label><input v-model.number="projectForm.readiness_autopublish" type="number" min="85" max="100" /></div><div class="field"><label>Minimum evidence confidence</label><input v-model.number="projectForm.confidence_threshold" type="number" min="0.6" max="1" step="0.05" /></div></div>
-          <dl v-else class="settings-values"><div><dt>Monthly provider budget</dt><dd>${{ projectForm.monthly_budget }}</dd></div><div><dt>Manual review threshold</dt><dd>{{ projectForm.readiness_manual }}/100</dd></div><div><dt>Auto-publish threshold</dt><dd>{{ projectForm.readiness_autopublish }}/100</dd></div><div><dt>Evidence confidence</dt><dd>{{ Math.round(projectForm.confidence_threshold * 100) }}%</dd></div></dl>
-          <div class="protected-note"><Check :size="15" /><span>Admin model pricing controls token charges; this project budget remains the hard provider-spend guard.</span></div>
+          <div v-if="editing" class="form-grid"><div class="field"><label>Monthly budget, USD <UiSettingHelp :text="help.budget" /></label><input v-model.number="projectForm.monthly_budget" type="number" min="0" /></div><div class="field"><label>Manual-review readiness <UiSettingHelp :text="help.manual" /></label><input v-model.number="projectForm.readiness_manual" type="number" min="70" max="100" /></div><div class="field"><label>Auto-publish readiness <UiSettingHelp :text="help.autopublish" /></label><input v-model.number="projectForm.readiness_autopublish" type="number" min="85" max="100" /></div><div class="field"><label>Minimum evidence confidence <UiSettingHelp :text="help.confidence" /></label><input v-model.number="projectForm.confidence_threshold" type="number" min="0.6" max="1" step="0.05" /></div></div>
+          <dl v-else class="settings-values"><div><dt>Monthly provider budget <UiSettingHelp :text="help.budget" /></dt><dd>${{ projectForm.monthly_budget }}</dd></div><div><dt>Manual review threshold <UiSettingHelp :text="help.manual" /></dt><dd>{{ projectForm.readiness_manual }}/100</dd></div><div><dt>Auto-publish threshold <UiSettingHelp :text="help.autopublish" /></dt><dd>{{ projectForm.readiness_autopublish }}/100</dd></div><div><dt>Evidence confidence <UiSettingHelp :text="help.confidence" /></dt><dd>{{ Math.round(projectForm.confidence_threshold * 100) }}%</dd></div></dl>
+          <div class="protected-note"><Check :size="15" /><span>Admin model pricing controls dollar charges; this project budget remains the hard provider-spend guard.</span></div>
         </UiAppCard>
 
         <UiAppCard v-else>
           <div class="section-heading"><div><h2>Compliance</h2><p>Claims, disclosures and trusted sources applied before media generation.</p></div><ShieldCheck :size="18" /></div>
-          <div v-if="editing" class="form-grid"><div class="field"><label>Allowed claims · one per line</label><textarea v-model="brandForm.allowedClaims" /></div><div class="field"><label>Prohibited claims · one per line</label><textarea v-model="brandForm.prohibitedClaims" /></div><div class="field field--full"><label>Claims requiring a source · one per line</label><textarea v-model="brandForm.requireSourceClaims" /></div><div class="field"><label>Mandatory disclosures</label><textarea v-model="brandForm.mandatoryDisclosures" /></div><div class="field"><label>High-risk topics</label><textarea v-model="brandForm.highRiskTopics" /></div><div class="field field--full"><label>Trusted domains · one per line</label><textarea v-model="brandForm.trustedDomains" /></div></div>
-          <dl v-else class="settings-values settings-values--stacked"><div><dt>Allowed claims</dt><dd>{{ displayLines(brandForm.allowedClaims) }}</dd></div><div><dt>Prohibited claims</dt><dd>{{ displayLines(brandForm.prohibitedClaims) }}</dd></div><div><dt>Source-required claims</dt><dd>{{ displayLines(brandForm.requireSourceClaims) }}</dd></div><div><dt>Mandatory disclosures</dt><dd>{{ displayLines(brandForm.mandatoryDisclosures) }}</dd></div><div><dt>High-risk topics</dt><dd>{{ displayLines(brandForm.highRiskTopics) }}</dd></div><div><dt>Trusted domains</dt><dd>{{ displayLines(brandForm.trustedDomains) }}</dd></div></dl>
+          <div v-if="editing" class="form-grid"><div class="field"><label>Allowed claims · one per line <UiSettingHelp :text="help.claims" /></label><textarea v-model="brandForm.allowedClaims" /></div><div class="field"><label>Prohibited claims · one per line <UiSettingHelp :text="help.claims" /></label><textarea v-model="brandForm.prohibitedClaims" /></div><div class="field field--full"><label>Claims requiring a source · one per line <UiSettingHelp :text="help.sourceClaims" /></label><textarea v-model="brandForm.requireSourceClaims" /></div><div class="field"><label>Mandatory disclosures <UiSettingHelp :text="help.disclosures" /></label><textarea v-model="brandForm.mandatoryDisclosures" /></div><div class="field"><label>High-risk topics <UiSettingHelp :text="help.risk" /></label><textarea v-model="brandForm.highRiskTopics" /></div><div class="field field--full"><label>Trusted domains · one per line <UiSettingHelp :text="help.domains" /></label><textarea v-model="brandForm.trustedDomains" /></div></div>
+          <dl v-else class="settings-values settings-values--stacked"><div><dt>Allowed claims <UiSettingHelp :text="help.claims" /></dt><dd>{{ displayLines(brandForm.allowedClaims) }}</dd></div><div><dt>Prohibited claims <UiSettingHelp :text="help.claims" /></dt><dd>{{ displayLines(brandForm.prohibitedClaims) }}</dd></div><div><dt>Source-required claims <UiSettingHelp :text="help.sourceClaims" /></dt><dd>{{ displayLines(brandForm.requireSourceClaims) }}</dd></div><div><dt>Mandatory disclosures <UiSettingHelp :text="help.disclosures" /></dt><dd>{{ displayLines(brandForm.mandatoryDisclosures) }}</dd></div><div><dt>High-risk topics <UiSettingHelp :text="help.risk" /></dt><dd>{{ displayLines(brandForm.highRiskTopics) }}</dd></div><div><dt>Trusted domains <UiSettingHelp :text="help.domains" /></dt><dd>{{ displayLines(brandForm.trustedDomains) }}</dd></div></dl>
         </UiAppCard>
       </div>
     </div>

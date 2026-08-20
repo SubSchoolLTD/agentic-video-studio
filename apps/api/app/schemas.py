@@ -203,7 +203,15 @@ class PublicationCreate(BaseModel):
     hashtags: list[str] = Field(default_factory=list)
     scheduled_at: datetime | None = None
     timezone: str = "UTC"
-    privacy: Literal["private", "unlisted", "public"] | None = None
+    privacy: Literal[
+        "private",
+        "unlisted",
+        "public",
+        "PUBLIC_TO_EVERYONE",
+        "MUTUAL_FOLLOW_FRIENDS",
+        "FOLLOWER_OF_CREATOR",
+        "SELF_ONLY",
+    ] | None = None
     commercial_content: bool = False
     synthetic_media_disclosure: bool = True
     made_for_kids: bool = False

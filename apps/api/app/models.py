@@ -173,7 +173,7 @@ class PromoCode(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     code_prefix: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="topup_bonus")
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="balance_credit")
     bonus_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     bonus_percent: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False, default=0)
     max_redemptions: Mapped[int | None] = mapped_column(Integer, nullable=True)

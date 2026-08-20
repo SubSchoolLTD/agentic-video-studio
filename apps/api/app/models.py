@@ -130,7 +130,7 @@ class Wallet(Base):
     __tablename__ = "wallets"
 
     organization_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    balance_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    balance_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
 
@@ -141,7 +141,7 @@ class CreditLedger(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     organization_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    amount_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     event_type: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
     feature_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
     reference_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -160,8 +160,8 @@ class PriceRule(Base):
     provider: Mapped[str] = mapped_column(String(96), nullable=False, default="internal")
     integration: Mapped[str] = mapped_column(String(160), nullable=False, default="Framewise")
     model_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    provider_cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
-    charge_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_cost_per_unit_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    charge_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     margin_percent: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
@@ -173,9 +173,9 @@ class PromoCode(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     code_prefix: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    credit_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    subscription_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="topup_bonus")
+    bonus_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bonus_percent: Mapped[float] = mapped_column(Numeric(8, 2), nullable=False, default=0)
     max_redemptions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     redemption_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -192,15 +192,28 @@ class PromoRedemption(Base):
     promo_code_id: Mapped[str] = mapped_column(ForeignKey("promo_codes.id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     organization_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    topup_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    bonus_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
-class Subscription(Base):
-    __tablename__ = "subscriptions"
+class PayPalTopup(Base):
+    __tablename__ = "paypal_topups"
+    __table_args__ = (Index("ix_paypal_topups_org_created", "organization_id", "created_at"),)
 
-    organization_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    plan: Mapped[str] = mapped_column(String(48), nullable=False, default="free")
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
-    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    paypal_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    paypal_capture_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bonus_cents: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    promo_code_id: Mapped[str | None] = mapped_column(
+        ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="creating", index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)

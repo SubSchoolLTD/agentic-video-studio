@@ -33,7 +33,7 @@ async function submit() {
     <section class="auth-story">
       <div class="auth-brand"><span><Clapperboard :size="22" /></span><strong>Framewise</strong></div>
       <div><span class="auth-kicker">A workspace for your brand</span><h1>From a website to a production system.</h1><p>We use your project details to build a private brand profile. Nothing from another customer is visible in your workspace.</p></div>
-      <ul class="auth-benefits"><li><ShieldCheck :size="17" /> Tenant-isolated projects and media</li><li><CheckCircle2 :size="17" /> 1,000 welcome AI tokens after verification</li><li><CheckCircle2 :size="17" /> Real Parallel and Google AI pipeline</li></ul>
+      <ul class="auth-benefits"><li><ShieldCheck :size="17" /> Tenant-isolated projects and media</li><li><CheckCircle2 :size="17" /> No subscription · top up from $12 when needed</li><li><CheckCircle2 :size="17" /> Real Parallel and Google AI pipeline</li></ul>
     </section>
     <section class="auth-panel">
       <div v-if="complete" class="auth-card auth-card--success">

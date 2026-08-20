@@ -40,8 +40,13 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str = ""
     bootstrap_admin_name: str = "Maksim Mamchur"
     seed_demo_data: bool = False
-    signup_credit_tokens: int = 1_000
     test_support_secret: str = "test-support-only"
+
+    paypal_env: str = "sandbox"
+    paypal_client_id: str = ""
+    paypal_secret: str = ""
+    paypal_webhook_id: str = ""
+    paypal_min_topup_usd: int = 12
 
     google_cloud_project: str = ""
     google_cloud_location: str = "us-central1"
@@ -126,6 +131,12 @@ class Settings(BaseSettings):
                 missing.append("SENDPULSE_ID")
             if not self.sendpulse_secret:
                 missing.append("SENDPULSE_SECRET")
+            if self.paypal_env != "live":
+                missing.append("PAYPAL_ENV=live")
+            if not self.paypal_client_id:
+                missing.append("PAYPAL_CLIENT_ID")
+            if not self.paypal_secret:
+                missing.append("PAYPAL_SECRET")
             if missing:
                 raise RuntimeError(f"Production configuration is incomplete: {', '.join(missing)}")
 

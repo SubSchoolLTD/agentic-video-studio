@@ -13,6 +13,7 @@ from apps.api.app.database import SessionLocal
 from apps.api.app.email_service import test_token as outbox_token
 from apps.api.app.main import app
 from apps.api.app.models import Resource, User
+from apps.api.app.paypal import PayPalClient, PayPalOrderState
 
 
 @pytest.fixture
@@ -25,7 +26,8 @@ def jwt_client(client: TestClient):
             "jwt_secret": "test-secret-with-more-than-thirty-two-characters",
             "email_delivery_mode": "log",
             "email_min_resend_seconds": 0,
-            "signup_credit_tokens": 1_000,
+            "paypal_client_id": "test-paypal-client",
+            "paypal_secret": "test-paypal-secret",
         }
     )
     app.dependency_overrides[get_settings] = lambda: jwt_settings
@@ -121,7 +123,7 @@ def test_registration_login_refresh_reset_and_tenant_isolation(jwt_client: TestC
     ).status_code == 200
 
 
-def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
+def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, monkeypatch):
     admin = register_and_verify(jwt_client, "platform-admin")
     customer = register_and_verify(jwt_client, "customer")
     assert jwt_client.get("/v1/platform-admin/overview", headers=headers(customer)).status_code == 403
@@ -149,40 +151,108 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
         headers=headers(admin),
         json={
             "code": f"TEST-{uuid4().hex[:8]}",
-            "kind": "bundle",
-            "credit_tokens": 750,
-            "subscription_days": 30,
+            "kind": "topup_bonus",
+            "bonus_cents": 100,
+            "bonus_percent": 10,
             "max_redemptions": 1,
         },
     )
     assert promo.status_code == 201, promo.text
-    redeemed = jwt_client.post(
-        "/v1/billing/promo-codes/redeem",
-        headers=headers(customer),
-        json={"code": promo.json()["code"]},
-    )
-    assert redeemed.status_code == 200, redeemed.text
-    assert redeemed.json()["balance_tokens"] == 1_720
-    redemption_history = jwt_client.get("/v1/billing/promo-codes/redemptions", headers=headers(customer))
-    assert redemption_history.status_code == 200
-    assert redemption_history.json()["items"][0]["credit_tokens"] == 750
-    assert jwt_client.post(
-        "/v1/billing/promo-codes/redeem",
-        headers=headers(customer),
-        json={"code": promo.json()["code"]},
-    ).status_code in {409, 410}
+    promo_code = promo.json()["code"]
 
+    order_id = f"PAYPAL-{uuid4().hex[:12]}"
+    monkeypatch.setattr(
+        PayPalClient,
+        "create_order",
+        lambda self, **_: (order_id, f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"),
+    )
+    monkeypatch.setattr(
+        PayPalClient,
+        "capture_order",
+        lambda self, value: PayPalOrderState(value, "COMPLETED", "USD", 1_200, "CAPTURE-TEST", {}),
+    )
+    too_small = jwt_client.post(
+        "/v1/billing/topups/paypal",
+        headers=headers(customer),
+        json={"amount_usd": "11.99"},
+    )
+    assert too_small.status_code == 422
+    created_topup = jwt_client.post(
+        "/v1/billing/topups/paypal",
+        headers=headers(customer),
+        json={"amount_usd": "12.00", "promo_code": promo_code},
+    )
+    assert created_topup.status_code == 201, created_topup.text
+    assert created_topup.json()["amount_usd"] == 12
+    assert created_topup.json()["bonus_usd"] == 2.2
+    captured = jwt_client.post(
+        "/v1/billing/topups/paypal/capture",
+        headers=headers(customer),
+        json={
+            "topup_id": created_topup.json()["topup_id"],
+            "paypal_order_id": order_id,
+        },
+    )
+    assert captured.status_code == 200, captured.text
+    assert captured.json()["balance_cents"] == 1_420
+    assert captured.json()["credited_usd"] == 14.2
+    repeated_capture = jwt_client.post(
+        "/v1/billing/topups/paypal/capture",
+        headers=headers(customer),
+        json={
+            "topup_id": created_topup.json()["topup_id"],
+            "paypal_order_id": order_id,
+        },
+    )
+    assert repeated_capture.status_code == 200
+    assert repeated_capture.json()["balance_cents"] == 1_420
+
+    monkeypatch.setattr(jwt_client.app.state.workflow, "schedule", lambda _job_id: None)
     generation = jwt_client.post(
         f"/v1/projects/{customer['default_project_id']}/generation-jobs",
         headers=headers(customer),
-        json={"title": "A customer-owned production", "aspect_ratios": ["9:16"], "variants": 1},
+        json={
+            "title": "A customer-owned production",
+            "aspect_ratios": ["9:16"],
+            "variants": 1,
+            "max_cost_usd": 30,
+        },
     )
     assert generation.status_code == 202, generation.text
     summary = jwt_client.get("/v1/billing/summary", headers=headers(customer))
     assert summary.status_code == 200
-    assert summary.json()["balance_tokens"] == 1_220
+    assert summary.json()["balance_cents"] == 412
     ledger = jwt_client.get("/v1/billing/ledger", headers=headers(customer)).json()["items"]
-    assert any(item["feature_key"] == "video.generate" and item["amount_tokens"] == -500 for item in ledger)
+    assert any(item["feature_key"] == "video.generate" and item["amount_cents"] == -1_008 for item in ledger)
+
+    insufficient = jwt_client.post(
+        f"/v1/projects/{customer['default_project_id']}/generation-jobs",
+        headers=headers(customer),
+        json={"title": "One production too many", "aspect_ratios": ["9:16"], "max_cost_usd": 30},
+    )
+    assert insufficient.status_code == 402
+    assert insufficient.json()["error"] == {
+        "code": "insufficient_balance",
+        "message": "Not enough balance for this action",
+        "details": {
+            "required_cents": 1_008,
+            "available_cents": 412,
+            "shortfall_cents": 596,
+            "currency": "USD",
+        },
+        "request_id": insufficient.headers["X-Request-ID"],
+        "retryable": False,
+    }
+
+    with SessionLocal() as session:
+        customer_user = session.scalar(select(User).where(User.email == customer["email"]))
+        assert customer_user
+    topup = jwt_client.post(
+        f"/v1/platform-admin/users/{customer_user.id}/credits",
+        headers=headers(admin),
+        json={"amount_cents": 2_000, "deposited_usd": 20, "description": "Recorded customer payment"},
+    )
+    assert topup.status_code == 200
 
     # Native-audio UGC must use a tenant-owned reusable character and its own editable price rule.
     missing_character = jwt_client.post(
@@ -217,6 +287,7 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
             "character_id": character["id"],
             "aspect_ratios": ["9:16"],
             "variants": 1,
+            "max_cost_usd": 30,
         },
     )
     assert native_generation.status_code == 202, native_generation.text
@@ -229,21 +300,14 @@ def test_billing_promo_admin_and_usage_charge(jwt_client: TestClient):
     assert native_job["estimated_cost"]["basis"] == "video.generate_native_audio"
 
     # Provider spend is a cost, never a customer deposit. Only explicit paid/admin top-ups count as cash.
-    customer_user = None
     with SessionLocal() as session:
         customer_user = session.scalar(select(User).where(User.email == customer["email"]))
         assert customer_user
         customer_user.created_at = datetime.now(UTC) - timedelta(days=31)
         session.add(customer_user)
         session.commit()
-    topup = jwt_client.post(
-        f"/v1/platform-admin/users/{customer_user.id}/credits",
-        headers=headers(admin),
-        json={"amount_tokens": 100, "deposited_usd": 12.5, "description": "Recorded customer payment"},
-    )
-    assert topup.status_code == 200
     overview = jwt_client.get("/v1/platform-admin/overview", headers=headers(admin)).json()
-    assert overview["money"]["deposited_usd"] >= 12.5
+    assert overview["money"]["deposited_usd"] >= 32
     assert overview["money"]["provider_cost_usd"] > 0
     assert overview["retention"]["day_30"]["retained"] >= 1
     assert any(item["feature_key"] == "video.generate_native_audio" for item in overview["usage_by_feature"])
@@ -258,8 +322,8 @@ def test_public_pricing_exposes_customer_rates_without_internal_economics(jwt_cl
     response = jwt_client.get("/v1/billing/public-pricing")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["beta_monthly_usd"] == 0
-    assert payload["welcome_tokens"] == 1_000
+    assert payload["currency"] == "USD"
+    assert payload["minimum_topup_usd"] == 12
     assert {item["feature_key"] for item in payload["prices"]} == {
         "project.website_analysis",
         "research.run",
@@ -270,3 +334,4 @@ def test_public_pricing_exposes_customer_rates_without_internal_economics(jwt_cl
         "character.generate",
     }
     assert all("provider_cost_usd" not in item and "margin_percent" not in item for item in payload["prices"])
+    assert all("charge_cents" in item and "charge_usd" in item for item in payload["prices"])

@@ -35,6 +35,8 @@ locals {
     "google-api-key",
     "grafana-admin-password",
     "parallel-api-key",
+    "paypal-client-id",
+    "paypal-secret",
     "jwt-secret",
     "sendpulse-id",
     "sendpulse-secret",
@@ -63,6 +65,8 @@ locals {
     WEB_BASE_URL                   = var.web_base_url
     ALLOWED_ORIGINS                = join(",", concat([var.web_base_url], var.additional_web_origins))
     PROVIDER_MODE                  = "live"
+    PAYPAL_ENV                     = "live"
+    PAYPAL_MIN_TOPUP_USD           = "12"
     EMAIL_DELIVERY_MODE            = "sendpulse"
     EMAIL_FROM_NAME                = "Framewise"
     EMAIL_FROM_EMAIL               = "maksim@subschool.us"
@@ -93,6 +97,8 @@ locals {
     DATABASE_URL           = "database-url"
     GOOGLE_API_KEY         = "google-api-key"
     PARALLEL_API_KEY       = "parallel-api-key"
+    PAYPAL_CLIENT_ID       = "paypal-client-id"
+    PAYPAL_SECRET          = "paypal-secret"
     JWT_SECRET             = "jwt-secret"
     SENDPULSE_ID           = "sendpulse-id"
     SENDPULSE_SECRET       = "sendpulse-secret"

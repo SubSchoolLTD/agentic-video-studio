@@ -30,12 +30,13 @@ interface PublicPrice {
   feature_key: string
   label: string
   unit: string
-  charge_tokens: number
+  charge_cents: number
+  charge_usd: number
 }
 
 interface PublicPricing {
-  beta_monthly_usd: number
-  welcome_tokens: number
+  currency: string
+  minimum_topup_usd: number
   prices: PublicPrice[]
 }
 
@@ -44,13 +45,13 @@ const config = useRuntimeConfig()
 const menuOpen = ref(false)
 
 const fallbackPricing: PublicPricing = {
-  beta_monthly_usd: 0,
-  welcome_tokens: 1000,
+  currency: 'USD',
+  minimum_topup_usd: 12,
   prices: [
-    { feature_key: 'project.website_analysis', label: 'Website and brand analysis', unit: 'analysis', charge_tokens: 30 },
-    { feature_key: 'research.run', label: 'Agentic web research', unit: 'research run', charge_tokens: 75 },
-    { feature_key: 'video.scene_regenerate', label: 'AI scene regeneration', unit: 'scene', charge_tokens: 100 },
-    { feature_key: 'video.generate', label: 'AI video production', unit: 'variant / aspect ratio', charge_tokens: 500 },
+    { feature_key: 'project.website_analysis', label: 'Website and brand analysis', unit: 'analysis', charge_cents: 3, charge_usd: 0.03 },
+    { feature_key: 'research.run', label: 'Agentic web research', unit: 'research run', charge_cents: 6, charge_usd: 0.06 },
+    { feature_key: 'video.scene_regenerate', label: 'AI scene regeneration', unit: 'generated second', charge_cents: 24, charge_usd: 0.24 },
+    { feature_key: 'video.generate', label: 'AI video production', unit: 'generated second / aspect ratio', charge_cents: 24, charge_usd: 0.24 },
   ],
 }
 
@@ -64,7 +65,7 @@ const { data: pricing } = await useAsyncData<PublicPricing>('landing-pricing', a
 }, { default: () => fallbackPricing })
 
 const primaryCta = computed(() => auth.accessToken.value ? '/app' : '/register')
-const primaryLabel = computed(() => auth.accessToken.value ? 'Open studio' : 'Start free')
+const primaryLabel = computed(() => auth.accessToken.value ? 'Open studio' : 'Create account')
 
 const workflow = [
   { number: '01', title: 'Understand your brand', text: 'Framewise reads your website, builds a private brand profile and keeps claims, tone and visual rules attached to every production.', icon: Globe2 },
@@ -80,7 +81,7 @@ const features = [
   { title: 'Durable agent workflows', text: 'Every expensive stage is checkpointed. Interrupted jobs resume without silently repeating finished provider work.', icon: RefreshCw },
   { title: 'Human approval gates', text: 'Pause automation, regenerate a scene, compare revisions and require explicit consent before external publication.', icon: BadgeCheck },
   { title: 'Private by architecture', text: 'Tenant-isolated projects, signed media links, scoped API keys and encrypted OAuth credentials protect every workspace.', icon: LockKeyhole },
-  { title: 'Costs you can inspect', text: 'Token charges, provider costs and every balance change appear in an immutable ledger—before and after production.', icon: CircleDollarSign },
+  { title: 'Costs you can inspect', text: 'Dollar charges, provider costs and every balance change appear in an immutable ledger—before and after production.', icon: CircleDollarSign },
 ]
 
 const faqs = [
@@ -89,7 +90,7 @@ const faqs = [
   { question: 'Can Framewise publish without my approval?', answer: 'Not unless you deliberately configure an approval policy that allows it. External publishing is capability-aware, audited and protected by confirmation gates.' },
   { question: 'Is my project data visible to other customers?', answer: 'No. Accounts receive separate organizations and projects. API authorization, media delivery and database access are tenant-scoped.' },
   { question: 'What happens when an AI provider fails?', answer: 'Production stages are persisted and retryable. Framewise reports provider failures honestly and resumes from completed checkpoints instead of inventing results.' },
-  { question: 'How much does it cost?', answer: 'The public beta has no monthly fee and includes 1,000 welcome AI tokens after email verification. Usage is charged transparently by operation; the current rates are shown below.' },
+  { question: 'How much does it cost?', answer: 'There is no subscription. You top up a dollar balance from $12 and pay only for usage. AI prices are based on provider cost plus a 20% platform margin.' },
 ]
 
 useSeoMeta({
@@ -120,7 +121,7 @@ useHead({
         operatingSystem: 'Web',
         url: 'https://studio.subschool.us/',
         description: 'Agentic AI video studio for evidence-backed research, generation, review, publishing and analytics.',
-        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', description: 'Public beta with 1,000 welcome AI tokens.' },
+        offers: { '@type': 'Offer', price: '12', priceCurrency: 'USD', description: 'Usage-based AI balance with a $12 minimum top-up and no subscription.' },
         featureList: ['Agentic web research', 'AI video generation', 'Human approval workflows', 'Multi-format rendering', 'Publishing analytics'],
       }),
     },
@@ -187,7 +188,7 @@ useHead({
               <NuxtLink class="landing-button landing-button--primary" :to="primaryCta">{{ primaryLabel }} <ArrowRight :size="17" /></NuxtLink>
               <a class="landing-button landing-button--ghost" href="#workflow"><Play :size="15" /> See how it works</a>
             </div>
-            <div class="landing-hero__note"><Check :size="15" /> 1,000 welcome tokens <span>·</span> No card required <span>·</span> Private workspace</div>
+            <div class="landing-hero__note"><Check :size="15" /> No subscription <span>·</span> Pay only for usage <span>·</span> Private workspace</div>
           </div>
 
           <div class="studio-preview" aria-label="Framewise production workflow preview">
@@ -277,20 +278,20 @@ useHead({
       <section id="pricing" class="landing-section landing-pricing">
         <div class="landing-container pricing-layout">
           <div class="pricing-copy">
-            <span class="landing-eyebrow">Transparent public beta pricing</span>
-            <h2>Start with a real production, not a sales call.</h2>
-            <p>Create a workspace, confirm your email and use the included tokens across the same live Parallel and Google pipeline used by the production studio.</p>
-            <ul><li><Check :size="15" /> No monthly platform fee during beta</li><li><Check :size="15" /> Every charge appears in your ledger</li><li><Check :size="15" /> Admin-controlled prices update transparently</li><li><Check :size="15" /> Pause before any expensive generation</li></ul>
+            <span class="landing-eyebrow">Transparent usage pricing</span>
+            <h2>Fund a balance. Generate only what you need.</h2>
+            <p>Create a workspace, top up securely through PayPal and use the same live Parallel and Google pipeline used by the production studio.</p>
+            <ul><li><Check :size="15" /> No subscription or monthly platform fee</li><li><Check :size="15" /> Provider cost plus 20%</li><li><Check :size="15" /> Every charge and refund appears in your ledger</li><li><Check :size="15" /> Promo codes add a top-up bonus</li></ul>
           </div>
           <article class="pricing-card">
-            <div class="pricing-card__head"><div><span>Public beta</span><h3>Starter workspace</h3></div><span class="pricing-badge">Available now</span></div>
-            <div class="pricing-value"><strong>${{ pricing.beta_monthly_usd }}</strong><span>/ month</span></div>
-            <p><b>{{ Number(pricing.welcome_tokens).toLocaleString() }}</b> AI tokens included after email verification.</p>
+            <div class="pricing-card__head"><div><span>Dollar balance</span><h3>Pay as you generate</h3></div><span class="pricing-badge">Available now</span></div>
+            <div class="pricing-value"><strong>${{ pricing.minimum_topup_usd }}</strong><span>minimum top-up</span></div>
+            <p>No recurring charge. Unused balance remains in your workspace.</p>
             <div class="pricing-lines">
-              <div v-for="item in pricing.prices" :key="item.feature_key"><span><strong>{{ item.label }}</strong><small>per {{ item.unit }}</small></span><b>{{ Number(item.charge_tokens).toLocaleString() }} tokens</b></div>
+              <div v-for="item in pricing.prices" :key="item.feature_key"><span><strong>{{ item.label }}</strong><small>per {{ item.unit }}</small></span><b>${{ Number(item.charge_usd).toFixed(2) }}</b></div>
             </div>
             <NuxtLink class="landing-button landing-button--primary landing-button--wide" :to="primaryCta">{{ primaryLabel }} <ArrowRight :size="16" /></NuxtLink>
-            <small class="pricing-fineprint">Need more capacity? Additional beta credits are issued through workspace promo codes. Self-serve paid top-ups are not enabled yet.</small>
+            <small class="pricing-fineprint">Top up with PayPal in your workspace. Enter an optional promo code during checkout to receive a balance bonus.</small>
           </article>
         </div>
       </section>

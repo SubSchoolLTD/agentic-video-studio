@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -21,6 +22,7 @@ from .workflow import WorkflowManager
 
 settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+logger = logging.getLogger("avs.api")
 
 
 @asynccontextmanager
@@ -58,6 +60,7 @@ app.add_middleware(
 @app.middleware("http")
 async def request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    request.state.request_id = request_id
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -68,11 +71,25 @@ async def request_context(request: Request, call_next):
 
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
-    request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
     detail = exc.detail
-    message = detail if isinstance(detail, str) else "Request failed"
-    code = "request_failed"
-    details = detail if isinstance(detail, dict) else None
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or "Request failed")
+        code = str(detail.get("code") or "request_failed")
+        details = {key: value for key, value in detail.items() if key not in {"code", "message"}} or None
+    else:
+        message = str(detail)
+        code = "request_failed"
+        details = None
+    log_method = logger.error if exc.status_code >= 500 else logger.warning
+    log_method(
+        "request_rejected method=%s path=%s status=%s code=%s request_id=%s",
+        request.method,
+        request.url.path,
+        exc.status_code,
+        code,
+        request_id,
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -90,7 +107,7 @@ async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-    request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
+    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
     errors = []
     for item in exc.errors():
         cleaned = dict(item)
@@ -99,7 +116,13 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
                 key: str(value) if isinstance(value, BaseException) else value
                 for key, value in cleaned["ctx"].items()
             }
-        errors.append(cleaned)
+        errors.append(jsonable_encoder(cleaned))
+    logger.warning(
+        "request_validation_failed method=%s path=%s status=422 request_id=%s",
+        request.method,
+        request.url.path,
+        request_id,
+    )
     return JSONResponse(
         status_code=422,
         content={

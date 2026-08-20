@@ -152,7 +152,7 @@ class GenerationCreate(BaseModel):
     scene_count_max: int = Field(default=6, ge=2, le=20)
     scene_count_flex: int = Field(default=2, ge=0, le=2)
     burn_in_captions: bool = False
-    max_cost_usd: float = Field(default=10, ge=0.1, le=1_000)
+    max_cost_usd: float = Field(default=30, ge=0.1, le=1_000)
 
     @model_validator(mode="after")
     def require_input(self) -> GenerationCreate:

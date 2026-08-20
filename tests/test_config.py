@@ -23,5 +23,8 @@ def test_prod_alias_accepts_complete_live_configuration() -> None:
         email_delivery_mode="sendpulse",
         sendpulse_id="sendpulse-test",
         sendpulse_secret="sendpulse-secret-test",
+        paypal_env="live",
+        paypal_client_id="paypal-client-test",
+        paypal_secret="paypal-secret-test",
     )
     settings.validate_runtime()

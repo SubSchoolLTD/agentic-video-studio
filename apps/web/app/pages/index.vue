@@ -281,7 +281,7 @@ useHead({
             <span class="landing-eyebrow">Transparent usage pricing</span>
             <h2>Fund a balance. Generate only what you need.</h2>
             <p>Create a workspace, top up securely through PayPal and use the same live Parallel and Google pipeline used by the production studio.</p>
-            <ul><li><Check :size="15" /> No subscription or monthly platform fee</li><li><Check :size="15" /> Provider cost plus 20%</li><li><Check :size="15" /> Every charge and refund appears in your ledger</li><li><Check :size="15" /> Promo codes add a top-up bonus</li></ul>
+            <ul><li><Check :size="15" /> No subscription or monthly platform fee</li><li><Check :size="15" /> Provider cost plus 20%</li><li><Check :size="15" /> Every charge and refund appears in your ledger</li><li><Check :size="15" /> Promo codes credit your balance without payment</li></ul>
           </div>
           <article class="pricing-card">
             <div class="pricing-card__head"><div><span>Dollar balance</span><h3>Pay as you generate</h3></div><span class="pricing-badge">Available now</span></div>
@@ -291,7 +291,7 @@ useHead({
               <div v-for="item in pricing.prices" :key="item.feature_key"><span><strong>{{ item.label }}</strong><small>per {{ item.unit }}</small></span><b>${{ Number(item.charge_usd).toFixed(2) }}</b></div>
             </div>
             <NuxtLink class="landing-button landing-button--primary landing-button--wide" :to="primaryCta">{{ primaryLabel }} <ArrowRight :size="16" /></NuxtLink>
-            <small class="pricing-fineprint">Top up with PayPal in your workspace. Enter an optional promo code during checkout to receive a balance bonus.</small>
+            <small class="pricing-fineprint">Top up with PayPal or activate a promo code separately. A valid promo credits your balance without a PayPal transaction.</small>
           </article>
         </div>
       </section>

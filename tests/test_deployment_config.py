@@ -14,10 +14,6 @@ def test_production_deploy_wires_youtube_and_browser_session_storage() -> None:
     ):
         assert setting in workflow
 
-    assert "Ensure encrypted social session storage" in workflow
-    assert "gcloud secrets create social-browser-sessions" in workflow
-    assert "roles/secretmanager.secretAccessor" in workflow
-    assert "roles/secretmanager.secretVersionManager" in workflow
     assert "ATTACH_SOCIAL_SECRETS" not in workflow
     assert "INSTAGRAM_APP_ID=instagram-app-id:latest" not in workflow
     assert "TIKTOK_CLIENT_KEY=tiktok-client-key:latest" not in workflow

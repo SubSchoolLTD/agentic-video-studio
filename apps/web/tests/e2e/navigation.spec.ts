@@ -110,6 +110,7 @@ test('social connection buttons start the provider authorization page and export
     await route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>TikTok authorization</h1>' })
   })
   await page.goto('/connections')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   await expect(page.getByRole('heading', { name: 'Export' })).toHaveCount(0)
   const tiktok = page.locator('.connection-card').filter({ hasText: 'TikTok' })
   await page.evaluate(() => {

@@ -40,6 +40,8 @@ Google runtime identity should use workload identity/service account credentials
 
 Instagram publishing uses Business Login for Instagram and requires a professional creator or business account plus the `instagram_business_basic` and `instagram_business_content_publish` permissions. TikTok uses Login Kit and the Content Posting API with `user.info.basic` and `video.publish`; unaudited TikTok clients may only publish privately. Register the exact HTTPS callback URLs shown by the deployment before adding the corresponding client secrets.
 
+The production deploy always sets `APP_BASE_URL`, `WEB_BASE_URL`, and the YouTube, Instagram, and TikTok callback URLs from the repository's `PRODUCTION_API_URL` and `PRODUCTION_WEB_URL` secrets. After all four Meta/TikTok Secret Manager entries have real `latest` versions, run **Deploy production** with `attach_social_secrets=true` once. Normal later deployments update the required secrets without removing the already attached optional social bindings.
+
 `GOOGLE_RUNTIME_SERVICE_ACCOUNT` pins the identity accepted by internal OIDC endpoints. `GOOGLE_PUBSUB_TOPIC` is the non-secret domain event topic name. Both should be empty in local and CI environments unless integration tests explicitly target Google Cloud.
 
 `CLICKHOUSE_URL` and `GRAFANA_URL` are non-secret service endpoints. `CLICKHOUSE_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` are secrets. The API uses ClickHouse's dedicated `X-ClickHouse-User` and `X-ClickHouse-Key` headers so the credential is compatible with Cloud Run's authorization proxy without exposing it in a query string.

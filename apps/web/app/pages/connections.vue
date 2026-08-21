@@ -189,7 +189,7 @@ async function disconnect(item: any) {
 
     <UiAppCard class="security-card">
       <ShieldCheck :size="22" />
-      <div><strong>Passwords are never stored</strong><span>Credentials and one-time codes live only for the current sign-in request. The reusable browser session is encrypted in Google Secret Manager.</span></div>
+      <div><strong>Passwords are never stored</strong><span>Credentials and one-time codes live only for the current sign-in request. The reusable browser session is encrypted before it is stored in the tenant-isolated database.</span></div>
     </UiAppCard>
 
     <div v-if="selectedProvider" class="modal-backdrop" @click.self="closeLogin">

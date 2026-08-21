@@ -128,6 +128,9 @@ class ResourceRepository:
             "created_at": resource.created_at.isoformat(),
             "updated_at": resource.updated_at.isoformat(),
         }
+        if resource.kind == "connection":
+            payload.pop("secret_ref", None)
+            payload.pop("pending_page_url", None)
         if resource.kind == "video_version" and payload.get("render_url"):
             from .config import get_settings
             from .storage import MediaStorage

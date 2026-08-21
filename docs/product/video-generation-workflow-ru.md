@@ -351,7 +351,7 @@ Gemini возвращает общий pass, issues, scene issues, continuity и
 
 Раньше endpoint останавливался после шага 1 и навсегда оставлял статус `queued`; теперь worker действительно выполняет весь цикл.
 
-После approval scenes lock-ятся. YouTube использует официальный resumable upload. Instagram/TikTok пока честно показываются как export/draft capability, а не как успешная API-публикация.
+После approval scenes lock-ятся. YouTube использует официальный resumable upload. Instagram и TikTok публикуются Playwright-ботом через обычный веб-интерфейс провайдера после входа пользователя; пароль и 2FA-код не сохраняются, хранится только зашифрованная браузерная сессия.
 
 ## Что ещё ограничивает UGC-качество
 

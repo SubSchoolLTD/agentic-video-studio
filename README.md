@@ -68,7 +68,7 @@ tests           Unit, contract, integration, security, and pipeline tests
 
 ## Safety defaults
 
-Autopublish is off. High-risk claims require human review. TikTok and Instagram use explicit export/handoff workflows when official production publishing access is unavailable. URL ingestion rejects non-public network targets. Passwords use Argon2id, refresh tokens and API keys are stored hashed, media links expire, webhooks are HMAC-signed, and publication is a prepare/commit operation.
+Autopublish is off. High-risk claims require human review. TikTok and Instagram publication uses an encrypted Playwright browser session created by the user's regular provider sign-in; third-party passwords and verification codes are never stored. URL ingestion rejects non-public network targets. Passwords use Argon2id, refresh tokens and API keys are stored hashed, media links expire, webhooks are HMAC-signed, and publication is a prepare/commit operation.
 
 ## License
 

@@ -31,6 +31,7 @@ jobs:
           cache: pip
       - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - run: pip install -e '.[dev]'
+      - run: python -m playwright install --with-deps chromium
       - run: ruff check apps/api apps/mcp tests migrations
       - run: pytest
 

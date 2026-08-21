@@ -6,7 +6,13 @@ from unittest.mock import MagicMock, patch
 
 from apps.api.app.config import get_settings
 from apps.api.app.database import SessionLocal
-from apps.api.app.publishing import get_youtube_video_status
+from apps.api.app.main import app
+from apps.api.app.publishing import (
+    PROVIDER_CAPABILITIES,
+    destroy_stored_secret,
+    get_youtube_video_status,
+    store_browser_session,
+)
 from apps.api.app.renderer import render_motion_video, write_webvtt
 from apps.api.app.repository import ResourceRepository
 
@@ -169,6 +175,81 @@ def test_export_fallback_contains_video_caption_thumbnail_and_manifest(client, a
         names = set(bundle.namelist())
         assert {"video.mp4", "captions.vtt", "thumbnail.jpg", "caption.txt", "hashtags.txt", "publication.json"} <= names
         assert bundle.read("caption.txt") == b"Ready to publish."
+
+
+def test_live_instagram_confirmation_uses_saved_browser_session(client, auth_headers) -> None:
+    settings = get_settings().model_copy(update={"provider_mode": "live"})
+    version_id = _approved_version(with_media=True)
+    secret_ref = ""
+    connection_id = ""
+    with SessionLocal() as session:
+        repo = ResourceRepository(session)
+        connection_id = repo.new_id("conne")
+        secret_ref = store_browser_session(
+            settings,
+            connection_id,
+            {"provider": "instagram", "storage_state": {"cookies": [], "origins": []}},
+        )
+        repo.add(
+            kind="connection",
+            resource_id=connection_id,
+            organization_id="org_demo",
+            project_id="prj_subschool",
+            status="active",
+            data={
+                "provider": "instagram",
+                "display_name": "@browser-test",
+                "external_account_id": "browser-test",
+                "mode": "playwright_web",
+                "capabilities": PROVIDER_CAPABILITIES["instagram"],
+                "secret_ref": secret_ref,
+            },
+        )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        prepared = client.post(
+            "/v1/publications",
+            json={
+                "video_version_id": version_id,
+                "connection_id": connection_id,
+                "platform": "instagram",
+                "title": "Browser publication",
+                "caption": "Published through the web composer",
+                "privacy": "public",
+            },
+            headers=auth_headers,
+        )
+        assert prepared.status_code == 202
+        assert prepared.json()["requires_user_consent"] is True
+        with patch(
+            "apps.api.app.routes.publish_social_video",
+            return_value={
+                "external_post_id": "browser_post_1",
+                "external_url": "https://www.instagram.com/p/browser_post_1/",
+                "published_via": "playwright_web",
+            },
+        ) as publisher:
+            confirmed = client.post(
+                f"/v1/publications/{prepared.json()['publication_id']}/confirm",
+                json={
+                    "confirmation_token": prepared.json()["confirmation_token"],
+                    "explicit_consent": True,
+                },
+                headers=auth_headers,
+            )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["status"] == "published"
+        assert confirmed.json()["external_post_id"] == "browser_post_1"
+        assert publisher.call_args.kwargs["provider"] == "instagram"
+        assert publisher.call_args.kwargs["storage_state"] == {"cookies": [], "origins": []}
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+        with SessionLocal() as session:
+            repo = ResourceRepository(session)
+            connection = repo.get_any(connection_id, kind="connection")
+            if connection:
+                repo.update(connection, status="revoked", data={"secret_ref": None})
+        destroy_stored_secret(secret_ref)
 
 
 def test_youtube_status_normalization() -> None:

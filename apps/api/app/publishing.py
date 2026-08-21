@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import json
-import math
 import secrets
 import shutil
 import subprocess
 import zipfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-
-import httpx
 
 from .config import Settings
 
@@ -26,18 +21,19 @@ PROVIDER_CAPABILITIES: dict[str, dict[str, Any]] = {
     },
     "instagram": {
         "publish": True,
-        "schedule": True,
+        "schedule": False,
         "autopublish": False,
         "privacy": ["public"],
-        "metrics": ["views", "reach", "likes", "comments", "shares", "saves"],
-        "requires_professional_account": True,
+        "metrics": [],
+        "connection_mode": "playwright_web",
+        "requires_per_post_consent": True,
     },
     "tiktok": {
         "publish": True,
         "schedule": False,
         "autopublish": False,
         "privacy": ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"],
-        "requires_creator_info": True,
+        "connection_mode": "playwright_web",
         "requires_per_post_consent": True,
         "requires_manual_privacy_choice": True,
     },
@@ -49,323 +45,6 @@ PROVIDER_CAPABILITIES: dict[str, dict[str, Any]] = {
         "fallback": "download_package",
     },
 }
-
-
-def social_authorization_url(settings: Settings, *, provider: str, state: str) -> str:
-    if provider == "instagram":
-        if not settings.instagram_app_id or not settings.instagram_app_secret:
-            raise RuntimeError("Instagram OAuth client is not configured")
-        query = urlencode(
-            {
-                "client_id": settings.instagram_app_id,
-                "redirect_uri": settings.instagram_redirect_uri,
-                "response_type": "code",
-                "scope": "instagram_business_basic,instagram_business_content_publish",
-                "state": state,
-                "enable_fb_login": "0",
-                "force_authentication": "1",
-            }
-        )
-        return f"https://www.instagram.com/oauth/authorize?{query}"
-    if provider == "tiktok":
-        if not settings.tiktok_client_key or not settings.tiktok_client_secret:
-            raise RuntimeError("TikTok OAuth client is not configured")
-        query = urlencode(
-            {
-                "client_key": settings.tiktok_client_key,
-                "redirect_uri": settings.tiktok_redirect_uri,
-                "response_type": "code",
-                "scope": "user.info.basic,video.publish",
-                "state": state,
-            }
-        )
-        return f"https://www.tiktok.com/v2/auth/authorize/?{query}"
-    raise ValueError(f"Unsupported OAuth provider: {provider}")
-
-
-def exchange_social_code(settings: Settings, *, provider: str, code: str) -> dict[str, Any]:
-    if provider == "instagram":
-        response = httpx.post(
-            "https://api.instagram.com/oauth/access_token",
-            data={
-                "client_id": settings.instagram_app_id,
-                "client_secret": settings.instagram_app_secret,
-                "grant_type": "authorization_code",
-                "redirect_uri": settings.instagram_redirect_uri,
-                "code": code,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        token_data = response.json()
-        short_token = str(token_data.get("access_token") or "")
-        if not short_token:
-            raise RuntimeError("Instagram did not return an access token")
-        long_lived = httpx.get(
-            "https://graph.instagram.com/access_token",
-            params={
-                "grant_type": "ig_exchange_token",
-                "client_secret": settings.instagram_app_secret,
-                "access_token": short_token,
-            },
-            timeout=30,
-        )
-        long_lived.raise_for_status()
-        return _token_with_timing(
-            {**token_data, **long_lived.json(), "provider": "instagram"}
-        )
-    if provider == "tiktok":
-        response = httpx.post(
-            "https://open.tiktokapis.com/v2/oauth/token/",
-            data={
-                "client_key": settings.tiktok_client_key,
-                "client_secret": settings.tiktok_client_secret,
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": settings.tiktok_redirect_uri,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        token_data = response.json()
-        if not token_data.get("access_token"):
-            raise RuntimeError("TikTok did not return an access token")
-        return _token_with_timing({**token_data, "provider": "tiktok"})
-    raise ValueError(f"Unsupported OAuth provider: {provider}")
-
-
-def _token_with_timing(payload: dict[str, Any]) -> dict[str, Any]:
-    obtained_at = datetime.now(UTC)
-    try:
-        expires_in = max(0, int(payload.get("expires_in") or 0))
-    except (TypeError, ValueError):
-        expires_in = 0
-    return {
-        **payload,
-        "obtained_at": obtained_at.isoformat(),
-        "expires_at": (obtained_at + timedelta(seconds=expires_in)).isoformat()
-        if expires_in
-        else None,
-    }
-
-
-def social_token_needs_refresh(token_data: dict[str, Any], *, leeway_hours: int = 24) -> bool:
-    raw_expiry = token_data.get("expires_at")
-    if not raw_expiry:
-        return False
-    try:
-        expiry = datetime.fromisoformat(str(raw_expiry))
-    except ValueError:
-        return True
-    if not expiry.tzinfo:
-        expiry = expiry.replace(tzinfo=UTC)
-    return expiry <= datetime.now(UTC) + timedelta(hours=leeway_hours)
-
-
-def refresh_social_token(
-    settings: Settings,
-    *,
-    provider: str,
-    token_data: dict[str, Any],
-) -> dict[str, Any]:
-    if provider == "instagram":
-        response = httpx.get(
-            "https://graph.instagram.com/refresh_access_token",
-            params={
-                "grant_type": "ig_refresh_token",
-                "access_token": token_data.get("access_token"),
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        return _token_with_timing({**token_data, **response.json(), "provider": provider})
-    if provider == "tiktok":
-        refresh_token = str(token_data.get("refresh_token") or "")
-        if not refresh_token:
-            raise RuntimeError("TikTok refresh token is unavailable")
-        response = httpx.post(
-            "https://open.tiktokapis.com/v2/oauth/token/",
-            data={
-                "client_key": settings.tiktok_client_key,
-                "client_secret": settings.tiktok_client_secret,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        return _token_with_timing({**token_data, **response.json(), "provider": provider})
-    raise ValueError(f"Unsupported OAuth provider: {provider}")
-
-
-def resolve_social_account(settings: Settings, *, provider: str, token_data: dict[str, Any]) -> dict[str, Any]:
-    access_token = str(token_data["access_token"])
-    if provider == "instagram":
-        response = httpx.get(
-            f"https://graph.instagram.com/{settings.instagram_graph_version}/me",
-            params={"fields": "user_id,username", "access_token": access_token},
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return {
-            "id": str(payload.get("user_id") or payload.get("id") or token_data.get("user_id") or ""),
-            "display_name": str(payload.get("username") or "Connected Instagram account"),
-        }
-    response = httpx.post(
-        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json={},
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json().get("data") or {}
-    return {
-        "id": str(token_data.get("open_id") or payload.get("creator_username") or ""),
-        "display_name": str(payload.get("creator_nickname") or payload.get("creator_username") or "Connected TikTok account"),
-        "creator_info": payload,
-    }
-
-
-def initiate_instagram_reel(
-    settings: Settings,
-    *,
-    secret_ref: str,
-    account_id: str,
-    video_url: str,
-    caption: str,
-) -> dict[str, Any]:
-    access_token = str(load_oauth_secret(secret_ref).get("access_token") or "")
-    if not access_token:
-        raise RuntimeError("Instagram access token is unavailable")
-    response = httpx.post(
-        f"https://graph.instagram.com/{settings.instagram_graph_version}/{account_id}/media",
-        data={
-            "media_type": "REELS",
-            "video_url": video_url,
-            "caption": caption,
-            "share_to_feed": "true",
-            "access_token": access_token,
-        },
-        timeout=45,
-    )
-    response.raise_for_status()
-    return {"container_id": str(response.json()["id"])}
-
-
-def get_instagram_reel_status(settings: Settings, *, secret_ref: str, container_id: str) -> dict[str, Any]:
-    access_token = str(load_oauth_secret(secret_ref).get("access_token") or "")
-    response = httpx.get(
-        f"https://graph.instagram.com/{settings.instagram_graph_version}/{container_id}",
-        params={"fields": "status_code,status", "access_token": access_token},
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def publish_instagram_reel(
-    settings: Settings,
-    *,
-    secret_ref: str,
-    account_id: str,
-    container_id: str,
-) -> dict[str, Any]:
-    access_token = str(load_oauth_secret(secret_ref).get("access_token") or "")
-    response = httpx.post(
-        f"https://graph.instagram.com/{settings.instagram_graph_version}/{account_id}/media_publish",
-        data={"creation_id": container_id, "access_token": access_token},
-        timeout=45,
-    )
-    response.raise_for_status()
-    return {"external_post_id": str(response.json()["id"])}
-
-
-def initiate_tiktok_post(
-    *,
-    secret_ref: str,
-    file_path: Path,
-    title: str,
-    privacy_level: str,
-    allow_comments: bool,
-    allow_duet: bool,
-    allow_stitch: bool,
-    synthetic_media_disclosure: bool,
-) -> dict[str, Any]:
-    access_token = str(load_oauth_secret(secret_ref).get("access_token") or "")
-    if not access_token:
-        raise RuntimeError("TikTok access token is unavailable")
-    video_size = file_path.stat().st_size
-    if video_size <= 0:
-        raise RuntimeError("TikTok video file is empty")
-    maximum_chunk_size = 64 * 1024 * 1024
-    if video_size <= maximum_chunk_size:
-        chunk_size = video_size
-        total_chunk_count = 1
-    else:
-        total_chunk_count = math.ceil(video_size / maximum_chunk_size)
-        chunk_size = video_size // total_chunk_count
-    response = httpx.post(
-        "https://open.tiktokapis.com/v2/post/publish/video/init/",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"},
-        json={
-            "post_info": {
-                "title": title,
-                "privacy_level": privacy_level,
-                "disable_comment": not allow_comments,
-                "disable_duet": not allow_duet,
-                "disable_stitch": not allow_stitch,
-                "is_aigc": synthetic_media_disclosure,
-            },
-            "source_info": {
-                "source": "FILE_UPLOAD",
-                "video_size": video_size,
-                "chunk_size": chunk_size,
-                "total_chunk_count": total_chunk_count,
-            },
-        },
-        timeout=45,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("error", {}).get("code") not in {None, "ok"}:
-        raise RuntimeError(str(payload["error"].get("message") or "TikTok rejected the post"))
-    data = payload.get("data") or {}
-    publish_id = str(data.get("publish_id") or "")
-    upload_url = str(data.get("upload_url") or "")
-    if not publish_id or not upload_url:
-        raise RuntimeError("TikTok did not return an upload target")
-    with file_path.open("rb") as source, httpx.Client(timeout=120) as client:
-        for index in range(total_chunk_count):
-            start = index * chunk_size
-            chunk = source.read() if index == total_chunk_count - 1 else source.read(chunk_size)
-            end = start + len(chunk) - 1
-            upload = client.put(
-                upload_url,
-                headers={
-                    "Content-Type": "video/mp4",
-                    "Content-Length": str(len(chunk)),
-                    "Content-Range": f"bytes {start}-{end}/{video_size}",
-                },
-                content=chunk,
-            )
-            upload.raise_for_status()
-    return {"publish_id": publish_id}
-
-
-def get_tiktok_post_status(*, secret_ref: str, publish_id: str) -> dict[str, Any]:
-    access_token = str(load_oauth_secret(secret_ref).get("access_token") or "")
-    response = httpx.post(
-        "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"},
-        json={"publish_id": publish_id},
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("error", {}).get("code") not in {None, "ok"}:
-        raise RuntimeError(str(payload["error"].get("message") or "TikTok status request failed"))
-    return payload.get("data") or {}
 
 
 def youtube_authorization_url(settings: Settings, *, state: str) -> tuple[str, str]:
@@ -439,25 +118,46 @@ def exchange_youtube_code(
     }
 
 
-def store_oauth_secret(settings: Settings, connection_id: str, payload: dict[str, Any]) -> str:
+def _store_json_secret(
+    settings: Settings,
+    *,
+    secret_name: str,
+    local_name: str,
+    payload: dict[str, Any],
+) -> str:
     if settings.google_cloud_project and settings.app_env not in {"local", "test"}:
         from google.cloud import secretmanager
 
         client = secretmanager.SecretManagerServiceClient()
-        parent = (
-            f"projects/{settings.google_cloud_project}/secrets/"
-            f"{settings.youtube_refresh_token_secret}"
-        )
+        parent = f"projects/{settings.google_cloud_project}/secrets/{secret_name}"
         version = client.add_secret_version(
             request={"parent": parent, "payload": {"data": json.dumps(payload).encode("utf-8")}}
         )
         return f"gcp:{version.name}"
-    secret_dir = Path(".secrets")
+    secret_dir = settings.storage_root.parent / ".secrets"
     secret_dir.mkdir(parents=True, exist_ok=True)
-    secret_path = secret_dir / f"{connection_id}.json"
+    secret_path = secret_dir / f"{local_name}.json"
     secret_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     secret_path.chmod(0o600)
     return f"local:{secret_path}"
+
+
+def store_oauth_secret(settings: Settings, connection_id: str, payload: dict[str, Any]) -> str:
+    return _store_json_secret(
+        settings,
+        secret_name=settings.youtube_refresh_token_secret,
+        local_name=connection_id,
+        payload=payload,
+    )
+
+
+def store_browser_session(settings: Settings, connection_id: str, payload: dict[str, Any]) -> str:
+    return _store_json_secret(
+        settings,
+        secret_name=settings.social_browser_session_secret,
+        local_name=f"social-{connection_id}",
+        payload=payload,
+    )
 
 
 def load_oauth_secret(secret_ref: str | None) -> dict[str, Any]:
@@ -475,6 +175,21 @@ def load_oauth_secret(secret_ref: str | None) -> dict[str, Any]:
     if legacy_path.is_file():
         return json.loads(legacy_path.read_text(encoding="utf-8"))
     return {}
+
+
+def destroy_stored_secret(secret_ref: str | None) -> None:
+    if not secret_ref:
+        return
+    if secret_ref.startswith("local:"):
+        path = Path(secret_ref.removeprefix("local:"))
+        if path.is_file():
+            path.unlink()
+        return
+    if secret_ref.startswith("gcp:"):
+        from google.cloud import secretmanager
+
+        client = secretmanager.SecretManagerServiceClient()
+        client.destroy_secret_version(request={"name": secret_ref.removeprefix("gcp:")})
 
 
 def load_refresh_token(settings: Settings, secret_ref: str | None) -> str:

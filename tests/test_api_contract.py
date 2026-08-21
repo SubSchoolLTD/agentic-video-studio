@@ -86,3 +86,52 @@ def test_tiktok_requires_interactive_consent(client, auth_headers) -> None:
         headers=auth_headers,
     )
     assert response.status_code == 422
+
+
+def test_social_browser_login_never_returns_credentials_or_session_state(client, auth_headers) -> None:
+    password = "third-party-password-must-not-persist"
+    response = client.post(
+        "/v1/projects/prj_subschool/connections/instagram/browser-login",
+        json={"username": "creator@example.test", "password": password},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "active"
+    assert payload["mode"] == "playwright_web"
+    assert payload["password_persisted"] is False
+    assert "secret_ref" not in payload
+    assert "storage_state" not in payload
+    assert password not in response.text
+
+    listed = client.get("/v1/projects/prj_subschool/connections", headers=auth_headers)
+    instagram = next(item for item in listed.json()["items"] if item["provider"] == "instagram")
+    assert "secret_ref" not in instagram
+    assert "pending_page_url" not in instagram
+
+
+def test_social_providers_use_browser_sign_in_instead_of_developer_oauth(client, auth_headers) -> None:
+    response = client.post(
+        "/v1/projects/prj_subschool/connections/tiktok/authorize",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "playwright_web"
+    assert "authorize_url" not in response.json()
+
+
+def test_social_login_validation_never_echoes_a_provider_password(client, auth_headers) -> None:
+    provider_password = "sensitive-provider-password-" * 30
+    response = client.post(
+        "/v1/projects/prj_subschool/connections/tiktok/browser-login",
+        json={"username": "creator", "password": provider_password},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 422
+    assert provider_password not in response.text
+    errors = response.json()["error"]["details"]["errors"]
+    password_error = next(item for item in errors if "password" in item["loc"])
+    assert "input" not in password_error

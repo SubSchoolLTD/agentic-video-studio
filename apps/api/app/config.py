@@ -72,14 +72,11 @@ class Settings(BaseSettings):
     youtube_refresh_token_secret: str = "youtube-refresh-token"
     youtube_channel_id: str = ""
 
-    instagram_app_id: str = ""
-    instagram_app_secret: str = ""
-    instagram_redirect_uri: str = "http://localhost:8000/v1/connections/instagram/callback"
-    instagram_graph_version: str = "v24.0"
-
-    tiktok_client_key: str = ""
-    tiktok_client_secret: str = ""
-    tiktok_redirect_uri: str = "http://localhost:8000/v1/connections/tiktok/callback"
+    social_browser_headless: bool = True
+    social_browser_timeout_seconds: int = 120
+    social_browser_session_secret: str = "social-browser-sessions"
+    social_browser_instagram_base_url: str = "https://www.instagram.com"
+    social_browser_tiktok_base_url: str = "https://www.tiktok.com"
 
     clickhouse_url: str = ""
     clickhouse_user: str = "default"
@@ -146,6 +143,10 @@ class Settings(BaseSettings):
                 missing.append("PAYPAL_CLIENT_ID")
             if not self.paypal_secret:
                 missing.append("PAYPAL_SECRET")
+            if self.social_browser_instagram_base_url.rstrip("/") != "https://www.instagram.com":
+                missing.append("SOCIAL_BROWSER_INSTAGRAM_BASE_URL=https://www.instagram.com")
+            if self.social_browser_tiktok_base_url.rstrip("/") != "https://www.tiktok.com":
+                missing.append("SOCIAL_BROWSER_TIKTOK_BASE_URL=https://www.tiktok.com")
             if missing:
                 raise RuntimeError(f"Production configuration is incomplete: {', '.join(missing)}")
 

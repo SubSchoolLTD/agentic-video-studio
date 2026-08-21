@@ -24,10 +24,7 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `YOUTUBE_CLIENT_ID` | `YOUTUBE_CLIENT_ID` |
 | `YOUTUBE_CLIENT_SECRET` | `YOUTUBE_CLIENT_SECRET` |
 | `YOUTUBE_REFRESH_TOKEN` | `YOUTUBE_REFRESH_TOKEN` (local override only; deployed OAuth versions this in Secret Manager) |
-| `INSTAGRAM_APP_ID` | `instagram-app-id` |
-| `INSTAGRAM_APP_SECRET` | `instagram-app-secret` |
-| `TIKTOK_CLIENT_KEY` | `tiktok-client-key` |
-| `TIKTOK_CLIENT_SECRET` | `tiktok-client-secret` |
+| `SOCIAL_BROWSER_SESSION_SECRET` | `social-browser-sessions` (Secret Manager resource name, not a secret value) |
 | `CLICKHOUSE_PASSWORD` | `CLICKHOUSE_PASSWORD` |
 | `GRAFANA_ADMIN_PASSWORD` | `GRAFANA_ADMIN_PASSWORD` |
 | `GRAFANA_OTLP_HEADERS` | `GRAFANA_OTLP_HEADERS` |
@@ -38,9 +35,9 @@ Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, `PAYPA
 
 Google runtime identity should use workload identity/service account credentials in deployment; do not place long-lived service-account JSON in GitHub when federation is available.
 
-Instagram publishing uses Business Login for Instagram and requires a professional creator or business account plus the `instagram_business_basic` and `instagram_business_content_publish` permissions. TikTok uses Login Kit and the Content Posting API with `user.info.basic` and `video.publish`; unaudited TikTok clients may only publish privately. Register the exact HTTPS callback URLs shown by the deployment before adding the corresponding client secrets.
+Instagram and TikTok do not require developer apps. A user signs in through the Connections screen; their password and optional one-time code are used only by a transient Playwright process and are never persisted. Only the resulting browser storage state (cookies/local storage) is versioned in the dedicated `social-browser-sessions` Secret Manager secret. Disconnecting destroys the referenced version when the runtime identity has `secretVersionManager` on that secret.
 
-The production deploy always sets `APP_BASE_URL`, `WEB_BASE_URL`, and the YouTube, Instagram, and TikTok callback URLs from the repository's `PRODUCTION_API_URL` and `PRODUCTION_WEB_URL` secrets. After all four Meta/TikTok Secret Manager entries have real `latest` versions, run **Deploy production** with `attach_social_secrets=true` once. Normal later deployments update the required secrets without removing the already attached optional social bindings.
+The production deploy sets `APP_BASE_URL`, `WEB_BASE_URL`, the YouTube callback, and the browser-session secret resource name. The API image includes a pinned Playwright Chromium runtime. Provider CAPTCHAs are not bypassed: the connection is marked for reauthentication and the user must retry the normal sign-in flow.
 
 `GOOGLE_RUNTIME_SERVICE_ACCOUNT` pins the identity accepted by internal OIDC endpoints. `GOOGLE_PUBSUB_TOPIC` is the non-secret domain event topic name. Both should be empty in local and CI environments unless integration tests explicitly target Google Cloud.
 

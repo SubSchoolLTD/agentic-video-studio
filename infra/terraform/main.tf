@@ -43,6 +43,7 @@ locals {
     "sendpulse-id",
     "sendpulse-secret",
     "secret-encryption-key",
+    "social-browser-sessions",
     "tiktok-client-key",
     "tiktok-client-secret",
     "webhook-signing-secret",
@@ -90,9 +91,7 @@ locals {
     GOOGLE_GENAI_USE_VERTEXAI      = "true"
     YOUTUBE_REDIRECT_URI           = "${var.app_base_url}/v1/connections/youtube/callback"
     YOUTUBE_REFRESH_TOKEN_SECRET   = "youtube-refresh-token"
-    INSTAGRAM_REDIRECT_URI         = "${var.app_base_url}/v1/connections/instagram/callback"
-    INSTAGRAM_GRAPH_VERSION        = "v24.0"
-    TIKTOK_REDIRECT_URI            = "${var.app_base_url}/v1/connections/tiktok/callback"
+    SOCIAL_BROWSER_SESSION_SECRET  = "social-browser-sessions"
     STORAGE_ROOT                   = "/tmp/avs-media"
     CLICKHOUSE_USER                = "avs"
     GRAFANA_URL                    = var.deploy_runtime_services ? google_cloud_run_v2_service.grafana[0].uri : ""
@@ -107,13 +106,9 @@ locals {
     PAYPAL_CLIENT_ID       = "paypal-client-id"
     PAYPAL_SECRET          = "paypal-secret"
     JWT_SECRET             = "jwt-secret"
-    INSTAGRAM_APP_ID       = "instagram-app-id"
-    INSTAGRAM_APP_SECRET   = "instagram-app-secret"
     SENDPULSE_ID           = "sendpulse-id"
     SENDPULSE_SECRET       = "sendpulse-secret"
     SECRET_ENCRYPTION_KEY  = "secret-encryption-key"
-    TIKTOK_CLIENT_KEY      = "tiktok-client-key"
-    TIKTOK_CLIENT_SECRET   = "tiktok-client-secret"
     WEBHOOK_SIGNING_SECRET = "webhook-signing-secret"
     YOUTUBE_CLIENT_ID      = "youtube-client-id"
     YOUTUBE_CLIENT_SECRET  = "youtube-client-secret"
@@ -373,6 +368,12 @@ resource "google_secret_manager_secret_iam_member" "oauth_version_writer" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "social_session_version_manager" {
+  secret_id = google_secret_manager_secret.runtime["social-browser-sessions"].id
+  role      = "roles/secretmanager.secretVersionManager"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
+}
+
 resource "google_pubsub_topic" "domain_events" {
   name   = "avs-domain-events"
   labels = local.labels
@@ -594,8 +595,9 @@ resource "google_cloud_run_v2_service" "api" {
   labels               = local.labels
 
   template {
-    service_account = google_service_account.runtime.email
-    timeout         = "3600s"
+    service_account                  = google_service_account.runtime.email
+    timeout                          = "3600s"
+    max_instance_request_concurrency = 2
 
     scaling {
       min_instance_count = var.min_api_instances

@@ -97,34 +97,24 @@ test('registration reports a transactional email failure honestly', async ({ pag
   await expect(page.getByRole('heading', { name: 'Check your email' })).toHaveCount(0)
 })
 
-test('social connection buttons start the provider authorization page and export is not a connector', async ({ page }) => {
-  await registerThroughUi(page, 'Social OAuth')
-  let oauthStarted = false
-  await page.route('**/v1/projects/*/connections/tiktok/authorize', async (route) => {
-    oauthStarted = true
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ authorize_url: 'https://www.tiktok.com/v2/auth/authorize/?client_key=e2e' }),
-    })
-  })
-  await page.route('https://www.tiktok.com/**', async (route) => {
-    await route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>TikTok authorization</h1>' })
-  })
+test('social connection uses ordinary browser sign-in and export is not a connector', async ({ page }) => {
+  await registerThroughUi(page, 'Social browser')
   await page.goto('/connections')
   await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   await expect(page.getByRole('heading', { name: 'Export' })).toHaveCount(0)
   const tiktok = page.locator('.connection-card').filter({ hasText: 'TikTok' })
-  await page.evaluate(() => {
-    window.open = () => null
-  })
-  const [oauth] = await Promise.all([
+  await tiktok.getByRole('button', { name: 'Connect' }).click()
+  await expect(page.getByRole('heading', { name: 'Connect TikTok' })).toBeVisible()
+  await page.getByLabel('Username or email').fill('creator@example.test')
+  await page.getByLabel('Password').fill('transient-provider-password')
+  const [login] = await Promise.all([
     page.waitForResponse(response => (
-      response.url().includes('/connections/tiktok/authorize') && response.request().method() === 'POST'
+      response.url().includes('/connections/tiktok/browser-login') && response.request().method() === 'POST'
     )),
-    tiktok.getByRole('button', { name: 'Connect' }).click(),
+    page.getByRole('button', { name: 'Sign in securely' }).click(),
   ])
-  expect(oauth.status()).toBe(200)
-  expect(oauthStarted).toBe(true)
-  await expect(page).toHaveURL(/tiktok\.com\/v2\/auth\/authorize/)
+  expect(login.status()).toBe(200)
+  await expect(page.getByText('Only the encrypted browser session was saved')).toBeVisible()
+  await expect(tiktok).toContainText('@creator@example.test')
+  await expect(page.getByRole('heading', { name: 'Connect TikTok' })).toHaveCount(0)
 })

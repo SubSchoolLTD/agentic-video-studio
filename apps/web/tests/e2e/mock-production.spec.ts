@@ -4,6 +4,14 @@ import { creditTestBalance, registerThroughUi } from './helpers'
 test('creates an idea, renders a mock production, approves and publishes it', async ({ page }) => {
   const account = await registerThroughUi(page, 'Production')
   await creditTestBalance(page.request, account.email, 10_000)
+  await page.goto('/connections')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
+  const instagram = page.locator('.connection-card').filter({ hasText: 'Instagram' })
+  await instagram.getByRole('button', { name: 'Connect' }).click()
+  await page.getByLabel('Username or email').fill('e2e-creator')
+  await page.getByLabel('Password').fill('transient-provider-password')
+  await page.getByRole('button', { name: 'Sign in securely' }).click()
+  await expect(page.getByText('Only the encrypted browser session was saved')).toBeVisible()
   let generationPayload: any
   await page.route('**/v1/projects/*/generation-jobs', async (route) => {
     const request = route.request()
@@ -70,7 +78,7 @@ test('creates an idea, renders a mock production, approves and publishes it', as
   await page.getByTestId('prepare-publication').click()
   await expect(page.locator('.publication-plan')).toBeVisible()
   await page.getByTestId('confirm-publication').click()
-  await expect(page.getByText('Publication committed')).toBeVisible()
+  await expect(page.getByText('Video published')).toBeVisible()
   await expect(page.getByRole('cell', { name: 'published' }).first()).toBeVisible()
   const balance = await page.request.get(`${process.env.E2E_API_BASE || 'http://127.0.0.1:8100'}/v1/billing/summary`, {
     headers: { Authorization: `Bearer ${(await page.context().cookies()).find(item => item.name === 'avs_access')?.value}` },

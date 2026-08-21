@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, SecretStr, model_validator
 
 
 class OrganizationCreate(BaseModel):
@@ -225,6 +225,15 @@ class PublicationCreate(BaseModel):
 class PublicationConfirm(BaseModel):
     confirmation_token: str
     explicit_consent: bool = False
+
+
+class SocialBrowserLogin(BaseModel):
+    username: str = Field(min_length=2, max_length=320)
+    password: SecretStr = Field(min_length=1, max_length=512)
+
+
+class SocialBrowserVerification(BaseModel):
+    code: SecretStr = Field(min_length=4, max_length=16)
 
 
 class ApiKeyCreate(BaseModel):

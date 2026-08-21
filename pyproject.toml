@@ -25,6 +25,7 @@ dependencies = [
   "mcp>=1.13.0,<2",
   "opentelemetry-api>=1.36.0",
   "opentelemetry-sdk>=1.36.0",
+  "playwright==1.62.0",
   "pydantic-settings>=2.10.1",
   "PyJWT>=2.10.1",
   "psycopg[binary]>=3.2.9",

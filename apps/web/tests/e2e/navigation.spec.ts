@@ -26,6 +26,8 @@ test('public landing page explains the product, pricing and account entry points
   await expect(page.getByRole('heading', { name: 'Pay as you generate' })).toBeVisible()
   await expect(page.locator('.pricing-value strong')).toHaveText('$12')
   await expect(page.getByText('No subscription or monthly platform fee')).toBeVisible()
+  await expect(page.getByText('Promo codes credit your balance without payment')).toBeVisible()
+  await expect(page.getByText('activate a promo code separately', { exact: false })).toBeVisible()
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute('href', 'https://studio.subschool.us/')
   await expect(page.locator('meta[name="description"]')).toHaveAttribute('content', /evidence-backed social video/i)
   await expect(page.locator('script[type="application/ld+json"]')).toHaveCount(2)

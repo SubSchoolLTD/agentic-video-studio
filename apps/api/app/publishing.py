@@ -151,15 +151,6 @@ def store_oauth_secret(settings: Settings, connection_id: str, payload: dict[str
     )
 
 
-def store_browser_session(settings: Settings, connection_id: str, payload: dict[str, Any]) -> str:
-    return _store_json_secret(
-        settings,
-        secret_name=settings.social_browser_session_secret,
-        local_name=f"social-{connection_id}",
-        payload=payload,
-    )
-
-
 def load_oauth_secret(secret_ref: str | None) -> dict[str, Any]:
     if not secret_ref:
         return {}

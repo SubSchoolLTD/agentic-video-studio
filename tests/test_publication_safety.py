@@ -9,12 +9,11 @@ from apps.api.app.database import SessionLocal
 from apps.api.app.main import app
 from apps.api.app.publishing import (
     PROVIDER_CAPABILITIES,
-    destroy_stored_secret,
     get_youtube_video_status,
-    store_browser_session,
 )
 from apps.api.app.renderer import render_motion_video, write_webvtt
 from apps.api.app.repository import ResourceRepository
+from apps.api.app.session_crypto import encrypt_browser_session
 
 
 def _approved_version(*, with_media: bool = False) -> str:
@@ -180,15 +179,17 @@ def test_export_fallback_contains_video_caption_thumbnail_and_manifest(client, a
 def test_live_instagram_confirmation_uses_saved_browser_session(client, auth_headers) -> None:
     settings = get_settings().model_copy(update={"provider_mode": "live"})
     version_id = _approved_version(with_media=True)
-    secret_ref = ""
     connection_id = ""
     with SessionLocal() as session:
         repo = ResourceRepository(session)
         connection_id = repo.new_id("conne")
-        secret_ref = store_browser_session(
+        encrypted_session = encrypt_browser_session(
             settings,
-            connection_id,
-            {"provider": "instagram", "storage_state": {"cookies": [], "origins": []}},
+            connection_id=connection_id,
+            organization_id="org_demo",
+            project_id="prj_subschool",
+            provider="instagram",
+            payload={"provider": "instagram", "storage_state": {"cookies": [], "origins": []}},
         )
         repo.add(
             kind="connection",
@@ -202,7 +203,7 @@ def test_live_instagram_confirmation_uses_saved_browser_session(client, auth_hea
                 "external_account_id": "browser-test",
                 "mode": "playwright_web",
                 "capabilities": PROVIDER_CAPABILITIES["instagram"],
-                "secret_ref": secret_ref,
+                "browser_session_encrypted": encrypted_session,
             },
         )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -244,12 +245,6 @@ def test_live_instagram_confirmation_uses_saved_browser_session(client, auth_hea
         assert publisher.call_args.kwargs["storage_state"] == {"cookies": [], "origins": []}
     finally:
         app.dependency_overrides.pop(get_settings, None)
-        with SessionLocal() as session:
-            repo = ResourceRepository(session)
-            connection = repo.get_any(connection_id, kind="connection")
-            if connection:
-                repo.update(connection, status="revoked", data={"secret_ref": None})
-        destroy_stored_secret(secret_ref)
 
 
 def test_youtube_status_normalization() -> None:

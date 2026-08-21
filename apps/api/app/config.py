@@ -74,7 +74,6 @@ class Settings(BaseSettings):
 
     social_browser_headless: bool = True
     social_browser_timeout_seconds: int = 120
-    social_browser_session_secret: str = "social-browser-sessions"
     social_browser_instagram_base_url: str = "https://www.instagram.com"
     social_browser_tiktok_base_url: str = "https://www.tiktok.com"
 

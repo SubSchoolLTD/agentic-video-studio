@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+
+from apps.api.app.database import SessionLocal
+from apps.api.app.repository import ResourceRepository
+
 
 def test_health_and_openapi(client) -> None:
     health = client.get("/v1/health")
@@ -102,13 +107,31 @@ def test_social_browser_login_never_returns_credentials_or_session_state(client,
     assert payload["mode"] == "playwright_web"
     assert payload["password_persisted"] is False
     assert "secret_ref" not in payload
+    assert "browser_session_encrypted" not in payload
     assert "storage_state" not in payload
     assert password not in response.text
 
     listed = client.get("/v1/projects/prj_subschool/connections", headers=auth_headers)
     instagram = next(item for item in listed.json()["items"] if item["provider"] == "instagram")
     assert "secret_ref" not in instagram
+    assert "browser_session_encrypted" not in instagram
     assert "pending_page_url" not in instagram
+
+    with SessionLocal() as session:
+        stored = next(
+            item
+            for item in ResourceRepository(session).list(
+                organization_id="org_demo",
+                project_id="prj_subschool",
+                kind="connection",
+                limit=100,
+            )
+            if item.data.get("provider") == "instagram"
+        )
+        envelope = stored.data["browser_session_encrypted"]
+        assert envelope["algorithm"] == "AES-256-GCM"
+        assert "storage_state" not in json.dumps(envelope)
+        assert password not in json.dumps(stored.data)
 
 
 def test_social_providers_use_browser_sign_in_instead_of_developer_oauth(client, auth_headers) -> None:

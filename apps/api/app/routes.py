@@ -59,9 +59,7 @@ from .publishing import (
     destroy_stored_secret,
     exchange_youtube_code,
     get_youtube_video_status,
-    load_oauth_secret,
     resolve_youtube_channel,
-    store_browser_session,
     store_oauth_secret,
     upload_youtube_video,
     youtube_authorization_url,
@@ -103,6 +101,7 @@ from .schemas import (
     WebhookPatch,
 )
 from .security import ALL_SCOPES, Principal, get_principal, validate_public_url
+from .session_crypto import BrowserSessionCryptoError, decrypt_browser_session, encrypt_browser_session
 from .social_browser import (
     BrowserLoginResult,
     SocialBrowserError,
@@ -3257,14 +3256,18 @@ def _persist_browser_login(
         if result.status == "verification_required"
         else None
     )
-    secret_ref = store_browser_session(
+    encrypted_session = encrypt_browser_session(
         settings,
-        connection_id,
-        {
+        connection_id=connection_id,
+        organization_id=organization_id,
+        project_id=project_id,
+        provider=provider,
+        payload={
             "provider": provider,
             "storage_state": result.storage_state,
             "authenticated_at": datetime.now(UTC).isoformat(),
             "challenge_expires_at": challenge_expires_at,
+            "page_url": result.page_url if result.status == "verification_required" else None,
         },
     )
     previous_ref = str(connection.data.get("secret_ref") or "") if connection else ""
@@ -3278,11 +3281,12 @@ def _persist_browser_login(
             "privacy_level_options": PROVIDER_CAPABILITIES[provider].get("privacy", []),
         },
         "mode": "playwright_web",
-        "secret_ref": secret_ref,
+        "secret_ref": None,
+        "browser_session_encrypted": encrypted_session,
         "session_saved_at": datetime.now(UTC).isoformat(),
         "challenge_kind": result.challenge_kind,
         "challenge_expires_at": challenge_expires_at,
-        "pending_page_url": result.page_url if result.status == "verification_required" else None,
+        "pending_page_url": None,
         "last_connect_error": None,
     }
     if connection:
@@ -3296,11 +3300,11 @@ def _persist_browser_login(
             status=result.status,
             data=data,
         )
-    if previous_ref and previous_ref != secret_ref:
+    if previous_ref:
         try:
             destroy_stored_secret(previous_ref)
         except Exception:
-            logger.warning("Could not destroy superseded social browser session", extra={"provider": provider})
+            logger.warning("Could not destroy legacy social browser session", extra={"provider": provider})
     return persisted
 
 
@@ -3384,19 +3388,33 @@ async def browser_verify_connection(
     provider = str(connection.data.get("provider") or "")
     if provider not in {"instagram", "tiktok"} or connection.status != "verification_required":
         raise HTTPException(409, "This connection is not waiting for a verification code")
-    current_ref = str(connection.data.get("secret_ref") or "")
-    session_payload = load_oauth_secret(current_ref)
+    try:
+        session_payload = decrypt_browser_session(
+            settings,
+            connection_id=connection.id,
+            organization_id=connection.organization_id,
+            project_id=str(connection.project_id),
+            provider=provider,
+            envelope=connection.data.get("browser_session_encrypted"),
+        )
+    except BrowserSessionCryptoError as exc:
+        repo.update(
+            connection,
+            status="reauth",
+            data={"last_connect_error": "session_unavailable", "browser_session_encrypted": None},
+        )
+        raise HTTPException(409, "The pending provider session expired; start sign-in again") from exc
     challenge_expiry = session_payload.get("challenge_expires_at")
     if challenge_expiry and datetime.fromisoformat(str(challenge_expiry)) < datetime.now(UTC):
         repo.update(
             connection,
             status="reauth",
-            data={"last_connect_error": "verification_expired", "secret_ref": None},
+            data={
+                "last_connect_error": "verification_expired",
+                "secret_ref": None,
+                "browser_session_encrypted": None,
+            },
         )
-        try:
-            destroy_stored_secret(current_ref)
-        except Exception:
-            logger.warning("Could not destroy expired provider verification session", extra={"provider": provider})
         raise HTTPException(409, "The verification session expired; start sign-in again")
     storage_state = session_payload.get("storage_state")
     if not isinstance(storage_state, dict):
@@ -3418,7 +3436,7 @@ async def browser_verify_connection(
                 username=str(connection.data.get("display_name") or "").lstrip("@"),
                 code=payload.code.get_secret_value(),
                 storage_state=storage_state,
-                page_url=str(connection.data.get("pending_page_url") or ""),
+                page_url=str(session_payload.get("page_url") or ""),
             )
         except SocialBrowserError as exc:
             raise _social_login_http_error(provider, exc) from exc
@@ -3525,11 +3543,19 @@ def disconnect_connection(
     principal.require("integrations:write")
     repo = ResourceRepository(session)
     connection = require_resource(repo, connection_id, principal, kind="connection")
-    secret_ref = str(connection.data.get("secret_ref") or "")
-    repo.update(connection, status="revoked", data={"revoked_at": datetime.now(UTC).isoformat(), "secret_ref": None})
-    if secret_ref:
+    legacy_secret_ref = str(connection.data.get("secret_ref") or "")
+    repo.update(
+        connection,
+        status="revoked",
+        data={
+            "revoked_at": datetime.now(UTC).isoformat(),
+            "secret_ref": None,
+            "browser_session_encrypted": None,
+        },
+    )
+    if legacy_secret_ref:
         try:
-            destroy_stored_secret(secret_ref)
+            destroy_stored_secret(legacy_secret_ref)
         except Exception:
             logger.warning(
                 "Could not destroy disconnected provider session",
@@ -3588,10 +3614,16 @@ def _ensure_publication_checkpoints(repo: ResourceRepository, publication: Resou
         )
 
 
-def _load_social_browser_state(connection: Resource) -> dict[str, Any]:
+def _load_social_browser_state(connection: Resource, settings: Settings) -> dict[str, Any]:
     provider = str(connection.data.get("provider") or "")
-    secret_ref = str(connection.data.get("secret_ref") or "")
-    session_payload = load_oauth_secret(secret_ref)
+    session_payload = decrypt_browser_session(
+        settings,
+        connection_id=connection.id,
+        organization_id=connection.organization_id,
+        project_id=str(connection.project_id),
+        provider=provider,
+        envelope=connection.data.get("browser_session_encrypted"),
+    )
     storage_state = session_payload.get("storage_state")
     if session_payload.get("provider") != provider or not isinstance(storage_state, dict):
         raise RuntimeError(f"{provider.title()} browser session is unavailable")
@@ -3988,7 +4020,7 @@ async def confirm_publication(
         if not version or not asset or not connection:
             raise HTTPException(409, "Publication media or connection is unavailable")
         try:
-            browser_state = _load_social_browser_state(connection)
+            browser_state = _load_social_browser_state(connection, settings)
         except Exception as exc:
             repo.update(connection, status="reauth", data={"last_connect_error": "session_unavailable"})
             repo.update(publication, status="reauth", data={"last_error": "Provider session is unavailable"})

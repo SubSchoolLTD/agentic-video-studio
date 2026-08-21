@@ -15,6 +15,7 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `PARALLEL_API_KEY` | `PARALLEL_API_KEY` |
 | `GOOGLE_API_KEY` | `GOOGLE_API_KEY` |
 | `JWT_SECRET` | `jwt-secret` |
+| `SECRET_ENCRYPTION_KEY` | `secret-encryption-key` (optional dedicated application-data key; `JWT_SECRET` is the fallback) |
 | `SENDPULSE_ID` | `sendpulse-id` |
 | `SENDPULSE_SECRET` | `sendpulse-secret` |
 | `PAYPAL_CLIENT_ID` | `paypal-client-id` |
@@ -24,7 +25,6 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `YOUTUBE_CLIENT_ID` | `YOUTUBE_CLIENT_ID` |
 | `YOUTUBE_CLIENT_SECRET` | `YOUTUBE_CLIENT_SECRET` |
 | `YOUTUBE_REFRESH_TOKEN` | `YOUTUBE_REFRESH_TOKEN` (local override only; deployed OAuth versions this in Secret Manager) |
-| `SOCIAL_BROWSER_SESSION_SECRET` | `social-browser-sessions` (Secret Manager resource name, not a secret value) |
 | `CLICKHOUSE_PASSWORD` | `CLICKHOUSE_PASSWORD` |
 | `GRAFANA_ADMIN_PASSWORD` | `GRAFANA_ADMIN_PASSWORD` |
 | `GRAFANA_OTLP_HEADERS` | `GRAFANA_OTLP_HEADERS` |
@@ -35,9 +35,9 @@ Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, `PAYPA
 
 Google runtime identity should use workload identity/service account credentials in deployment; do not place long-lived service-account JSON in GitHub when federation is available.
 
-Instagram and TikTok do not require developer apps. A user signs in through the Connections screen; their password and optional one-time code are used only by a transient Playwright process and are never persisted. Only the resulting browser storage state (cookies/local storage) is versioned in the dedicated `social-browser-sessions` Secret Manager secret. Disconnecting destroys the referenced version when the runtime identity has `secretVersionManager` on that secret.
+Instagram and TikTok do not require developer apps. A user signs in through the Connections screen; their password and optional one-time code are used only by a transient Playwright process and are never persisted. The resulting browser storage state (cookies/local storage) is encrypted with AES-256-GCM before it is written to the tenant-isolated connection record in the application database. The encryption key is derived from `SECRET_ENCRYPTION_KEY` when configured, otherwise from the production `JWT_SECRET`; ciphertext is never returned by the API. Disconnecting clears it from the connection record.
 
-The production deploy sets `APP_BASE_URL`, `WEB_BASE_URL`, the YouTube callback, and the browser-session secret resource name. The API image includes a pinned Playwright Chromium runtime. Provider CAPTCHAs are not bypassed: the connection is marked for reauthentication and the user must retry the normal sign-in flow.
+The production deploy sets `APP_BASE_URL`, `WEB_BASE_URL`, and the YouTube callback. The API image includes a pinned Playwright Chromium runtime. Provider CAPTCHAs are not bypassed: the connection is marked for reauthentication and the user must retry the normal sign-in flow.
 
 `GOOGLE_RUNTIME_SERVICE_ACCOUNT` pins the identity accepted by internal OIDC endpoints. `GOOGLE_PUBSUB_TOPIC` is the non-secret domain event topic name. Both should be empty in local and CI environments unless integration tests explicitly target Google Cloud.
 

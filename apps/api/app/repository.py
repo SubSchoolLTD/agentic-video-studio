@@ -130,6 +130,7 @@ class ResourceRepository:
         }
         if resource.kind == "connection":
             payload.pop("secret_ref", None)
+            payload.pop("browser_session_encrypted", None)
             payload.pop("pending_page_url", None)
         if resource.kind == "video_version" and payload.get("render_url"):
             from .config import get_settings

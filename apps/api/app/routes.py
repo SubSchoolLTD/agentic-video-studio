@@ -28,7 +28,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -56,20 +56,12 @@ from .publishing import (
     PROVIDER_CAPABILITIES,
     confirmation_token,
     create_export_package,
-    exchange_social_code,
+    destroy_stored_secret,
     exchange_youtube_code,
-    get_instagram_reel_status,
-    get_tiktok_post_status,
     get_youtube_video_status,
-    initiate_instagram_reel,
-    initiate_tiktok_post,
     load_oauth_secret,
-    publish_instagram_reel,
-    refresh_social_token,
-    resolve_social_account,
     resolve_youtube_channel,
-    social_authorization_url,
-    social_token_needs_refresh,
+    store_browser_session,
     store_oauth_secret,
     upload_youtube_video,
     youtube_authorization_url,
@@ -101,6 +93,8 @@ from .schemas import (
     SceneRegenerate,
     ScoreOverride,
     ScriptPatch,
+    SocialBrowserLogin,
+    SocialBrowserVerification,
     SourceCreate,
     SourceItemCreate,
     SourcePatch,
@@ -109,6 +103,13 @@ from .schemas import (
     WebhookPatch,
 )
 from .security import ALL_SCOPES, Principal, get_principal, validate_public_url
+from .social_browser import (
+    BrowserLoginResult,
+    SocialBrowserError,
+    connect_social_account,
+    publish_social_video,
+    verify_social_account,
+)
 from .storage import MediaStorage
 from .strategy_defaults import cold_start_strategy
 from .workflow import WorkflowManager, initial_stage_state
@@ -3133,9 +3134,8 @@ def list_connections(
                     "capabilities": PROVIDER_CAPABILITIES[provider],
                     "creator_info": {
                         "display_name": "Not connected",
-                        "audit_status": "unaudited",
                         "privacy_level_options": [],
-                        "action_required": "Use the export package and finish in the provider UI",
+                        "action_required": "Sign in through the regular provider website",
                     }
                     if provider == "tiktok"
                     else None,
@@ -3157,6 +3157,14 @@ def authorize_connection(
     require_project(repo, project_id, principal)
     if provider not in {"youtube", "instagram", "tiktok"}:
         raise HTTPException(404, "Unknown provider")
+    if provider in {"instagram", "tiktok"}:
+        return {
+            "mode": "playwright_web",
+            "provider": provider,
+            "login_endpoint": f"/v1/projects/{project_id}/connections/{provider}/browser-login",
+            "password_persisted": False,
+            "supports_verification_code": True,
+        }
     if settings.provider_mode == "mock":
         connection = repo.add(
             kind="connection",
@@ -3173,31 +3181,6 @@ def authorize_connection(
             },
         )
         return {"connection_id": connection.id, "status": "limited", "mode": "mock"}
-    if provider in {"instagram", "tiktok"}:
-        configured = (
-            settings.instagram_app_id and settings.instagram_app_secret
-            if provider == "instagram"
-            else settings.tiktok_client_key and settings.tiktok_client_secret
-        )
-        if not configured:
-            raise HTTPException(503, f"{provider.title()} OAuth is not configured for this deployment")
-        state_value = secrets.token_urlsafe(32)
-        state_record = repo.add(
-            kind="oauth_state",
-            organization_id=principal.organization_id,
-            project_id=project_id,
-            status="pending",
-            data={
-                "provider": provider,
-                "state": state_value,
-                "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
-            },
-        )
-        return {
-            "state_id": state_record.id,
-            "authorize_url": social_authorization_url(settings, provider=provider, state=state_value),
-            "expires_at": state_record.data["expires_at"],
-        }
     if not (settings.youtube_client_id and settings.youtube_client_secret):
         raise HTTPException(503, "YouTube OAuth is not configured for this deployment")
     state_value = secrets.token_urlsafe(32)
@@ -3221,67 +3204,238 @@ def authorize_connection(
     }
 
 
-@router.get("/connections/{provider}/callback", tags=["connections"])
-def social_callback(
+def _social_connection_for_project(
+    repo: ResourceRepository,
+    *,
+    organization_id: str,
+    project_id: str,
     provider: str,
-    code: str = Query(...),
-    state_value: str = Query(..., alias="state"),
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-):
-    if provider == "youtube":
-        return youtube_callback(code=code, state_value=state_value, session=session, settings=settings)
-    if provider not in {"instagram", "tiktok"}:
-        raise HTTPException(404, "Unknown OAuth provider")
-    state_record = session.scalar(
-        select(Resource).where(
-            Resource.kind == "oauth_state",
-            Resource.status == "pending",
-            Resource.data["provider"].as_string() == provider,
-            Resource.data["state"].as_string() == state_value,
-        )
+) -> Resource | None:
+    return next(
+        (
+            item
+            for item in repo.list(
+                organization_id=organization_id,
+                project_id=project_id,
+                kind="connection",
+                limit=100,
+            )
+            if item.data.get("provider") == provider
+        ),
+        None,
     )
-    if not state_record:
-        raise HTTPException(400, "Invalid or expired OAuth state")
-    if datetime.fromisoformat(state_record.data["expires_at"]) < datetime.now(UTC):
-        raise HTTPException(400, "OAuth state expired")
-    repo = ResourceRepository(session)
-    try:
-        token_data = exchange_social_code(settings, provider=provider, code=code)
-        account = resolve_social_account(settings, provider=provider, token_data=token_data)
-    except (httpx.HTTPError, RuntimeError) as exc:
-        repo.update(state_record, status="failed", data={"failure": type(exc).__name__})
-        raise HTTPException(502, f"{provider.title()} authorization could not be completed") from exc
-    connection = repo.add(
-        kind="connection",
-        organization_id=state_record.organization_id,
-        project_id=state_record.project_id,
-        status="active",
-        data={
+
+
+def _social_login_http_error(provider: str, exc: SocialBrowserError) -> HTTPException:
+    status_code = 503 if exc.retryable else 409
+    if exc.code in {"invalid_credentials", "invalid_verification_code"}:
+        status_code = 401
+    return HTTPException(
+        status_code,
+        detail={
+            "code": exc.code,
+            "message": str(exc),
             "provider": provider,
-            "display_name": account["display_name"],
-            "external_account_id": account["id"],
-            "scopes": str(
-                token_data.get("scope")
-                or (
-                    "instagram_business_basic,instagram_business_content_publish"
-                    if provider == "instagram"
-                    else ""
-                )
-            ).split(","),
-            "capabilities": PROVIDER_CAPABILITIES[provider],
-            "creator_info": account.get("creator_info"),
-            "token_expires_at": token_data.get("expires_at"),
-            "mode": "live",
+            "retryable": exc.retryable,
         },
     )
-    secret_ref = store_oauth_secret(settings, connection.id, token_data)
-    repo.update(connection, data={"secret_ref": secret_ref})
-    repo.update(state_record, status="consumed", data={"connection_id": connection.id})
-    return RedirectResponse(
-        f"{settings.web_base_url.rstrip('/')}/connections?connected={provider}",
-        status_code=302,
+
+
+def _persist_browser_login(
+    repo: ResourceRepository,
+    *,
+    connection: Resource | None,
+    result: BrowserLoginResult,
+    organization_id: str,
+    project_id: str,
+    provider: str,
+    settings: Settings,
+) -> Resource:
+    connection_id = connection.id if connection else repo.new_id("conne")
+    challenge_expires_at = (
+        (datetime.now(UTC) + timedelta(minutes=15)).isoformat()
+        if result.status == "verification_required"
+        else None
     )
+    secret_ref = store_browser_session(
+        settings,
+        connection_id,
+        {
+            "provider": provider,
+            "storage_state": result.storage_state,
+            "authenticated_at": datetime.now(UTC).isoformat(),
+            "challenge_expires_at": challenge_expires_at,
+        },
+    )
+    previous_ref = str(connection.data.get("secret_ref") or "") if connection else ""
+    data = {
+        "provider": provider,
+        "display_name": result.display_name,
+        "external_account_id": result.external_account_id,
+        "capabilities": PROVIDER_CAPABILITIES[provider],
+        "creator_info": {
+            "display_name": result.display_name,
+            "privacy_level_options": PROVIDER_CAPABILITIES[provider].get("privacy", []),
+        },
+        "mode": "playwright_web",
+        "secret_ref": secret_ref,
+        "session_saved_at": datetime.now(UTC).isoformat(),
+        "challenge_kind": result.challenge_kind,
+        "challenge_expires_at": challenge_expires_at,
+        "pending_page_url": result.page_url if result.status == "verification_required" else None,
+        "last_connect_error": None,
+    }
+    if connection:
+        persisted = repo.update(connection, status=result.status, data=data)
+    else:
+        persisted = repo.add(
+            kind="connection",
+            resource_id=connection_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            status=result.status,
+            data=data,
+        )
+    if previous_ref and previous_ref != secret_ref:
+        try:
+            destroy_stored_secret(previous_ref)
+        except Exception:
+            logger.warning("Could not destroy superseded social browser session", extra={"provider": provider})
+    return persisted
+
+
+@router.post(
+    "/projects/{project_id}/connections/{provider}/browser-login",
+    tags=["connections"],
+)
+async def browser_login_connection(
+    project_id: str,
+    provider: str,
+    payload: SocialBrowserLogin,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("integrations:write")
+    if provider not in {"instagram", "tiktok"}:
+        raise HTTPException(404, "Browser sign-in is available for Instagram and TikTok")
+    repo = ResourceRepository(session)
+    require_project(repo, project_id, principal)
+    connection = _social_connection_for_project(
+        repo,
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        provider=provider,
+    )
+    try:
+        if settings.provider_mode == "mock":
+            result = BrowserLoginResult(
+                status="active",
+                display_name=f"@{payload.username.strip().lstrip('@')}",
+                external_account_id=f"mock_{provider}",
+                storage_state={"cookies": [], "origins": []},
+                page_url=f"https://www.{provider}.com/",
+            )
+        else:
+            result = await asyncio.to_thread(
+                connect_social_account,
+                settings,
+                provider=provider,
+                username=payload.username,
+                password=payload.password.get_secret_value(),
+            )
+    except SocialBrowserError as exc:
+        if connection:
+            repo.update(
+                connection,
+                data={
+                    "last_connect_error": exc.code,
+                    "last_connect_attempt_at": datetime.now(UTC).isoformat(),
+                },
+            )
+        raise _social_login_http_error(provider, exc) from exc
+    persisted = _persist_browser_login(
+        repo,
+        connection=connection,
+        result=result,
+        organization_id=principal.organization_id,
+        project_id=project_id,
+        provider=provider,
+        settings=settings,
+    )
+    return {
+        **ResourceRepository.serialize(persisted),
+        "password_persisted": False,
+        "verification_required": result.status == "verification_required",
+    }
+
+
+@router.post("/connections/{connection_id}/browser-verify", tags=["connections"])
+async def browser_verify_connection(
+    connection_id: str,
+    payload: SocialBrowserVerification,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("integrations:write")
+    repo = ResourceRepository(session)
+    connection = require_resource(repo, connection_id, principal, kind="connection")
+    provider = str(connection.data.get("provider") or "")
+    if provider not in {"instagram", "tiktok"} or connection.status != "verification_required":
+        raise HTTPException(409, "This connection is not waiting for a verification code")
+    current_ref = str(connection.data.get("secret_ref") or "")
+    session_payload = load_oauth_secret(current_ref)
+    challenge_expiry = session_payload.get("challenge_expires_at")
+    if challenge_expiry and datetime.fromisoformat(str(challenge_expiry)) < datetime.now(UTC):
+        repo.update(
+            connection,
+            status="reauth",
+            data={"last_connect_error": "verification_expired", "secret_ref": None},
+        )
+        try:
+            destroy_stored_secret(current_ref)
+        except Exception:
+            logger.warning("Could not destroy expired provider verification session", extra={"provider": provider})
+        raise HTTPException(409, "The verification session expired; start sign-in again")
+    storage_state = session_payload.get("storage_state")
+    if not isinstance(storage_state, dict):
+        raise HTTPException(409, "The pending provider session expired; start sign-in again")
+    if settings.provider_mode == "mock":
+        result = BrowserLoginResult(
+            status="active",
+            display_name=str(connection.data.get("display_name") or provider.title()),
+            external_account_id=str(connection.data.get("external_account_id") or f"mock_{provider}"),
+            storage_state=storage_state,
+            page_url=f"https://www.{provider}.com/",
+        )
+    else:
+        try:
+            result = await asyncio.to_thread(
+                verify_social_account,
+                settings,
+                provider=provider,
+                username=str(connection.data.get("display_name") or "").lstrip("@"),
+                code=payload.code.get_secret_value(),
+                storage_state=storage_state,
+                page_url=str(connection.data.get("pending_page_url") or ""),
+            )
+        except SocialBrowserError as exc:
+            raise _social_login_http_error(provider, exc) from exc
+    persisted = _persist_browser_login(
+        repo,
+        connection=connection,
+        result=result,
+        organization_id=connection.organization_id,
+        project_id=str(connection.project_id),
+        provider=provider,
+        settings=settings,
+    )
+    return {
+        **ResourceRepository.serialize(persisted),
+        "password_persisted": False,
+        "verification_required": False,
+    }
 
 
 @router.get("/connections/youtube/callback", tags=["connections"])
@@ -3371,7 +3525,16 @@ def disconnect_connection(
     principal.require("integrations:write")
     repo = ResourceRepository(session)
     connection = require_resource(repo, connection_id, principal, kind="connection")
+    secret_ref = str(connection.data.get("secret_ref") or "")
     repo.update(connection, status="revoked", data={"revoked_at": datetime.now(UTC).isoformat(), "secret_ref": None})
+    if secret_ref:
+        try:
+            destroy_stored_secret(secret_ref)
+        except Exception:
+            logger.warning(
+                "Could not destroy disconnected provider session",
+                extra={"provider": connection.data.get("provider")},
+            )
     return Response(status_code=204)
 
 
@@ -3425,44 +3588,14 @@ def _ensure_publication_checkpoints(repo: ResourceRepository, publication: Resou
         )
 
 
-def _signed_publication_media_url(
-    asset: Resource,
-    publication: Resource,
-    settings: Settings,
-) -> str:
-    storage = MediaStorage(settings)
-    public_path = asset.data.get("public_path") or storage.public_path_for(
-        storage_uri=asset.data.get("storage_uri"),
-        local_path=asset.data.get("local_path"),
-    )
-    if not public_path:
-        raise HTTPException(409, "Publication media does not have a provider-accessible URL")
-    signed = storage.signed_path(str(public_path), publication.organization_id, ttl_seconds=82_800)
-    return f"{settings.app_base_url.rstrip('/')}{signed}"
-
-
-def _ensure_social_connection_token(
-    repo: ResourceRepository,
-    connection: Resource,
-    settings: Settings,
-) -> None:
+def _load_social_browser_state(connection: Resource) -> dict[str, Any]:
     provider = str(connection.data.get("provider") or "")
     secret_ref = str(connection.data.get("secret_ref") or "")
-    token_data = load_oauth_secret(secret_ref)
-    if not token_data:
-        raise RuntimeError(f"{provider.title()} authorization is unavailable")
-    if not social_token_needs_refresh(token_data):
-        return
-    refreshed = refresh_social_token(settings, provider=provider, token_data=token_data)
-    refreshed_ref = store_oauth_secret(settings, connection.id, refreshed)
-    repo.update(
-        connection,
-        data={
-            "secret_ref": refreshed_ref,
-            "token_expires_at": refreshed.get("expires_at"),
-            "token_refreshed_at": datetime.now(UTC).isoformat(),
-        },
-    )
+    session_payload = load_oauth_secret(secret_ref)
+    storage_state = session_payload.get("storage_state")
+    if session_payload.get("provider") != provider or not isinstance(storage_state, dict):
+        raise RuntimeError(f"{provider.title()} browser session is unavailable")
+    return storage_state
 
 
 async def _refresh_social_publication(
@@ -3470,68 +3603,20 @@ async def _refresh_social_publication(
     publication: Resource,
     settings: Settings,
 ) -> None:
-    platform = str(publication.data.get("platform") or "")
-    connection = repo.get_any(str(publication.data.get("connection_id") or ""), kind="connection")
-    if not connection:
-        repo.update(publication, status="reauth", data={"last_error": "Connection is unavailable"})
+    del settings
+    if publication.status == "published":
         return
-    try:
-        _ensure_social_connection_token(repo, connection, settings)
-        if platform == "instagram":
-            container_id = str(publication.data.get("container_id") or "")
-            status_payload = await asyncio.to_thread(
-                get_instagram_reel_status,
-                settings,
-                secret_ref=str(connection.data.get("secret_ref") or ""),
-                container_id=container_id,
-            )
-            status_code = str(status_payload.get("status_code") or "").upper()
-            if status_code == "FINISHED":
-                published = await asyncio.to_thread(
-                    publish_instagram_reel,
-                    settings,
-                    secret_ref=str(connection.data.get("secret_ref") or ""),
-                    account_id=str(connection.data.get("external_account_id") or ""),
-                    container_id=container_id,
-                )
-                repo.update(
-                    publication,
-                    status="published",
-                    data={**published, "published_at": datetime.now(UTC).isoformat()},
-                )
-            elif status_code in {"ERROR", "EXPIRED"}:
-                repo.update(publication, status="rejected", data={"provider_status": status_payload})
-            else:
-                repo.update(publication, status="processing", data={"provider_status": status_payload})
-            return
-        if platform == "tiktok":
-            status_payload = await asyncio.to_thread(
-                get_tiktok_post_status,
-                secret_ref=str(connection.data.get("secret_ref") or ""),
-                publish_id=str(publication.data.get("publish_id") or ""),
-            )
-            status_code = str(status_payload.get("status") or "").upper()
-            if status_code == "PUBLISH_COMPLETE":
-                repo.update(
-                    publication,
-                    status="published",
-                    data={
-                        "external_post_id": status_payload.get("publicaly_available_post_id")
-                        or status_payload.get("publish_id")
-                        or publication.data.get("publish_id"),
-                        "provider_status": status_payload,
-                        "published_at": datetime.now(UTC).isoformat(),
-                    },
-                )
-            elif status_code in {"FAILED", "PUBLISH_FAILED"}:
-                repo.update(publication, status="rejected", data={"provider_status": status_payload})
-            else:
-                repo.update(publication, status="processing", data={"provider_status": status_payload})
-    except Exception as exc:
+    if publication.data.get("published_via") == "playwright_web":
+        return
+    if publication.status in {"uploading", "processing"}:
         repo.update(
             publication,
             status="retryable_failure",
-            data={"failure_phase": "status_poll", "last_error": str(exc)},
+            data={
+                "failure_phase": "remote_unknown",
+                "last_error": "This legacy API publication cannot be polled after the browser connector migration",
+                "manual_reconciliation_required": True,
+            },
         )
 
 
@@ -3756,6 +3841,8 @@ def prepare_publication(
         if cached:
             return cached[1]
     capabilities = PROVIDER_CAPABILITIES[payload.platform]
+    if payload.scheduled_at and not capabilities.get("schedule"):
+        raise HTTPException(422, f"Scheduled publishing is not available for {payload.platform.title()}")
     if payload.platform == "tiktok" and (
         payload.privacy is None
         or not payload.creator_info_acknowledged
@@ -3775,7 +3862,9 @@ def prepare_publication(
     requires_consent = bool(capabilities.get("requires_per_post_consent"))
     warnings = []
     if payload.platform == "tiktok" and settings.provider_mode == "live":
-        warnings.append("TikTok requires explicit consent for this post and may restrict unaudited apps to private visibility.")
+        warnings.append("TikTok will be opened in the saved browser session and requires explicit confirmation for this post.")
+    if payload.platform == "instagram" and settings.provider_mode == "live":
+        warnings.append("Instagram will be opened in the saved browser session and requires explicit confirmation for this post.")
     warnings.extend(
         _cadence_warnings(
             repo,
@@ -3899,54 +3988,81 @@ async def confirm_publication(
         if not version or not asset or not connection:
             raise HTTPException(409, "Publication media or connection is unavailable")
         try:
-            _ensure_social_connection_token(repo, connection, settings)
+            browser_state = _load_social_browser_state(connection)
         except Exception as exc:
-            repo.update(publication, status="reauth", data={"last_error": str(exc)})
+            repo.update(connection, status="reauth", data={"last_connect_error": "session_unavailable"})
+            repo.update(publication, status="reauth", data={"last_error": "Provider session is unavailable"})
             raise HTTPException(409, f"Reconnect {platform.title()} before publishing") from exc
+        storage = MediaStorage(settings)
+        local_path = Path(asset.data.get("local_path") or asset.data["storage_uri"])
+        try:
+            storage.materialize(storage_uri=asset.data.get("storage_uri"), local_path=local_path)
+        except Exception as exc:
+            repo.update(
+                publication,
+                status="retryable_failure",
+                data={"failure_phase": "preflight", "last_error": "Publication media could not be materialized"},
+            )
+            raise HTTPException(503, "Publication media could not be materialized") from exc
         repo.update(
             publication,
             status="uploading",
             data={"confirmation_consumed_at": consumed_at, "upload_started_at": consumed_at},
         )
+        caption = str(publication.data.get("caption") or publication.data["title"])
+        hashtags = [str(tag).strip().lstrip("#") for tag in publication.data.get("hashtags") or [] if str(tag).strip()]
+        if hashtags:
+            caption = f"{caption.rstrip()}\n\n{' '.join(f'#{tag}' for tag in hashtags)}"
         try:
-            if platform == "instagram":
-                video_url = _signed_publication_media_url(asset, publication, settings)
-                result = await asyncio.to_thread(
-                    initiate_instagram_reel,
-                    settings,
-                    secret_ref=str(connection.data.get("secret_ref") or ""),
-                    account_id=str(connection.data.get("external_account_id") or ""),
-                    video_url=video_url,
-                    caption=publication.data.get("caption") or publication.data["title"],
-                )
-            else:
-                storage = MediaStorage(settings)
-                local_path = Path(asset.data.get("local_path") or asset.data["storage_uri"])
-                storage.materialize(storage_uri=asset.data.get("storage_uri"), local_path=local_path)
-                result = await asyncio.to_thread(
-                    initiate_tiktok_post,
-                    secret_ref=str(connection.data.get("secret_ref") or ""),
-                    file_path=local_path,
-                    title=publication.data.get("caption") or publication.data["title"],
-                    privacy_level=str(publication.data.get("privacy") or "SELF_ONLY"),
-                    allow_comments=bool(publication.data.get("allow_comments")),
-                    allow_duet=bool(publication.data.get("allow_duet")),
-                    allow_stitch=bool(publication.data.get("allow_stitch")),
-                    synthetic_media_disclosure=bool(publication.data.get("synthetic_media_disclosure", True)),
-                )
+            result = await asyncio.to_thread(
+                publish_social_video,
+                settings,
+                provider=platform,
+                storage_state=browser_state,
+                file_path=local_path,
+                caption=caption,
+                privacy=str(publication.data.get("privacy") or ("public" if platform == "instagram" else "SELF_ONLY")),
+                allow_comments=bool(publication.data.get("allow_comments", True)),
+                allow_duet=bool(publication.data.get("allow_duet", False)),
+                allow_stitch=bool(publication.data.get("allow_stitch", False)),
+                synthetic_media_disclosure=bool(publication.data.get("synthetic_media_disclosure", True)),
+            )
+        except SocialBrowserError as exc:
+            if exc.code in {"session_expired", "human_verification_required"}:
+                repo.update(connection, status="reauth", data={"last_connect_error": exc.code})
+                repo.update(publication, status="reauth", data={"last_error": str(exc)})
+                raise HTTPException(409, f"Reconnect {platform.title()} before publishing") from exc
+            failure_phase = "remote_unknown" if exc.remote_state_unknown else "preflight"
+            repo.update(
+                publication,
+                status="retryable_failure",
+                data={
+                    "failure_phase": failure_phase,
+                    "last_error": str(exc),
+                    "manual_reconciliation_required": exc.remote_state_unknown,
+                },
+            )
+            raise HTTPException(502, f"{platform.title()} could not confirm the publication") from exc
         except Exception as exc:
             repo.update(
                 publication,
                 status="retryable_failure",
-                data={"failure_phase": "provider_init", "last_error": str(exc)},
+                data={
+                    "failure_phase": "remote_unknown",
+                    "last_error": "Browser publication failed with an unknown remote outcome",
+                    "manual_reconciliation_required": True,
+                },
             )
-            raise HTTPException(502, f"{platform.title()} did not accept the publication") from exc
+            raise HTTPException(502, f"{platform.title()} publication outcome is unknown") from exc
         repo.update(
             publication,
-            status="processing",
-            data={**result, "upload_completed_at": datetime.now(UTC).isoformat()},
+            status="published",
+            data={
+                **result,
+                "upload_completed_at": datetime.now(UTC).isoformat(),
+                "published_at": datetime.now(UTC).isoformat(),
+            },
         )
-        await _refresh_social_publication(repo, publication, settings)
     elif platform == "youtube":
         version = repo.get_any(publication.data["video_version_id"], kind="video_version")
         asset = repo.get_any(version.data["render_asset_id"], kind="media_asset") if version else None

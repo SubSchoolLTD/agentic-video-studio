@@ -2,6 +2,7 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PORT=8080
 
 RUN apt-get update \
@@ -14,6 +15,8 @@ COPY apps/api ./apps/api
 COPY apps/mcp ./apps/mcp
 COPY migrations ./migrations
 RUN pip install --no-cache-dir .
+RUN python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
 
 RUN addgroup --system avs && adduser --system --ingroup avs avs \
     && mkdir -p /tmp/avs-media /tmp/avs-data \
@@ -21,4 +24,3 @@ RUN addgroup --system avs && adduser --system --ingroup avs avs \
 USER avs
 
 CMD ["sh", "-c", "alembic upgrade head && uvicorn apps.api.app.main:app --host 0.0.0.0 --port ${PORT}"]
-

@@ -111,6 +111,13 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
     errors = []
     for item in exc.errors():
         cleaned = dict(item)
+        location = [str(part).lower() for part in cleaned.get("loc") or []]
+        if any(
+            marker in part
+            for part in location
+            for marker in ("password", "secret", "token", "verification", "code")
+        ):
+            cleaned.pop("input", None)
         if cleaned.get("ctx"):
             cleaned["ctx"] = {
                 key: str(value) if isinstance(value, BaseException) else value

@@ -2,6 +2,12 @@ name: Deploy production
 
 on:
   workflow_dispatch:
+    inputs:
+      attach_social_secrets:
+        description: Attach existing Meta and TikTok Secret Manager versions to the API service
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -37,15 +43,27 @@ jobs:
           --gcs-source-staging-dir=gs://${{ secrets.GCP_PROJECT_ID }}-avs-build-source/source
           --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/web:${{ github.sha }}
       - name: Deploy API and run migrations
-        run: >-
-          gcloud run deploy agentic-video-studio-api
-          --project='${{ secrets.GCP_PROJECT_ID }}'
-          --region=us-central1
-          --no-invoker-iam-check
-          --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/api:${{ github.sha }}
-          --update-env-vars='APP_ENV=production,APP_AUTH_MODE=jwt,PROVIDER_MODE=live,PAYPAL_ENV=live,PAYPAL_MIN_TOPUP_USD=12,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,SENDPULSE_TEMPLATE_ID=266399,SENDPULSE_TEMPLATE_NAME=subschool_main,BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false'
-          --update-secrets='JWT_SECRET=jwt-secret:latest,SENDPULSE_ID=sendpulse-id:latest,SENDPULSE_SECRET=sendpulse-secret:latest,PAYPAL_CLIENT_ID=paypal-client-id:latest,PAYPAL_SECRET=paypal-secret:latest'
-          --remove-env-vars=APP_DEMO_TOKEN
+        env:
+          ATTACH_SOCIAL_SECRETS: ${{ inputs.attach_social_secrets }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          PRODUCTION_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+          PRODUCTION_WEB_URL: ${{ secrets.PRODUCTION_WEB_URL }}
+        run: |
+          set -euo pipefail
+          PRODUCTION_API_URL="${PRODUCTION_API_URL%/}"
+          PRODUCTION_WEB_URL="${PRODUCTION_WEB_URL%/}"
+          secret_bindings='JWT_SECRET=jwt-secret:latest,SENDPULSE_ID=sendpulse-id:latest,SENDPULSE_SECRET=sendpulse-secret:latest,PAYPAL_CLIENT_ID=paypal-client-id:latest,PAYPAL_SECRET=paypal-secret:latest'
+          if [[ "${ATTACH_SOCIAL_SECRETS}" == "true" ]]; then
+            secret_bindings+=',INSTAGRAM_APP_ID=instagram-app-id:latest,INSTAGRAM_APP_SECRET=instagram-app-secret:latest,TIKTOK_CLIENT_KEY=tiktok-client-key:latest,TIKTOK_CLIENT_SECRET=tiktok-client-secret:latest'
+          fi
+          gcloud run deploy agentic-video-studio-api \
+            --project="${GCP_PROJECT_ID}" \
+            --region=us-central1 \
+            --no-invoker-iam-check \
+            --image="us-central1-docker.pkg.dev/${GCP_PROJECT_ID}/agentic-video-studio/api:${{ github.sha }}" \
+            --update-env-vars="APP_ENV=production,APP_AUTH_MODE=jwt,APP_BASE_URL=${PRODUCTION_API_URL},WEB_BASE_URL=${PRODUCTION_WEB_URL},PROVIDER_MODE=live,PAYPAL_ENV=live,PAYPAL_MIN_TOPUP_USD=12,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,SENDPULSE_TEMPLATE_ID=266399,SENDPULSE_TEMPLATE_NAME=subschool_main,BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false,YOUTUBE_REDIRECT_URI=${PRODUCTION_API_URL}/v1/connections/youtube/callback,INSTAGRAM_REDIRECT_URI=${PRODUCTION_API_URL}/v1/connections/instagram/callback,INSTAGRAM_GRAPH_VERSION=v24.0,TIKTOK_REDIRECT_URI=${PRODUCTION_API_URL}/v1/connections/tiktok/callback" \
+            --update-secrets="${secret_bindings}" \
+            --remove-env-vars=APP_DEMO_TOKEN
       - name: Deploy web
         run: >-
           gcloud run deploy agentic-video-studio-web
@@ -55,8 +73,16 @@ jobs:
           --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/web:${{ github.sha }}
           --remove-env-vars=NUXT_PUBLIC_DEMO_TOKEN
       - name: Verify rollout
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          PRODUCTION_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+          PRODUCTION_WEB_URL: ${{ secrets.PRODUCTION_WEB_URL }}
         run: |
           curl --fail --silent --show-error '${{ secrets.PRODUCTION_API_URL }}/v1/health'
           test "$(curl --fail --silent --show-error '${{ secrets.PRODUCTION_API_URL }}/v1/billing/public-pricing' | python -c 'import json,sys; print(json.load(sys.stdin)["minimum_topup_usd"])')" = "12"
           curl --fail --silent --show-error '${{ secrets.PRODUCTION_WEB_URL }}/' >/dev/null
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' '${{ secrets.PRODUCTION_API_URL }}/v1/projects')" = "401"
+          gcloud run services describe agentic-video-studio-api \
+            --project="${GCP_PROJECT_ID}" \
+            --region=us-central1 \
+            --format=json | python -c 'import json,os,sys; data=json.load(sys.stdin); env={item["name"]:item.get("value") for item in data["spec"]["template"]["spec"]["containers"][0]["env"]}; api=os.environ["PRODUCTION_API_URL"].rstrip("/"); web=os.environ["PRODUCTION_WEB_URL"].rstrip("/"); expected={"APP_BASE_URL":api,"WEB_BASE_URL":web,"YOUTUBE_REDIRECT_URI":f"{api}/v1/connections/youtube/callback","INSTAGRAM_REDIRECT_URI":f"{api}/v1/connections/instagram/callback","TIKTOK_REDIRECT_URI":f"{api}/v1/connections/tiktok/callback"}; wrong={key:(env.get(key),value) for key,value in expected.items() if env.get(key)!=value}; assert not wrong, wrong'

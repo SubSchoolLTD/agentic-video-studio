@@ -72,6 +72,15 @@ class Settings(BaseSettings):
     youtube_refresh_token_secret: str = "youtube-refresh-token"
     youtube_channel_id: str = ""
 
+    instagram_app_id: str = ""
+    instagram_app_secret: str = ""
+    instagram_redirect_uri: str = "http://localhost:8000/v1/connections/instagram/callback"
+    instagram_graph_version: str = "v24.0"
+
+    tiktok_client_key: str = ""
+    tiktok_client_secret: str = ""
+    tiktok_redirect_uri: str = "http://localhost:8000/v1/connections/tiktok/callback"
+
     clickhouse_url: str = ""
     clickhouse_user: str = "default"
     clickhouse_password: str = ""

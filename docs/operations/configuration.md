@@ -24,6 +24,10 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `YOUTUBE_CLIENT_ID` | `YOUTUBE_CLIENT_ID` |
 | `YOUTUBE_CLIENT_SECRET` | `YOUTUBE_CLIENT_SECRET` |
 | `YOUTUBE_REFRESH_TOKEN` | `YOUTUBE_REFRESH_TOKEN` (local override only; deployed OAuth versions this in Secret Manager) |
+| `INSTAGRAM_APP_ID` | `instagram-app-id` |
+| `INSTAGRAM_APP_SECRET` | `instagram-app-secret` |
+| `TIKTOK_CLIENT_KEY` | `tiktok-client-key` |
+| `TIKTOK_CLIENT_SECRET` | `tiktok-client-secret` |
 | `CLICKHOUSE_PASSWORD` | `CLICKHOUSE_PASSWORD` |
 | `GRAFANA_ADMIN_PASSWORD` | `GRAFANA_ADMIN_PASSWORD` |
 | `GRAFANA_OTLP_HEADERS` | `GRAFANA_OTLP_HEADERS` |
@@ -33,6 +37,8 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, `PAYPAL_ENV=live`, PayPal server credentials, and a strong `JWT_SECRET`. PayPal credentials never reach the browser; Orders v2 create/capture and amount verification happen on the API. Demo authentication is accepted only in explicit local/test environments. The MCP process requires `APP_API_TOKEN` containing a tenant-scoped API key or access token; it has no shared default credential.
 
 Google runtime identity should use workload identity/service account credentials in deployment; do not place long-lived service-account JSON in GitHub when federation is available.
+
+Instagram publishing uses Business Login for Instagram and requires a professional creator or business account plus the `instagram_business_basic` and `instagram_business_content_publish` permissions. TikTok uses Login Kit and the Content Posting API with `user.info.basic` and `video.publish`; unaudited TikTok clients may only publish privately. Register the exact HTTPS callback URLs shown by the deployment before adding the corresponding client secrets.
 
 `GOOGLE_RUNTIME_SERVICE_ACCOUNT` pins the identity accepted by internal OIDC endpoints. `GOOGLE_PUBSUB_TOPIC` is the non-secret domain event topic name. Both should be empty in local and CI environments unless integration tests explicitly target Google Cloud.
 

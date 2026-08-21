@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -35,23 +35,14 @@ class CreditAdjustment(BaseModel):
 
 class PromoCreate(BaseModel):
     code: str | None = Field(default=None, min_length=3, max_length=64)
-    kind: str = Field(default="topup_bonus", pattern=r"^topup_bonus$")
-    bonus_cents: int = Field(default=0, ge=0, le=100_000_000)
-    bonus_percent: float = Field(default=0, ge=0, le=500)
+    amount_cents: int = Field(gt=0, le=100_000_000)
     max_redemptions: int | None = Field(default=None, ge=1, le=10_000_000)
     expires_at: datetime | None = None
-
-    @model_validator(mode="after")
-    def has_bonus(self) -> PromoCreate:
-        if self.bonus_cents <= 0 and self.bonus_percent <= 0:
-            raise ValueError("A promo must add a fixed or percentage balance bonus")
-        return self
 
 
 class PromoPatch(BaseModel):
     is_active: bool | None = None
-    bonus_cents: int | None = Field(default=None, ge=0, le=100_000_000)
-    bonus_percent: float | None = Field(default=None, ge=0, le=500)
+    amount_cents: int | None = Field(default=None, gt=0, le=100_000_000)
     max_redemptions: int | None = Field(default=None, ge=1, le=10_000_000)
     expires_at: datetime | None = None
 
@@ -121,7 +112,8 @@ def _serialize_user(
     topped_up = sum(
         int(item.amount_cents)
         for item in ledger
-        if item.amount_cents > 0 and item.event_type in {"admin_topup", "balance_topup", "promo_bonus"}
+        if item.amount_cents > 0
+        and item.event_type in {"admin_topup", "balance_topup", "promo_bonus", "promo_credit"}
     )
     gross_spent = abs(sum(int(item.amount_cents) for item in ledger if item.event_type == "ai_usage"))
     refunded = sum(int(item.amount_cents) for item in ledger if item.event_type == "ai_usage_refund")
@@ -280,7 +272,7 @@ def overview(
             "deposited_usd": round(deposits, 2),
             "provider_cost_usd": round(provider_cost, 2),
             "cash_after_provider_cost_usd": round(deposits - provider_cost, 2),
-            "note": "Deposits include captured PayPal and recorded admin top-ups; promo bonuses are excluded from cash.",
+            "note": "Deposits include captured PayPal and recorded admin top-ups; promo credits are excluded from cash.",
         },
         "usage_by_feature": sorted(usage_by_feature, key=lambda item: item["cents_spent"], reverse=True),
     }
@@ -369,9 +361,7 @@ def promo_codes(
             {
                 "id": item.id,
                 "code": item.code_prefix,
-                "kind": item.kind,
-                "bonus_cents": int(item.bonus_cents),
-                "bonus_percent": float(item.bonus_percent),
+                "amount_cents": int(item.bonus_cents),
                 "max_redemptions": item.max_redemptions,
                 "redemption_count": item.redemption_count,
                 "expires_at": item.expires_at.isoformat() if item.expires_at else None,
@@ -396,9 +386,9 @@ def create_promo(
         id=f"pro_{secrets.token_hex(12)}",
         code_hash=hash_promo(raw),
         code_prefix=raw if len(raw) <= 16 else f"{raw[:12]}…",
-        kind=payload.kind,
-        bonus_cents=payload.bonus_cents,
-        bonus_percent=payload.bonus_percent,
+        kind="balance_credit",
+        bonus_cents=payload.amount_cents,
+        bonus_percent=0,
         max_redemptions=payload.max_redemptions,
         expires_at=payload.expires_at,
         created_by_user_id=principal.actor_id,
@@ -418,7 +408,10 @@ def patch_promo(
     promo = session.get(PromoCode, promo_id)
     if not promo:
         raise HTTPException(404, "Promo code not found")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if "amount_cents" in updates:
+        promo.bonus_cents = updates.pop("amount_cents")
+    for key, value in updates.items():
         setattr(promo, key, value)
     session.add(promo)
     session.commit()

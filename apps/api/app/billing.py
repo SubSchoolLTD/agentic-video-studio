@@ -435,7 +435,7 @@ def hash_promo(code: str) -> str:
     return hashlib.sha256(code.strip().upper().encode()).hexdigest()
 
 
-def promo_for_topup(
+def promo_for_redemption(
     session: Session,
     *,
     raw_code: str,
@@ -466,11 +466,6 @@ def ensure_promo_available(session: Session, *, promo: PromoCode, user_id: str) 
         )
     ):
         raise HTTPException(409, "Promo code already used by this account")
-
-
-def promo_bonus_cents(promo: PromoCode, amount_cents: int) -> int:
-    percent_bonus = Decimal(amount_cents) * Decimal(str(promo.bonus_percent)) / Decimal(100)
-    return int(promo.bonus_cents) + int(percent_bonus.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def dollars(cents: int) -> float:

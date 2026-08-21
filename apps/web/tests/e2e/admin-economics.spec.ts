@@ -3,7 +3,7 @@ import { registerThroughApi, registerThroughUi } from './helpers'
 
 const apiBase = process.env.E2E_API_BASE || 'http://127.0.0.1:8100'
 
-test('separate admin UI manages analytics, prices, promo bonuses and administrators', async ({ page, request }) => {
+test('separate admin UI manages analytics, prices, balance promo codes and administrators', async ({ page, request }) => {
   const account = await registerThroughUi(page, 'Admin economics')
   const promoted = await page.request.post(`${apiBase}/v1/auth/test-support/platform-admin`, {
     headers: { 'X-Test-Support-Secret': 'framewise-e2e-support' },
@@ -39,13 +39,13 @@ test('separate admin UI manages analytics, prices, promo bonuses and administrat
   await expect(page.locator('.admin-shell')).toHaveAttribute('data-hydrated', 'true')
   const promo = `E2E-${Math.random().toString(16).slice(2, 10).toUpperCase()}`
   await page.getByLabel('Custom code optional').fill(promo)
-  await page.getByLabel('Fixed bonus, USD').fill('3.21')
-  await expect(page.getByLabel('Fixed bonus, USD')).toHaveValue('3.21')
-  await page.getByLabel('Maximum uses').fill('1')
+  await page.getByLabel('Balance credit, USD').fill('3.21')
+  await expect(page.getByLabel('Balance credit, USD')).toHaveValue('3.21')
+  await page.getByLabel('Maximum activations').fill('1')
   await page.getByRole('button', { name: 'Create promo' }).click()
   await expect(page.locator('.created-code')).toContainText(promo)
   const promoRow = page.locator('.promo-list > div').filter({ hasText: promo })
-  await expect(promoRow).toContainText('$3.21 + 0.0%')
+  await expect(promoRow).toContainText('$3.21 balance credit')
 
   const futureAdmin = await registerThroughApi(request, 'Future admin')
   await page.goto('/admin/admins')
@@ -68,9 +68,11 @@ test('separate admin UI manages analytics, prices, promo bonuses and administrat
   await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   await page.getByLabel('Promo code').fill(promo)
   await expect(page.getByLabel('Promo code')).toHaveValue(promo)
-  const checkoutRequest = page.waitForRequest(request => (
-    request.url().endsWith('/v1/billing/topups/paypal') && request.method() === 'POST'
+  const redeemResponse = page.waitForResponse(response => (
+    response.url().endsWith('/v1/billing/promo-codes/redeem') && response.request().method() === 'POST'
   ))
-  await page.getByRole('button', { name: /Continue to PayPal/ }).click()
-  expect((await checkoutRequest).postDataJSON().promo_code).toBe(promo)
+  await page.getByRole('button', { name: 'Activate code' }).click()
+  expect((await redeemResponse).status()).toBe(200)
+  await expect(page.getByText('Promo code activated')).toBeVisible()
+  await expect(page.locator('.billing-metric-value strong').first()).toHaveText('$3.21')
 })

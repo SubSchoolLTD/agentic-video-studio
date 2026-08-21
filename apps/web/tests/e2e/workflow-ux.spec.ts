@@ -33,6 +33,7 @@ test('research persists candidates, exposes details and hides rejected cards', a
 test('ideas move between kanban columns and settings require explicit edit mode', async ({ page }, testInfo) => {
   const account = await registerThroughUi(page, 'Workflow UX')
   await page.goto('/ideas')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   await page.getByTestId('new-idea').click()
   const title = `Movable idea ${Date.now()}`
   await page.getByTestId('idea-title').fill(title)
@@ -50,6 +51,12 @@ test('ideas move between kanban columns and settings require explicit edit mode'
   }
   await expect(page.getByText('Idea moved')).toBeVisible()
   await expect(readyColumn.locator('.idea-card').filter({ hasText: title })).toBeVisible()
+
+  await page.goto('/app')
+  await page.getByRole('link', { name: 'Open monthly budget settings' }).click()
+  await expect(page).toHaveURL(/\/settings\?tab=budget/)
+  await expect(page.getByRole('heading', { name: 'Budget & limits', exact: true })).toBeVisible()
+  await expect(page.getByLabel(/Hard monthly provider-cost guard/)).toBeVisible()
 
   await page.goto('/settings')
   await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible()
@@ -73,4 +80,35 @@ test('ideas move between kanban columns and settings require explicit edit mode'
   await expect(page.getByText('Settings saved')).toBeVisible()
   await expect(page.getByText(`${account.projectName} Updated`, { exact: true })).toBeVisible()
   await expect(page.getByLabel('Project name')).toHaveCount(0)
+})
+
+test('library sends a selected video version to the publication composer', async ({ page }) => {
+  await registerThroughUi(page, 'Library publish')
+  const versionId = `ver_${Date.now()}`
+  await page.route(/\/v1\/projects\/[^/]+\/videos(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [{
+          id: 'vid_library',
+          title: 'Library publish test',
+          status: 'approved',
+          versions: [{
+            id: versionId,
+            status: 'approved',
+            render_url: '/media/test.mp4?org=test&expires=9999999999&sig=x'.padEnd(90, 'x'),
+            aspect_ratio: '9:16',
+            duration_ms: 15_000,
+          }],
+        }],
+      }),
+    })
+  })
+  await page.locator('a[href="/library"]').evaluate((element: HTMLAnchorElement) => element.click())
+  await expect(page).toHaveURL('/library')
+  await page.getByRole('link', { name: 'Send video to publication' }).click()
+  await expect(page).toHaveURL(new RegExp(`/publishing\\?version=${versionId}`))
+  await expect(page.getByRole('heading', { name: 'Publish composer' })).toBeVisible()
+  await expect(page.getByLabel('Video version')).toHaveValue(versionId)
 })

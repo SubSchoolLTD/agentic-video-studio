@@ -94,3 +94,35 @@ test('registration reports a transactional email failure honestly', async ({ pag
   await expect(page.getByText('the confirmation email could not be sent')).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Check your email' })).toHaveCount(0)
 })
+
+test('social connection buttons start the provider authorization page and export is not a connector', async ({ page }) => {
+  await registerThroughUi(page, 'Social OAuth')
+  let oauthStarted = false
+  await page.route('**/v1/projects/*/connections/tiktok/authorize', async (route) => {
+    oauthStarted = true
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ authorize_url: 'https://www.tiktok.com/v2/auth/authorize/?client_key=e2e' }),
+    })
+  })
+  await page.route('https://www.tiktok.com/**', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'text/html', body: '<h1>TikTok authorization</h1>' })
+  })
+  await page.goto('/connections')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
+  await expect(page.getByRole('heading', { name: 'Export' })).toHaveCount(0)
+  const tiktok = page.locator('.connection-card').filter({ hasText: 'TikTok' })
+  await page.evaluate(() => {
+    window.open = () => null
+  })
+  const [oauth] = await Promise.all([
+    page.waitForResponse(response => (
+      response.url().includes('/connections/tiktok/authorize') && response.request().method() === 'POST'
+    )),
+    tiktok.getByRole('button', { name: 'Connect' }).click(),
+  ])
+  expect(oauth.status()).toBe(200)
+  expect(oauthStarted).toBe(true)
+  await expect(page).toHaveURL(/tiktok\.com\/v2\/auth\/authorize/)
+})

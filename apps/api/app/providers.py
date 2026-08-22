@@ -18,6 +18,33 @@ from .config import Settings
 
 VisualMode = Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"]
 
+DEFAULT_NATIVE_VOICE_PRESET = "warm_conversational"
+NATIVE_VOICE_PROFILES = {
+    "warm_conversational": (
+        "one adult voice with a warm lower-mid pitch, rounded natural timbre, relaxed conversational cadence, "
+        "clear articulation, restrained friendly energy, and a neutral accent native to the narration language"
+    ),
+    "calm_expert": (
+        "one adult voice with a calm medium-low pitch, clean dry timbre, measured cadence, precise articulation, "
+        "quiet confidence, and a neutral accent native to the narration language"
+    ),
+    "bright_creator": (
+        "one adult voice with a bright medium pitch, lightly textured natural timbre, lively conversational cadence, "
+        "crisp articulation, upbeat creator energy, and a neutral accent native to the narration language"
+    ),
+    "grounded_storyteller": (
+        "one adult voice with a grounded medium pitch, rich natural timbre, unhurried storytelling cadence, "
+        "soft emphasis, intimate energy, and a neutral accent native to the narration language"
+    ),
+}
+
+
+def native_voice_profile(preset: str | None) -> tuple[str, str]:
+    selected = str(preset or DEFAULT_NATIVE_VOICE_PRESET)
+    if selected not in NATIVE_VOICE_PROFILES:
+        selected = DEFAULT_NATIVE_VOICE_PRESET
+    return selected, NATIVE_VOICE_PROFILES[selected]
+
 
 def google_genai_client(settings: Settings):
     from google import genai
@@ -133,6 +160,12 @@ class SceneSpeechAssessment(BaseModel):
     recommended_narration: str = ""
 
 
+class VoiceConsistencyAssessment(BaseModel):
+    same_speaker: bool
+    similarity: float = Field(ge=0, le=1)
+    issues: list[str] = Field(default_factory=list)
+
+
 class DialogueFitItem(BaseModel):
     scene_id: str
     narration: str
@@ -167,20 +200,31 @@ def compact_narration(text: str, max_words: int) -> str:
     return fitted.rstrip(" ,;:—–.!?") + "."
 
 
-def apply_narration_to_scene(scene: dict[str, Any], narration: str, *, native_audio: bool) -> dict[str, Any]:
+def apply_narration_to_scene(
+    scene: dict[str, Any],
+    narration: str,
+    *,
+    native_audio: bool,
+    voice_profile: str = "",
+) -> dict[str, Any]:
     updated = {**scene, "narration": narration}
     base = str(scene.get("visual_prompt_base") or scene.get("visual_prompt") or "").strip()
     if native_audio:
+        voice_lock = voice_profile or native_voice_profile(None)[1]
         audio_direction = (
             f'The creator says exactly in the narration language: "{narration}". '
             "Finish the complete line before the cut, with synchronized natural speech, a short final pause, "
-            "consistent voice identity and subtle room ambience."
+            f"and subtle room ambience. Locked voice identity for every scene: {voice_lock}. "
+            "Reuse this exact vocal age, pitch, timbre, accent, cadence, articulation and energy; do not recast "
+            "the speaker or switch to a narrator."
         )
     else:
         audio_direction = "Silent visual performance; relaxed mouth, no visible speaking."
     updated["visual_prompt_base"] = base
     updated["visual_prompt"] = (
         f"{base} {audio_direction} "
+        "Open immediately on a stable, fully composed full-bleed shot and end on a stable full-bleed frame. "
+        "No fade, dissolve, morph, transition effect, letterbox, pillarbox, black border or black frame. "
         "No readable screens, interfaces, letters, numbers, subtitles, prices, logos, brands or UI glyphs."
     ).strip()
     return updated
@@ -641,6 +685,7 @@ class EditorialProvider:
         duration_seconds: int,
         visual_mode: VisualMode,
         native_audio: bool = False,
+        native_voice_profile: str = "",
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str = "",
         content_format: str = "educational_explainer",
@@ -659,6 +704,7 @@ class EditorialProvider:
                 duration_seconds,
                 visual_mode,
                 native_audio,
+                native_voice_profile,
                 aspect_ratios,
                 requested_hook,
                 content_format,
@@ -679,6 +725,7 @@ class EditorialProvider:
             duration_seconds,
             visual_mode,
             native_audio,
+            native_voice_profile,
             aspect_ratios,
             requested_hook,
             content_format,
@@ -693,6 +740,7 @@ class EditorialProvider:
         scenes: list[dict[str, Any]],
         *,
         native_audio: bool,
+        native_voice_profile: str = "",
         compression: float = 1.0,
     ) -> list[dict[str, Any]]:
         budgets = {
@@ -715,7 +763,14 @@ class EditorialProvider:
             replacement = replacements.get(scene_id) or compact_narration(
                 str(scene.get("narration") or ""), budgets[scene_id]
             )
-            scene.update(apply_narration_to_scene(scene, replacement, native_audio=native_audio))
+            scene.update(
+                apply_narration_to_scene(
+                    scene,
+                    replacement,
+                    native_audio=native_audio,
+                    voice_profile=native_voice_profile,
+                )
+            )
         for scene in scenes:
             scene_id = str(scene.get("id"))
             word_count = len(str(scene.get("narration") or "").split())
@@ -784,6 +839,7 @@ class EditorialProvider:
         duration_seconds: int,
         visual_mode: VisualMode,
         native_audio: bool,
+        native_voice_profile: str,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
         content_format: str,
@@ -829,6 +885,11 @@ class EditorialProvider:
                     "Plan short direct-to-camera dialogue for native Veo speech; each narration must fit its scene duration"
                     if native_audio
                     else "Plan silent visual performance; voiceover and captions are added after scene generation"
+                ),
+                "native_voice_lock": (
+                    f"Repeat this exact voice profile in every scene prompt: {native_voice_profile}"
+                    if native_audio
+                    else None
                 ),
                 "cta": "must match brand policy",
             },
@@ -927,6 +988,7 @@ class EditorialProvider:
                     scene,
                     str(scene.get("narration") or "").strip(),
                     native_audio=native_audio,
+                    voice_profile=native_voice_profile,
                 )
             )
             cursor = end
@@ -954,6 +1016,7 @@ class EditorialProvider:
         duration_seconds: int,
         visual_mode: VisualMode,
         native_audio: bool,
+        native_voice_profile: str,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
         content_format: str,
@@ -1028,6 +1091,7 @@ class EditorialProvider:
                     scene,
                     narration,
                     native_audio=native_audio,
+                    voice_profile=native_voice_profile,
                 )
             )
             cursor = end
@@ -1229,6 +1293,108 @@ class SpeechQAProvider:
             duration_target,
         )
 
+    async def compare_voice(
+        self,
+        *,
+        reference_video_uri: str | None,
+        candidate_video_uri: str | None,
+        voice_profile: str,
+    ) -> dict[str, Any]:
+        if not reference_video_uri:
+            return {
+                "passed": True,
+                "same_speaker": True,
+                "similarity": 1.0,
+                "issues": [],
+                "mode": "reference_voice",
+                "provider": "internal",
+                "demo_data": not self.settings.uses_live_video,
+            }
+        if not self.settings.uses_live_video:
+            return {
+                "passed": True,
+                "same_speaker": True,
+                "similarity": 0.96,
+                "issues": [],
+                "mode": "voice_comparison",
+                "provider": "deterministic_test_fixture",
+                "demo_data": True,
+            }
+        if not candidate_video_uri or not all(
+            uri.startswith("gs://") for uri in (reference_video_uri, candidate_video_uri)
+        ):
+            return {
+                "passed": False,
+                "same_speaker": False,
+                "similarity": 0.0,
+                "issues": ["Reference and candidate clips must be available in private Cloud Storage"],
+                "mode": "voice_comparison",
+                "provider": "gemini",
+                "model_id": self.settings.gemini_model,
+                "availability": "missing",
+            }
+        return await asyncio.to_thread(
+            self._compare_voice_with_gemini,
+            reference_video_uri,
+            candidate_video_uri,
+            voice_profile,
+        )
+
+    def _compare_voice_with_gemini(
+        self,
+        reference_video_uri: str,
+        candidate_video_uri: str,
+        voice_profile: str,
+    ) -> dict[str, Any]:
+        from google.genai import types
+
+        client = google_genai_client(self.settings)
+        prompt = {
+            "task": (
+                "Compare only the primary speaking voice in clip 2 with the primary speaking voice in clip 1. "
+                "Ignore the words, room tone, music, compression and loudness. Decide whether this sounds like "
+                "the same human speaker identity across two separately recorded shots."
+            ),
+            "locked_voice_profile": voice_profile,
+            "rules": [
+                "same_speaker is false for a material change in apparent vocal age, pitch range, timbre, accent or cadence.",
+                "Do not reject ordinary changes in emotion, microphone distance or background ambience.",
+                "Use similarity below 0.78 when the speaker identity is not sufficiently consistent for one short-form video.",
+            ],
+        }
+        response = client.models.generate_content(
+            model=self.settings.gemini_model,
+            contents=[
+                "Reference clip (clip 1):",
+                types.Part.from_uri(file_uri=reference_video_uri, mime_type="video/mp4"),
+                "Candidate clip (clip 2):",
+                types.Part.from_uri(file_uri=candidate_video_uri, mime_type="video/mp4"),
+                json.dumps(prompt, ensure_ascii=False),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=VoiceConsistencyAssessment,
+                temperature=0,
+            ),
+        )
+        parsed = (
+            response.parsed
+            if isinstance(response.parsed, VoiceConsistencyAssessment)
+            else VoiceConsistencyAssessment.model_validate_json(response.text or "{}")
+        )
+        passed = bool(parsed.same_speaker and parsed.similarity >= 0.78)
+        return {
+            "passed": passed,
+            "same_speaker": parsed.same_speaker,
+            "similarity": round(parsed.similarity, 4),
+            "issues": parsed.issues,
+            "mode": "voice_comparison",
+            "provider": "gemini",
+            "model_id": self.settings.gemini_model,
+            "provider_response_id": getattr(response, "response_id", None),
+            "demo_data": False,
+        }
+
     def _analyze_with_gemini(
         self,
         video_uri: str,
@@ -1323,6 +1489,7 @@ class VeoProvider:
         reference_image_uri: str | None = None,
         reference_image_mime_type: str | None = None,
         duration_seconds: float = 8,
+        seed: int | None = None,
     ) -> Path | None:
         if not self.settings.uses_live_video:
             return None
@@ -1343,6 +1510,7 @@ class VeoProvider:
             reference_image_uri,
             reference_image_mime_type,
             duration_seconds,
+            seed,
         )
         if not generated.exists() or generated.stat().st_size == 0:
             raise RuntimeError("Veo completed without a usable scene file")
@@ -1357,6 +1525,7 @@ class VeoProvider:
         reference_image_uri: str | None,
         reference_image_mime_type: str | None,
         duration_seconds: float,
+        seed: int | None,
     ) -> Path:
         from google.genai import types
 
@@ -1379,8 +1548,13 @@ class VeoProvider:
                 aspect_ratio=aspect_ratio,
                 number_of_videos=1,
                 duration_seconds=veo_duration,
+                seed=seed,
                 generate_audio=generate_audio,
                 person_generation="allow_adult",
+                negative_prompt=(
+                    "fade in, fade out, dissolve, morph transition, title card, letterbox, pillarbox, "
+                    "black border, black frame, embedded subtitles, readable text, logos, watermarks"
+                ),
             ),
         )
         while not operation.done:

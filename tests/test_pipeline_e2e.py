@@ -335,6 +335,89 @@ def test_native_speech_qa_retries_a_clipped_scene_with_shorter_dialogue(
     assert video["qa_report"]["hard_gates"]["speech_timing"] is True
 
 
+def test_native_voice_profile_retries_a_changed_speaker_and_reuses_one_seed(
+    client, auth_headers, monkeypatch
+) -> None:
+    comparisons = 0
+
+    async def reject_first_changed_voice(
+        *, reference_video_uri, candidate_video_uri, voice_profile
+    ):
+        nonlocal comparisons
+        assert candidate_video_uri
+        assert "calm medium-low pitch" in voice_profile
+        if not reference_video_uri:
+            return {
+                "passed": True,
+                "same_speaker": True,
+                "similarity": 1.0,
+                "issues": [],
+                "mode": "reference_voice",
+                "provider": "deterministic_test_fixture",
+                "demo_data": True,
+            }
+        comparisons += 1
+        if comparisons == 1:
+            return {
+                "passed": False,
+                "same_speaker": False,
+                "similarity": 0.42,
+                "issues": ["Apparent speaker identity changed"],
+                "mode": "voice_comparison",
+                "provider": "deterministic_test_fixture",
+                "demo_data": True,
+            }
+        return {
+            "passed": True,
+            "same_speaker": True,
+            "similarity": 0.93,
+            "issues": [],
+            "mode": "voice_comparison",
+            "provider": "deterministic_test_fixture",
+            "demo_data": True,
+        }
+
+    monkeypatch.setattr(
+        client.app.state.workflow.speech_qa,
+        "compare_voice",
+        reject_first_changed_voice,
+    )
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Native voice identity lock",
+            "visual_mode": "ugc_creator",
+            "audio_mode": "veo_native",
+            "native_voice_preset": "calm_expert",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "scene_count_min": 2,
+            "scene_count_max": 2,
+            "scene_count_flex": 0,
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-native-voice-retry-1"},
+    )
+    assert created.status_code == 202, created.text
+    job = wait_for_job(client, created.json()["generation_job_id"], auth_headers)
+    assert job["status"] == "ready", job.get("last_error")
+    assert job["native_voice_preset"] == "calm_expert"
+    assert isinstance(job["veo_seed"], int)
+    video = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    first_attempt = video["scenes"][0]["attempts"][0]
+    second_scene = video["scenes"][1]
+    second_attempt = second_scene["attempts"][0]
+    assert comparisons == 2
+    assert second_scene["attempt"] == 2
+    assert second_attempt["automatic_retry"] == 1
+    assert second_attempt["voice_qa"]["passed"] is True
+    assert second_attempt["voice_qa"]["similarity"] == 0.93
+    assert first_attempt["veo_seed"] == second_attempt["veo_seed"] == job["veo_seed"]
+    assert "No fade, dissolve" in second_scene["visual_prompt"]
+    assert video["qa_report"]["hard_gates"]["voice_identity"] is True
+    assert video["qa_report"]["voice_identity"]["preset"] == "calm_expert"
+
+
 def test_retry_resumes_from_failed_render_checkpoint(client, auth_headers, monkeypatch) -> None:
     original_renderer = workflow.render_motion_video
     calls = 0

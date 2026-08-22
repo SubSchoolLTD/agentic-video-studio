@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from .providers import (
     SpeechQAProvider,
     TextToSpeechProvider,
     VeoProvider,
+    native_voice_profile,
 )
 from .renderer import (
     extract_last_frame,
@@ -56,6 +58,12 @@ STAGES = (
 RESUME_GRACE_SECONDS = 20
 MAX_AUTOMATIC_STAGE_RETRIES = 2
 LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
+
+
+def stable_veo_seed(job_id: str, voice_preset: str) -> int:
+    """Keep one reproducible Veo sampling anchor for every scene in a production."""
+    digest = hashlib.sha256(f"{job_id}:{voice_preset}".encode()).digest()
+    return int.from_bytes(digest[:4], "big", signed=False)
 
 
 def retryable_generation_error(exc: Exception) -> bool:
@@ -322,6 +330,45 @@ class WorkflowManager:
             return default_uri, default_mime_type or "image/jpeg", "character_reference"
         return None, None, "text_only"
 
+    def _native_voice_reference_uri(
+        self,
+        repo: ResourceRepository,
+        *,
+        scene: Resource,
+        aspect_ratio: str,
+    ) -> str | None:
+        """Use the first accepted scene as the immutable voice reference to prevent drift."""
+        if int(scene.data.get("position") or 0) <= 1:
+            return None
+        storyboard_id = str(scene.data.get("storyboard_id") or "")
+        reference_scene = next(
+            (
+                item
+                for item in repo.list(
+                    organization_id=scene.organization_id,
+                    project_id=scene.project_id,
+                    kind="scene",
+                    limit=200,
+                )
+                if str(item.data.get("storyboard_id") or "") == storyboard_id
+                and int(item.data.get("position") or 0) == 1
+            ),
+            None,
+        )
+        if not reference_scene:
+            return None
+        attempt_ids = dict(reference_scene.data.get("latest_attempt_ids") or {})
+        attempt_id = attempt_ids.get(aspect_ratio) or reference_scene.data.get("latest_attempt_id")
+        reference_attempt = repo.get(
+            str(attempt_id or ""),
+            organization_id=scene.organization_id,
+            project_id=scene.project_id,
+            kind="scene_attempt",
+        )
+        if not reference_attempt or reference_attempt.status != "passed":
+            return None
+        return str(reference_attempt.data.get("storage_uri") or "") or None
+
     async def _generate_scene_with_qa(
         self,
         *,
@@ -338,6 +385,8 @@ class WorkflowManager:
     ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str | None]]:
         max_automatic_retries = 2 if native_audio else 0
         attempt_number = initial_attempt_number
+        voice_preset, locked_voice_profile = native_voice_profile(job.data.get("native_voice_preset"))
+        veo_seed = int(job.data.get("veo_seed") or stable_veo_seed(job.id, voice_preset))
         for automatic_retry in range(max_automatic_retries + 1):
             prompt = str(scene.data.get("visual_prompt") or "").strip()
             if not prompt:
@@ -346,6 +395,7 @@ class WorkflowManager:
             latest_attempt_ids: dict[str, str] = {}
             output_uris: dict[str, str | None] = {}
             speech_passed = True
+            voice_passed = True
             for aspect_ratio in aspect_ratios:
                 ratio_slug = aspect_ratio.replace(":", "x")
                 suffix = f"_attempt_{attempt_number}" if attempt_number > 1 else ""
@@ -373,6 +423,7 @@ class WorkflowManager:
                         reference_image_uri=input_uri,
                         reference_image_mime_type=input_mime_type,
                         duration_seconds=float(scene.data.get("duration_target") or 8),
+                        seed=veo_seed,
                     )
                     if generated is None:
                         raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
@@ -398,6 +449,16 @@ class WorkflowManager:
                         expected_text=str(scene.data.get("narration") or ""),
                         duration_target=float(scene.data.get("duration_target") or 8),
                     )
+                    voice_reference_uri = self._native_voice_reference_uri(
+                        repo,
+                        scene=scene,
+                        aspect_ratio=aspect_ratio,
+                    )
+                    voice_qa = await self.speech_qa.compare_voice(
+                        reference_video_uri=voice_reference_uri,
+                        candidate_video_uri=persisted["storage_uri"],
+                        voice_profile=locked_voice_profile,
+                    )
                 else:
                     timing = dict(scene.data.get("speech_timing") or {})
                     speech_qa = {
@@ -413,7 +474,18 @@ class WorkflowManager:
                         "provider": "internal",
                         "demo_data": not self.settings.uses_live_video,
                     }
+                    voice_reference_uri = None
+                    voice_qa = {
+                        "passed": True,
+                        "same_speaker": True,
+                        "similarity": 1.0,
+                        "issues": [],
+                        "mode": "not_applicable",
+                        "provider": "internal",
+                        "demo_data": not self.settings.uses_live_video,
+                    }
                 speech_passed = speech_passed and bool(speech_qa.get("passed"))
+                voice_passed = voice_passed and bool(voice_qa.get("passed"))
                 if self.settings.uses_live_video:
                     await self._emit(
                         session,
@@ -428,13 +500,21 @@ class WorkflowManager:
                             "latency_ms": round((time.perf_counter() - scene_started) * 1000),
                             "cost_usd": None,
                             "speech_qa_passed": speech_qa.get("passed"),
+                            "voice_qa_passed": voice_qa.get("passed"),
                         },
                     )
+                attempt_passed = bool(speech_qa.get("passed") and voice_qa.get("passed"))
                 attempt = repo.add(
                     kind="scene_attempt",
                     organization_id=job.organization_id,
                     project_id=job.project_id,
-                    status="passed" if speech_qa.get("passed") else "speech_qa_failed",
+                    status=(
+                        "passed"
+                        if attempt_passed
+                        else "speech_qa_failed"
+                        if not speech_qa.get("passed")
+                        else "voice_qa_failed"
+                    ),
                     data={
                         "generation_job_id": job.id,
                         "scene_id": scene.id,
@@ -454,7 +534,12 @@ class WorkflowManager:
                         "continuity_input_uri": input_uri,
                         "continuity_input_kind": input_kind,
                         "speech_qa": speech_qa,
-                        "qa_status": "passed" if speech_qa.get("passed") else "failed",
+                        "voice_qa": voice_qa,
+                        "voice_reference_uri": voice_reference_uri,
+                        "native_voice_preset": voice_preset,
+                        "native_voice_profile": locked_voice_profile,
+                        "veo_seed": veo_seed,
+                        "qa_status": "passed" if attempt_passed else "failed",
                         "demo_data": not self.settings.uses_live_video,
                         "audio_mode": "veo_native" if native_audio else "google_tts",
                         "character_id": job.data.get("character_id"),
@@ -481,32 +566,62 @@ class WorkflowManager:
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
                         "speech_qa": speech_qa,
+                        "voice_qa": voice_qa,
+                        "voice_reference_uri": voice_reference_uri,
+                        "native_voice_preset": voice_preset,
+                        "veo_seed": veo_seed,
                         "continuity_input_kind": input_kind,
                         "last_frame_storage_uri": persisted_last_frame["storage_uri"],
                         "billable_seconds": attempt.data["billable_seconds"],
                     }
                 )
-            if speech_passed:
+            if speech_passed and voice_passed:
                 return attempt_items, latest_attempt_ids, output_uris
             if automatic_retry >= max_automatic_retries:
-                raise RuntimeError(
-                    f"Speech QA failed for {scene.id} after {max_automatic_retries + 1} attempts"
+                failed_checks = " and ".join(
+                    label
+                    for label, passed in (("speech", speech_passed), ("voice identity", voice_passed))
+                    if not passed
                 )
-            fitted = await self.editorial.fit_dialogue(
-                [dict(scene.data)],
-                native_audio=True,
-                compression=max(0.55, 0.78 - automatic_retry * 0.12),
-            )
-            updated_scene = fitted[0]
+                raise RuntimeError(
+                    f"Native audio {failed_checks} QA failed for {scene.id} "
+                    f"after {max_automatic_retries + 1} attempts"
+                )
+            if not speech_passed:
+                fitted = await self.editorial.fit_dialogue(
+                    [dict(scene.data)],
+                    native_audio=True,
+                    native_voice_profile=locked_voice_profile,
+                    compression=max(0.55, 0.78 - automatic_retry * 0.12),
+                )
+                updated_scene = fitted[0]
+            else:
+                updated_scene = dict(scene.data)
+            retry_prompt = str(updated_scene.get("visual_prompt") or "").strip()
+            if not voice_passed:
+                retry_prompt = (
+                    f"{retry_prompt} VOICE IDENTITY CORRECTION: The previous take was rejected because the "
+                    f"speaker changed. Cast exactly this locked voice: {locked_voice_profile}. Keep the same "
+                    "speaker identity as the opening scene; do not improvise a different narrator."
+                )
             repo.update(
                 scene,
                 status="regenerating",
                 data={
                     "narration": updated_scene.get("narration"),
-                    "visual_prompt": updated_scene.get("visual_prompt"),
+                    "visual_prompt": retry_prompt,
                     "visual_prompt_base": updated_scene.get("visual_prompt_base"),
                     "speech_timing": updated_scene.get("speech_timing"),
-                    "automatic_speech_retries": automatic_retry + 1,
+                    "automatic_speech_retries": (
+                        automatic_retry + 1
+                        if not speech_passed
+                        else scene.data.get("automatic_speech_retries", 0)
+                    ),
+                    "automatic_voice_retries": (
+                        automatic_retry + 1
+                        if not voice_passed
+                        else scene.data.get("automatic_voice_retries", 0)
+                    ),
                 },
             )
             attempt_number += 1
@@ -868,6 +983,11 @@ class WorkflowManager:
         if audio_mode not in {"google_tts", "veo_native"}:
             raise RuntimeError(f"Unsupported audio mode: {audio_mode}")
         native_audio = audio_mode == "veo_native"
+        voice_preset, locked_voice_profile = native_voice_profile(
+            job.data.get("native_voice_preset")
+            or (input_resource.data.get("native_voice_preset") if input_resource else None)
+        )
+        veo_seed = int(job.data.get("veo_seed") or stable_veo_seed(job.id, voice_preset))
 
         repo.update(
             job,
@@ -878,6 +998,9 @@ class WorkflowManager:
                 "character_profile": character_profile or None,
                 "reference_image_uri": reference_image_uri or None,
                 "reference_image_mime_type": reference_image_mime_type,
+                "native_voice_preset": voice_preset,
+                "native_voice_profile": locked_voice_profile if native_audio else None,
+                "veo_seed": veo_seed,
             },
         )
         if intake_stage.get("status") != "completed":
@@ -900,6 +1023,9 @@ class WorkflowManager:
                         "requested_hook": requested_hook,
                         "content_format": content_format,
                         "audio_mode": audio_mode,
+                        "native_voice_preset": voice_preset,
+                        "native_voice_profile": locked_voice_profile if native_audio else None,
+                        "veo_seed": veo_seed,
                         "character_id": character.id if character else None,
                     }
                 },
@@ -1011,6 +1137,7 @@ class WorkflowManager:
                 duration_seconds=int(job.data.get("target_duration_seconds", 30)),
                 visual_mode=visual_mode,
                 native_audio=native_audio,
+                native_voice_profile=locked_voice_profile,
                 aspect_ratios=aspect_ratios,
                 requested_hook=requested_hook,
                 content_format=content_format,
@@ -1020,7 +1147,11 @@ class WorkflowManager:
                 scene_count_flex=int(job.data.get("scene_count_flex", 2)),
             )
             package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
-            await self.editorial.fit_dialogue(package_scenes, native_audio=native_audio)
+            await self.editorial.fit_dialogue(
+                package_scenes,
+                native_audio=native_audio,
+                native_voice_profile=locked_voice_profile,
+            )
             if package.get("storyboard") is not None:
                 package["storyboard"]["scenes"] = package_scenes
             if package.get("script") is not None:
@@ -1446,6 +1577,7 @@ class WorkflowManager:
                             "storage_uri": storage_uri,
                             "public_path": latest_attempt.data.get("public_path"),
                             "speech_qa": latest_attempt.data.get("speech_qa"),
+                            "voice_qa": latest_attempt.data.get("voice_qa"),
                             "last_frame_storage_uri": latest_attempt.data.get("last_frame_storage_uri"),
                         }
                     )
@@ -1796,6 +1928,12 @@ class WorkflowManager:
         speech_pass = bool(scene_attempts) and all(
             bool((item.get("speech_qa") or {}).get("passed")) for item in scene_attempts
         )
+        voice_identity_pass = (
+            bool(scene_attempts)
+            and all(bool((item.get("voice_qa") or {}).get("passed")) for item in scene_attempts)
+            if job.data.get("audio_mode") == "veo_native"
+            else True
+        )
         script_resource = repo.get_any(script_id, kind="script")
         script_payload = dict(script_resource.data.get("script") or {}) if script_resource else {}
         cta_present = bool(str(script_payload.get("cta") or "").strip())
@@ -1811,6 +1949,7 @@ class WorkflowManager:
             "technical_qa": technical_pass,
             "multimodal_qa": multimodal_pass,
             "speech_timing": speech_pass,
+            "voice_identity": voice_identity_pass,
             "content": content_pass and cta_present,
             "brand": brand_pass,
             "platform": platform_pass,
@@ -1835,6 +1974,20 @@ class WorkflowManager:
                         "scene_id": item.get("scene_id"),
                         "aspect_ratio": item.get("aspect_ratio"),
                         **dict(item.get("speech_qa") or {}),
+                    }
+                    for item in scene_attempts
+                ],
+            },
+            "voice_identity": {
+                "passed": voice_identity_pass,
+                "preset": job.data.get("native_voice_preset"),
+                "profile": job.data.get("native_voice_profile"),
+                "seed": job.data.get("veo_seed"),
+                "scenes": [
+                    {
+                        "scene_id": item.get("scene_id"),
+                        "aspect_ratio": item.get("aspect_ratio"),
+                        **dict(item.get("voice_qa") or {}),
                     }
                     for item in scene_attempts
                 ],

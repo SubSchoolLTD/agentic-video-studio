@@ -20,6 +20,7 @@ from .providers import (
     EditorialProvider,
     MultimodalQAProvider,
     ParallelSearchProvider,
+    ResearchPacket,
     SpeechQAProvider,
     TextToSpeechProvider,
     VeoProvider,
@@ -53,6 +54,29 @@ STAGES = (
     "scoring",
 )
 RESUME_GRACE_SECONDS = 20
+MAX_AUTOMATIC_STAGE_RETRIES = 2
+LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
+
+
+def retryable_generation_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "429",
+            "resource_exhausted",
+            "deadline_exceeded",
+            "temporarily unavailable",
+            "service unavailable",
+            "connection reset",
+            "connection aborted",
+            "timed out",
+            "timeout",
+            "internal server error",
+            "status: 'unavailable'",
+            "status: \"unavailable\"",
+        )
+    )
 
 
 def initial_stage_state() -> list[dict[str, Any]]:
@@ -118,6 +142,39 @@ class WorkflowManager:
         loop = asyncio.get_running_loop()
         for job in jobs:
             loop.call_later(RESUME_GRACE_SECONDS, self.schedule, job.id)
+        repaired_job_ids: list[str] = []
+        with SessionLocal() as session:
+            repo = ResourceRepository(session)
+            failed_jobs = list(
+                session.scalars(
+                    select(Resource).where(
+                        Resource.kind == "generation_job",
+                        Resource.status == "failed",
+                    )
+                )
+            )
+            for failed_job in failed_jobs:
+                error_message = str((failed_job.data.get("last_error") or {}).get("message") or "").lower()
+                if (
+                    failed_job.data.get("current_stage") != "editorial_strategy"
+                    or LEGACY_EDITORIAL_SCHEMA_ERROR not in error_message
+                    or failed_job.data.get("editorial_schema_repair_retry_at")
+                ):
+                    continue
+                repo.update(
+                    failed_job,
+                    status="queued",
+                    data={
+                        "last_error": None,
+                        "editorial_schema_repair_retry_at": datetime.now(UTC).isoformat(),
+                        "retry_requested_at": datetime.now(UTC).isoformat(),
+                        "retry_source": "deployment_repair",
+                    },
+                )
+                repaired_job_ids.append(failed_job.id)
+        for repaired_job_id in repaired_job_ids:
+            logger.info("legacy_editorial_schema_job_requeued job_id=%s", repaired_job_id)
+            loop.call_later(RESUME_GRACE_SECONDS, self.schedule, repaired_job_id)
         with SessionLocal() as session:
             regenerations = list(
                 session.scalars(
@@ -662,37 +719,73 @@ class WorkflowManager:
             job = repo.get_any(job_id, kind="generation_job")
             if not job or job.status in {"ready", "cancelled", "blocked", "failed"}:
                 return
-            try:
-                await self._emit(session, job, "generation.started")
-                await self._run_pipeline(session, repo, job)
-            except asyncio.CancelledError:
-                session.refresh(job)
-                if job.status != "cancelled":
+            await self._emit(session, job, "generation.started")
+            while True:
+                try:
+                    await self._run_pipeline(session, repo, job)
+                    return
+                except asyncio.CancelledError:
+                    session.refresh(job)
+                    if job.status != "cancelled":
+                        repo.update(
+                            job,
+                            status="running",
+                            data={"interrupted_at": datetime.now(UTC).isoformat()},
+                        )
+                    raise
+                except Exception as exc:
+                    logger.exception("generation_stage_failed", extra={"job_id": job_id})
+                    current_stage = str(job.data.get("current_stage") or "intake")
+                    retry_counts = dict(job.data.get("automatic_stage_retries") or {})
+                    retry_count = int(retry_counts.get(current_stage, 0))
+                    if retryable_generation_error(exc) and retry_count < MAX_AUTOMATIC_STAGE_RETRIES:
+                        self._set_stage(repo, job, current_stage, "failed", error=str(exc))
+                        retry_counts[current_stage] = retry_count + 1
+                        repo.update(
+                            job,
+                            status="queued",
+                            data={
+                                "automatic_stage_retries": retry_counts,
+                                "last_error": {
+                                    "code": "automatic_retry_scheduled",
+                                    "message": str(exc),
+                                    "retryable": True,
+                                    "stage": current_stage,
+                                },
+                                "retry_requested_at": datetime.now(UTC).isoformat(),
+                            },
+                        )
+                        await self._emit(
+                            session,
+                            job,
+                            "generation.retry_scheduled",
+                            {"stage": current_stage, "attempt": retry_count + 1, "error": str(exc)},
+                        )
+                        await asyncio.sleep(2 ** retry_count)
+                        continue
+                    logger.exception("generation_failed", extra={"job_id": job_id})
+                    self._set_stage(repo, job, current_stage, "failed", error=str(exc))
                     repo.update(
                         job,
-                        status="running",
-                        data={"interrupted_at": datetime.now(UTC).isoformat()},
+                        status="failed",
+                        data={
+                            "last_error": {
+                                "code": "generation_failed",
+                                "message": str(exc),
+                                "retryable": True,
+                                "stage": current_stage,
+                            },
+                            "failed_at": datetime.now(UTC).isoformat(),
+                        },
                     )
-                raise
-            except Exception as exc:
-                logger.exception("generation_failed", extra={"job_id": job_id})
-                current_stage = job.data.get("current_stage", "intake")
-                self._set_stage(repo, job, current_stage, "failed", error=str(exc))
-                repo.update(
-                    job,
-                    status="failed",
-                    data={
-                        "last_error": {"code": "generation_failed", "message": str(exc), "retryable": True},
-                        "failed_at": datetime.now(UTC).isoformat(),
-                    },
-                )
-                refund_feature_charges(
-                    session,
-                    organization_id=job.organization_id,
-                    reference_id=job.id,
-                    reason="Generation failed before a usable video was produced",
-                )
-                await self._emit(session, job, "generation.failed", {"stage": current_stage, "error": str(exc)})
+                    refund_feature_charges(
+                        session,
+                        organization_id=job.organization_id,
+                        reference_id=job.id,
+                        reason="Generation failed before a usable video was produced",
+                    )
+                    await self._emit(session, job, "generation.failed", {"stage": current_stage, "error": str(exc)})
+                    return
 
     async def _run_pipeline(self, session: Any, repo: ResourceRepository, job: Resource) -> None:
         stages = {item.get("name"): item for item in job.data.get("stages", [])}
@@ -700,6 +793,11 @@ class WorkflowManager:
         voice_stage = stages.get("voice_audio", {})
         scene_stage = stages.get("scene_generation", {})
         storyboard_stage = stages.get("storyboard", {})
+        intake_stage = stages.get("intake", {})
+        research_stage = stages.get("research", {})
+        editorial_stage = stages.get("editorial_strategy", {})
+        script_stage = stages.get("script", {})
+        policy_stage = stages.get("fact_policy", {})
         if render_stage.get("status") in {"running", "failed"} and voice_stage.get("status") == "completed":
             await self._resume_from_render(session, repo, job)
             return
@@ -740,6 +838,9 @@ class WorkflowManager:
             or (input_resource.data.get("visual_mode") if input_resource else None)
             or "ugc_creator"
         )
+        legacy_native_audio = visual_mode == "ugc_native_audio"
+        if legacy_native_audio:
+            visual_mode = "ugc_creator"
         if visual_mode not in supported_visual_modes:
             raise RuntimeError(f"Unsupported visual mode: {visual_mode}")
         aspect_ratios = list(job.data.get("aspect_ratios") or ["9:16"])
@@ -752,8 +853,6 @@ class WorkflowManager:
             or character.status != "ready"
         ):
             raise RuntimeError("Selected reusable character is missing or not ready")
-        if visual_mode == "ugc_native_audio" and not character:
-            raise RuntimeError("UGC with native Veo speech requires a ready reusable character")
         character_profile = (
             f"Selected reusable creator named {character.data.get('name')}: {character.data.get('description')}"
             if character
@@ -761,232 +860,274 @@ class WorkflowManager:
         )
         reference_image_uri = str(character.data.get("storage_uri") or "") if character else ""
         reference_image_mime_type = str(character.data.get("mime_type") or "image/jpeg") if character else None
-        native_audio = visual_mode == "ugc_native_audio"
+        audio_mode = str(
+            job.data.get("audio_mode")
+            or (input_resource.data.get("audio_mode") if input_resource else None)
+            or ("veo_native" if legacy_native_audio else "google_tts")
+        )
+        if audio_mode not in {"google_tts", "veo_native"}:
+            raise RuntimeError(f"Unsupported audio mode: {audio_mode}")
+        native_audio = audio_mode == "veo_native"
 
-        self._set_stage(repo, job, "intake", "running")
-        if project.data.get("autopilot_paused") and job.data.get("automatic", False):
-            self._set_stage(repo, job, "intake", "blocked", error="Project autopilot is paused")
-            raise RuntimeError("Project autopilot is paused")
         repo.update(
             job,
             data={
                 "visual_mode": visual_mode,
-                "audio_mode": "veo_native" if native_audio else "google_tts",
+                "audio_mode": audio_mode,
                 "character_id": character.id if character else None,
                 "character_profile": character_profile or None,
                 "reference_image_uri": reference_image_uri or None,
                 "reference_image_mime_type": reference_image_mime_type,
             },
         )
-        self._set_stage(
-            repo,
-            job,
-            "intake",
-            "completed",
-            output={
-                "input_snapshot": {
-                    "title": title,
-                    "audience": audience,
-                    "objective": objective,
-                    "visual_mode": visual_mode,
-                    "aspect_ratios": aspect_ratios,
-                    "requested_hook": requested_hook,
-                    "content_format": content_format,
-                    "audio_mode": "veo_native" if native_audio else "google_tts",
-                    "character_id": character.id if character else None,
-                }
-            },
-        )
-
-        self._set_stage(repo, job, "research", "running")
-        research_run = repo.add(
-            kind="research_run",
-            organization_id=job.organization_id,
-            project_id=job.project_id,
-            status="running",
-            data={"objective": f"Find fresh, evidence-backed angles for {title} for {audience}", "trigger_type": "generation"},
-        )
-        research_started = time.perf_counter()
-        packet = await self.parallel.search(research_run.data["objective"], recency_days=30)
-        await self._emit(
-            session,
-            job,
-            "model.call.completed",
-            {
-                "stage": "research",
-                "provider": "parallel",
-                "model": "search",
-                "request_id": packet.request_id,
-                "latency_ms": round((time.perf_counter() - research_started) * 1000),
-                "cost_usd": None,
-            },
-        )
-        research_payload = {
-            "provider": "parallel",
-            "provider_mode": self.settings.provider_mode,
-            "parallel_request_ids": [packet.request_id],
-            "parallel_result_metadata": packet.raw,
-            "objective": packet.objective,
-            "sources": packet.sources,
-            "claims": packet.claims,
-            "source_count": len(packet.sources),
-            "completed_at": datetime.now(UTC).isoformat(),
-        }
-        repo.update(research_run, status="completed", data=research_payload)
-        opportunity = topic_score(len(packet.sources))
-        candidate = repo.add(
-            kind="topic_candidate",
-            organization_id=job.organization_id,
-            project_id=job.project_id,
-            status="selected",
-            data={
-                "research_run_id": research_run.id,
-                "title": title,
-                "angle": f"A concise, evidence-backed explanation of {title}",
-                "audience": audience,
-                "why_now": f"The current research packet contains {len(packet.sources)} relevant sources for this production.",
-                "source_ids": [source["id"] for source in packet.sources],
-                "sources": packet.sources,
-                "supported_claims": [claim for claim in packet.claims if claim.get("status") == "supported"],
-                "unresolved_questions": [
-                    claim.get("claim")
-                    for claim in packet.claims
-                    if claim.get("status") not in {"supported", "confirmed"}
-                ],
-                "freshness_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
-                "suggested_formats": ["problem_solution", "explainer"],
-                "topic_opportunity_score": opportunity["score"],
-                "score_confidence": opportunity["confidence"],
-                "score_breakdown": opportunity["breakdown"],
-                "risk_flags": [],
-            },
-        )
-        self._set_stage(
-            repo,
-            job,
-            "research",
-            "completed",
-            output={"research_run_id": research_run.id, "candidate_id": candidate.id, "parallel_request_id": packet.request_id},
-        )
-        await self._emit(session, job, "research.completed", {"research_run_id": research_run.id})
-
-        self._set_stage(repo, job, "editorial_strategy", "running")
-        editorial_started = time.perf_counter()
-        package = await self.editorial.create_package(
-            title=title,
-            audience=audience,
-            objective=objective,
-            brand=brand,
-            evidence=packet,
-            duration_seconds=int(job.data.get("target_duration_seconds", 30)),
-            visual_mode=visual_mode,
-            aspect_ratios=aspect_ratios,
-            requested_hook=requested_hook,
-            content_format=content_format,
-            character_profile=character_profile,
-            scene_count_min=int(job.data.get("scene_count_min", 4)),
-            scene_count_max=int(job.data.get("scene_count_max", 6)),
-            scene_count_flex=int(job.data.get("scene_count_flex", 2)),
-        )
-        package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
-        await self.editorial.fit_dialogue(package_scenes, native_audio=native_audio)
-        if package.get("storyboard") is not None:
-            package["storyboard"]["scenes"] = package_scenes
-        if package.get("script") is not None:
-            package["script"]["beats"] = package_scenes
-            package["script"]["voiceover"] = " ".join(
-                str(scene.get("narration") or "").strip() for scene in package_scenes
-            ).strip()
-        await self._emit(
-            session,
-            job,
-            "model.call.completed",
-            {
-                "stage": "editorial_strategy",
-                "provider": "google",
-                "model": self.settings.gemini_model if self.settings.uses_live_research else "mock-gemini",
-                "latency_ms": round((time.perf_counter() - editorial_started) * 1000),
-                "cost_usd": None,
-            },
-        )
-        concepts = package.get("concepts") or []
-        self._set_stage(
-            repo,
-            job,
-            "editorial_strategy",
-            "completed",
-            output={
-                "concepts": concepts,
-                "visual_mode": visual_mode,
-                "creator_profile": (package.get("storyboard") or {}).get("creator_profile"),
-                "visual_bible": (package.get("storyboard") or {}).get("visual_bible", []),
-                "prompt_version": (package.get("provider_trace") or {}).get("prompt_version"),
-                "scene_count": len(package_scenes),
-                "requested_scene_range": {
-                    "min": int(job.data.get("scene_count_min", 4)),
-                    "max": int(job.data.get("scene_count_max", 6)),
-                    "flex": int(job.data.get("scene_count_flex", 2)),
+        if intake_stage.get("status") != "completed":
+            self._set_stage(repo, job, "intake", "running")
+            if project.data.get("autopilot_paused") and job.data.get("automatic", False):
+                self._set_stage(repo, job, "intake", "blocked", error="Project autopilot is paused")
+                raise RuntimeError("Project autopilot is paused")
+            self._set_stage(
+                repo,
+                job,
+                "intake",
+                "completed",
+                output={
+                    "input_snapshot": {
+                        "title": title,
+                        "audience": audience,
+                        "objective": objective,
+                        "visual_mode": visual_mode,
+                        "aspect_ratios": aspect_ratios,
+                        "requested_hook": requested_hook,
+                        "content_format": content_format,
+                        "audio_mode": audio_mode,
+                        "character_id": character.id if character else None,
+                    }
                 },
-            },
-        )
-
-        self._set_stage(repo, job, "script", "running")
-        requested_variants = max(1, min(3, int(job.data.get("variants", 1))))
-        script_resources: list[Resource] = []
-        base_script = {**dict(package.get("script") or {}), **dict(job.data.get("script_override") or {})}
-        for index in range(requested_variants):
-            concept = concepts[index % len(concepts)] if concepts else {}
-            variant_script = {
-                **base_script,
-                "hook": concept.get("hook") or base_script.get("hook"),
-                "variant_title": concept.get("title") or base_script.get("title"),
-            }
-            script_resources.append(
-                repo.add(
-                    kind="script",
-                    organization_id=job.organization_id,
-                    project_id=job.project_id,
-                    status="approved_by_policy",
-                    version=index + 1,
-                    data={
-                        "generation_job_id": job.id,
-                        "variant_index": index + 1,
-                        "script": variant_script,
-                        "provider_trace": package.get("provider_trace", {}),
-                    },
-                )
             )
-        script = script_resources[0]
-        self._set_stage(
-            repo,
-            job,
-            "script",
-            "completed",
-            output={
-                "script_id": script.id,
-                "script_ids": [item.id for item in script_resources],
-                "variant_count": len(script_resources),
-            },
-        )
 
-        self._set_stage(repo, job, "fact_policy", "running")
-        policy = package.get("policy") or {"decision": "revise", "unsupported_claims": ["Missing policy output"]}
-        unsupported_claims = list(policy.get("unsupported_claims") or [])
-        unknown_claims = [claim for claim in packet.claims if claim.get("status") != "supported"]
-        evidence_missing = not packet.sources or not packet.claims
-        if policy.get("decision") != "pass" or unsupported_claims or unknown_claims or evidence_missing:
-            gate = {
-                **policy,
-                "decision": "block",
-                "evidence_missing": evidence_missing,
-                "unknown_claim_ids": [claim.get("id") for claim in unknown_claims],
-                "media_generation_started": False,
+        if research_stage.get("status") == "completed" and research_stage.get("output"):
+            research_output = dict(research_stage["output"])
+            research_run = repo.get_any(str(research_output.get("research_run_id") or ""), kind="research_run")
+            candidate = repo.get_any(str(research_output.get("candidate_id") or ""), kind="topic_candidate")
+            if not research_run or not candidate:
+                raise RuntimeError("Cannot resume: persisted research checkpoint is missing")
+            packet = ResearchPacket(
+                request_id=str(
+                    research_output.get("parallel_request_id")
+                    or (research_run.data.get("parallel_request_ids") or ["persisted"])[0]
+                ),
+                objective=str(research_run.data.get("objective") or ""),
+                sources=list(research_run.data.get("sources") or []),
+                claims=list(research_run.data.get("claims") or []),
+                raw=dict(research_run.data.get("parallel_result_metadata") or {}),
+            )
+            opportunity = topic_score(len(packet.sources))
+        else:
+            self._set_stage(repo, job, "research", "running")
+            research_run = repo.add(
+                kind="research_run",
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                status="running",
+                data={"objective": f"Find fresh, evidence-backed angles for {title} for {audience}", "trigger_type": "generation"},
+            )
+            research_started = time.perf_counter()
+            packet = await self.parallel.search(research_run.data["objective"], recency_days=30)
+            await self._emit(
+                session,
+                job,
+                "model.call.completed",
+                {
+                    "stage": "research",
+                    "provider": "parallel",
+                    "model": "search",
+                    "request_id": packet.request_id,
+                    "latency_ms": round((time.perf_counter() - research_started) * 1000),
+                    "cost_usd": None,
+                },
+            )
+            research_payload = {
+                "provider": "parallel",
+                "provider_mode": self.settings.provider_mode,
+                "parallel_request_ids": [packet.request_id],
+                "parallel_result_metadata": packet.raw,
+                "objective": packet.objective,
+                "sources": packet.sources,
+                "claims": packet.claims,
+                "source_count": len(packet.sources),
+                "completed_at": datetime.now(UTC).isoformat(),
             }
-            self._set_stage(repo, job, "fact_policy", "blocked", output=gate)
-            repo.update(job, status="blocked", data={"hard_gates": {"policy": False, "factual_confidence": False}})
-            await self._emit(session, job, "generation.blocked", {"reason": "fact_policy", **gate})
-            return
-        self._set_stage(repo, job, "fact_policy", "completed", output=policy)
+            repo.update(research_run, status="completed", data=research_payload)
+            opportunity = topic_score(len(packet.sources))
+            candidate = repo.add(
+                kind="topic_candidate",
+                organization_id=job.organization_id,
+                project_id=job.project_id,
+                status="selected",
+                data={
+                    "research_run_id": research_run.id,
+                    "title": title,
+                    "angle": f"A concise, evidence-backed explanation of {title}",
+                    "audience": audience,
+                    "why_now": f"The current research packet contains {len(packet.sources)} relevant sources for this production.",
+                    "source_ids": [source["id"] for source in packet.sources],
+                    "sources": packet.sources,
+                    "supported_claims": [claim for claim in packet.claims if claim.get("status") == "supported"],
+                    "unresolved_questions": [
+                        claim.get("claim")
+                        for claim in packet.claims
+                        if claim.get("status") not in {"supported", "confirmed"}
+                    ],
+                    "freshness_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+                    "suggested_formats": ["problem_solution", "explainer"],
+                    "topic_opportunity_score": opportunity["score"],
+                    "score_confidence": opportunity["confidence"],
+                    "score_breakdown": opportunity["breakdown"],
+                    "risk_flags": [],
+                },
+            )
+            self._set_stage(
+                repo,
+                job,
+                "research",
+                "completed",
+                output={"research_run_id": research_run.id, "candidate_id": candidate.id, "parallel_request_id": packet.request_id},
+            )
+            await self._emit(session, job, "research.completed", {"research_run_id": research_run.id})
+
+        persisted_package = (editorial_stage.get("output") or {}).get("package")
+        if editorial_stage.get("status") == "completed" and isinstance(persisted_package, dict):
+            package = dict(persisted_package)
+            package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
+        else:
+            self._set_stage(repo, job, "editorial_strategy", "running")
+            editorial_started = time.perf_counter()
+            package = await self.editorial.create_package(
+                title=title,
+                audience=audience,
+                objective=objective,
+                brand=brand,
+                evidence=packet,
+                duration_seconds=int(job.data.get("target_duration_seconds", 30)),
+                visual_mode=visual_mode,
+                native_audio=native_audio,
+                aspect_ratios=aspect_ratios,
+                requested_hook=requested_hook,
+                content_format=content_format,
+                character_profile=character_profile,
+                scene_count_min=int(job.data.get("scene_count_min", 4)),
+                scene_count_max=int(job.data.get("scene_count_max", 6)),
+                scene_count_flex=int(job.data.get("scene_count_flex", 2)),
+            )
+            package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
+            await self.editorial.fit_dialogue(package_scenes, native_audio=native_audio)
+            if package.get("storyboard") is not None:
+                package["storyboard"]["scenes"] = package_scenes
+            if package.get("script") is not None:
+                package["script"]["beats"] = package_scenes
+                package["script"]["voiceover"] = " ".join(
+                    str(scene.get("narration") or "").strip() for scene in package_scenes
+                ).strip()
+            await self._emit(
+                session,
+                job,
+                "model.call.completed",
+                {
+                    "stage": "editorial_strategy",
+                    "provider": "google",
+                    "model": self.settings.gemini_model if self.settings.uses_live_research else "mock-gemini",
+                    "latency_ms": round((time.perf_counter() - editorial_started) * 1000),
+                    "cost_usd": None,
+                },
+            )
+            concepts = package.get("concepts") or []
+            self._set_stage(
+                repo,
+                job,
+                "editorial_strategy",
+                "completed",
+                output={
+                    "concepts": concepts,
+                    "visual_mode": visual_mode,
+                    "creator_profile": (package.get("storyboard") or {}).get("creator_profile"),
+                    "visual_bible": (package.get("storyboard") or {}).get("visual_bible", []),
+                    "prompt_version": (package.get("provider_trace") or {}).get("prompt_version"),
+                    "scene_count": len(package_scenes),
+                    "requested_scene_range": {
+                        "min": int(job.data.get("scene_count_min", 4)),
+                        "max": int(job.data.get("scene_count_max", 6)),
+                        "flex": int(job.data.get("scene_count_flex", 2)),
+                    },
+                    "package": package,
+                },
+            )
+        concepts = package.get("concepts") or []
+
+        if script_stage.get("status") == "completed" and script_stage.get("output"):
+            script = repo.get_any(str(script_stage["output"].get("script_id") or ""), kind="script")
+            if not script:
+                raise RuntimeError("Cannot resume: persisted script checkpoint is missing")
+        else:
+            self._set_stage(repo, job, "script", "running")
+            requested_variants = max(1, min(3, int(job.data.get("variants", 1))))
+            script_resources: list[Resource] = []
+            base_script = {**dict(package.get("script") or {}), **dict(job.data.get("script_override") or {})}
+            for index in range(requested_variants):
+                concept = concepts[index % len(concepts)] if concepts else {}
+                variant_script = {
+                    **base_script,
+                    "hook": concept.get("hook") or base_script.get("hook"),
+                    "variant_title": concept.get("title") or base_script.get("title"),
+                }
+                script_resources.append(
+                    repo.add(
+                        kind="script",
+                        organization_id=job.organization_id,
+                        project_id=job.project_id,
+                        status="approved_by_policy",
+                        version=index + 1,
+                        data={
+                            "generation_job_id": job.id,
+                            "variant_index": index + 1,
+                            "script": variant_script,
+                            "provider_trace": package.get("provider_trace", {}),
+                        },
+                    )
+                )
+            script = script_resources[0]
+            self._set_stage(
+                repo,
+                job,
+                "script",
+                "completed",
+                output={
+                    "script_id": script.id,
+                    "script_ids": [item.id for item in script_resources],
+                    "variant_count": len(script_resources),
+                },
+            )
+
+        if policy_stage.get("status") == "completed" and isinstance(policy_stage.get("output"), dict):
+            policy = dict(policy_stage["output"])
+        else:
+            self._set_stage(repo, job, "fact_policy", "running")
+            policy = package.get("policy") or {"decision": "revise", "unsupported_claims": ["Missing policy output"]}
+            unsupported_claims = list(policy.get("unsupported_claims") or [])
+            unknown_claims = [claim for claim in packet.claims if claim.get("status") != "supported"]
+            evidence_missing = not packet.sources or not packet.claims
+            if policy.get("decision") != "pass" or unsupported_claims or unknown_claims or evidence_missing:
+                gate = {
+                    **policy,
+                    "decision": "block",
+                    "evidence_missing": evidence_missing,
+                    "unknown_claim_ids": [claim.get("id") for claim in unknown_claims],
+                    "media_generation_started": False,
+                }
+                self._set_stage(repo, job, "fact_policy", "blocked", output=gate)
+                repo.update(job, status="blocked", data={"hard_gates": {"policy": False, "factual_confidence": False}})
+                await self._emit(session, job, "generation.blocked", {"reason": "fact_policy", **gate})
+                return
+            self._set_stage(repo, job, "fact_policy", "completed", output=policy)
 
         self._set_stage(repo, job, "storyboard", "running")
         storyboard_data = package.get("storyboard") or {"scenes": []}
@@ -1836,6 +1977,12 @@ class WorkflowManager:
                 "actual_cost_usd": 0.0 if not self.settings.uses_live_video else job.data.get("actual_cost_usd"),
                 "completed_at": datetime.now(UTC).isoformat(),
             },
+        )
+        logger.info(
+            "generation_ready job_id=%s video_id=%s retry_source=%s",
+            job.id,
+            video.id,
+            job.data.get("retry_source") or "initial",
         )
         await self._emit(
             session,

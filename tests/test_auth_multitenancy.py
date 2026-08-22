@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -265,37 +264,14 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     )
     assert topup.status_code == 200
 
-    # Native-audio UGC must use a tenant-owned reusable character and its own editable price rule.
-    missing_character = jwt_client.post(
-        f"/v1/projects/{customer['default_project_id']}/generation-jobs",
-        headers=headers(customer),
-        json={"title": "Native UGC", "visual_mode": "ugc_native_audio"},
-    )
-    assert missing_character.status_code == 422
-    reference_png = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-    )
-    uploaded = jwt_client.post(
-        f"/v1/projects/{customer['default_project_id']}/characters/upload",
-        headers=headers(customer),
-        files={"image": ("creator.png", reference_png, "image/png")},
-        data={
-            "name": "Reusable creator",
-            "description": "Adult education creator in neutral casual clothing",
-            "rights_confirmed": "true",
-            "adult_confirmed": "true",
-        },
-    )
-    assert uploaded.status_code == 201, uploaded.text
-    character = uploaded.json()
-    assert character["status"] == "ready"
+    # Voice generation is independent from visual style and native Veo audio keeps its own price rule.
     native_generation = jwt_client.post(
         f"/v1/projects/{customer['default_project_id']}/generation-jobs",
         headers=headers(customer),
         json={
-            "title": "Native UGC",
-            "visual_mode": "ugc_native_audio",
-            "character_id": character["id"],
+            "title": "Native product demo",
+            "visual_mode": "product_demo",
+            "audio_mode": "veo_native",
             "aspect_ratios": ["9:16"],
             "variants": 1,
             "max_cost_usd": 30,
@@ -305,9 +281,10 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     native_job = jwt_client.get(
         f"/v1/generation-jobs/{native_generation.json()['generation_job_id']}", headers=headers(customer)
     ).json()
-    assert native_job["title"] == "Native UGC"
-    assert native_job["visual_mode"] == "ugc_native_audio"
-    assert native_job["character_id"] == character["id"]
+    assert native_job["title"] == "Native product demo"
+    assert native_job["visual_mode"] == "product_demo"
+    assert native_job["audio_mode"] == "veo_native"
+    assert native_job["character_id"] is None
     assert native_job["estimated_cost"]["basis"] == "video.generate_native_audio"
 
     # Provider spend is a cost, never a customer deposit. Only explicit paid/admin top-ups count as cash.

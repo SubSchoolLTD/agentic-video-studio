@@ -57,7 +57,7 @@ DEFAULT_PRICES = (
     },
     {
         "feature_key": "video.generate_native_audio",
-        "label": "UGC video with native Veo speech",
+        "label": "Video with native Veo speech",
         "unit": "generated second per aspect ratio",
         "provider": "Google + Parallel",
         "integration": "Veo native audio / Gemini / Parallel",

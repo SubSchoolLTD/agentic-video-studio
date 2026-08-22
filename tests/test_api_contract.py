@@ -13,6 +13,8 @@ def test_health_and_openapi(client) -> None:
     schema = client.get("/openapi.json").json()
     assert schema["openapi"].startswith("3.1")
     assert "/v1/projects/{project_id}/generation-jobs" in schema["paths"]
+    assert "/v1/generation-jobs/{job_id}/stages/{stage_name}/retry" in schema["paths"]
+    assert "patch" in schema["paths"]["/v1/research-profiles/{profile_id}"]
     assert "/v1/publications" in schema["paths"]
 
 

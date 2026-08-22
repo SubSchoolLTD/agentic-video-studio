@@ -86,6 +86,7 @@ from .schemas import (
     PublicationConfirm,
     PublicationCreate,
     ResearchProfileCreate,
+    ResearchProfilePatch,
     ResearchRunCreate,
     ReviewAction,
     SceneRegenerate,
@@ -1537,6 +1538,25 @@ def list_research_profiles(
     )
 
 
+@router.patch("/research-profiles/{profile_id}", tags=["research"])
+def patch_research_profile(
+    profile_id: str,
+    payload: ResearchProfilePatch,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("research:run")
+    repo = ResourceRepository(session)
+    profile = require_resource(repo, profile_id, principal, kind="research_profile")
+    changes = payload.model_dump(mode="json", exclude_unset=True)
+    status = changes.pop("status", None)
+    if "interval_hours" in changes and status != "paused":
+        changes["next_run_at"] = (
+            datetime.now(UTC) + timedelta(hours=int(changes["interval_hours"]))
+        ).isoformat()
+    return ResourceRepository.serialize(repo.update(profile, status=status, data=changes))
+
+
 def enqueue_due_research_profiles(
     session: Session,
     background: BackgroundTasks,
@@ -2244,14 +2264,20 @@ def create_idea(
         require_resource(repo, payload.topic_candidate_id, principal, kind="topic_candidate", project_id=project_id)
     if payload.character_id:
         require_resource(repo, payload.character_id, principal, kind="character", project_id=project_id)
-    if payload.visual_mode == "ugc_native_audio" and not payload.character_id:
-        raise HTTPException(422, "UGC with native Veo speech requires a reusable character")
+    legacy_native_audio = payload.visual_mode == "ugc_native_audio"
+    idea_data = payload.model_dump()
+    idea_data.update(
+        {
+            "visual_mode": "ugc_creator" if legacy_native_audio else payload.visual_mode,
+            "audio_mode": payload.audio_mode or ("veo_native" if legacy_native_audio else "google_tts"),
+        }
+    )
     idea = repo.add(
         kind="idea",
         organization_id=principal.organization_id,
         project_id=project_id,
         status="draft",
-        data={**payload.model_dump(), "created_by_type": "user", "created_by_id": principal.actor_id},
+        data={**idea_data, "created_by_type": "user", "created_by_id": principal.actor_id},
     )
     return ResourceRepository.serialize(idea)
 
@@ -2295,9 +2321,9 @@ def patch_idea(
             project_id=str(idea.project_id),
         )
     effective_visual_mode = str(allowed.get("visual_mode") or idea.data.get("visual_mode") or "ugc_creator")
-    effective_character_id = allowed.get("character_id", idea.data.get("character_id"))
-    if effective_visual_mode == "ugc_native_audio" and not effective_character_id:
-        raise HTTPException(422, "UGC with native Veo speech requires a reusable character")
+    if effective_visual_mode == "ugc_native_audio":
+        allowed["visual_mode"] = "ugc_creator"
+        allowed.setdefault("audio_mode", "veo_native")
     return ResourceRepository.serialize(repo.update(idea, data=allowed, status=new_status))
 
 
@@ -2509,10 +2535,16 @@ async def create_generation(
     if payload.idea_id:
         idea = require_resource(repo, payload.idea_id, principal, kind="idea", project_id=project_id)
     effective_visual_mode = str(payload.visual_mode or (idea.data.get("visual_mode") if idea else None) or "ugc_creator")
+    legacy_native_audio = effective_visual_mode == "ugc_native_audio"
+    if legacy_native_audio:
+        effective_visual_mode = "ugc_creator"
+    effective_audio_mode = str(
+        payload.audio_mode
+        or (idea.data.get("audio_mode") if idea else None)
+        or ("veo_native" if legacy_native_audio else "google_tts")
+    )
     character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
-    if effective_visual_mode == "ugc_native_audio":
-        if not character_id:
-            raise HTTPException(422, "UGC with native Veo speech requires a ready reusable character")
+    if character_id:
         character = require_resource(repo, str(character_id), principal, kind="character", project_id=project_id)
         if character.status != "ready" or not character.data.get("storage_uri"):
             raise HTTPException(409, "Selected character is not ready")
@@ -2521,7 +2553,9 @@ async def create_generation(
         {
             "title": payload.title or (idea.data.get("title") if idea else None),
             "visual_mode": effective_visual_mode,
+            "audio_mode": effective_audio_mode,
             "character_id": character_id,
+            "created_by_id": principal.actor_id,
         }
     )
     if idempotency_key:
@@ -2541,7 +2575,7 @@ async def create_generation(
         raise HTTPException(409, f"Project is not ready for generation: {project.status}")
     if payload.source_item_id:
         require_resource(repo, payload.source_item_id, principal, kind="source_item", project_id=project_id)
-    pricing_feature = "video.generate_native_audio" if effective_visual_mode == "ugc_native_audio" else "video.generate"
+    pricing_feature = "video.generate_native_audio" if effective_audio_mode == "veo_native" else "video.generate"
     billable_seconds = estimate_veo_billable_seconds(
         target_duration_seconds=payload.target_duration_seconds,
         scene_count_min=payload.scene_count_min,
@@ -2738,7 +2772,7 @@ async def retry_generation(
     if outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
         pricing_feature = str(
             (job.data.get("estimated_cost") or {}).get("basis")
-            or ("video.generate_native_audio" if job.data.get("visual_mode") == "ugc_native_audio" else "video.generate")
+            or ("video.generate_native_audio" if job.data.get("audio_mode") == "veo_native" else "video.generate")
         )
         charge_feature(
             session,
@@ -2760,6 +2794,93 @@ async def retry_generation(
     repo.update(job, status="queued", data={"last_error": None, "retry_requested_at": datetime.now(UTC).isoformat()})
     request.app.state.workflow.schedule(job.id)
     return {"generation_job_id": job.id, "status": "queued"}
+
+
+@router.post(
+    "/generation-jobs/{job_id}/stages/{stage_name}/retry",
+    status_code=202,
+    tags=["generations"],
+)
+async def retry_generation_stage(
+    job_id: str,
+    stage_name: str,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    job = require_resource(repo, job_id, principal, kind="generation_job")
+    stages = [dict(item) for item in job.data.get("stages", [])]
+    stage_index = next((index for index, item in enumerate(stages) if item.get("name") == stage_name), None)
+    if stage_index is None:
+        raise HTTPException(404, f"Unknown generation stage: {stage_name}")
+    stage = stages[stage_index]
+    if job.status not in {"failed", "blocked"} or stage.get("status") not in {"failed", "blocked"}:
+        raise HTTPException(409, f"Stage {stage_name} cannot be retried from {stage.get('status')}")
+    invalidated = [
+        item.get("name")
+        for item in stages[stage_index + 1 :]
+        if item.get("status") == "completed"
+    ]
+    if invalidated:
+        raise HTTPException(409, f"Retry would invalidate completed stages: {', '.join(invalidated)}")
+    stage.update(
+        {
+            "status": "pending",
+            "started_at": None,
+            "completed_at": None,
+        }
+    )
+    stage.pop("error", None)
+    for downstream in stages[stage_index + 1 :]:
+        downstream["status"] = "pending"
+        downstream["started_at"] = None
+        downstream["completed_at"] = None
+        downstream.pop("error", None)
+        downstream.pop("output", None)
+    if outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
+        pricing_feature = str(
+            (job.data.get("estimated_cost") or {}).get("basis")
+            or ("video.generate_native_audio" if job.data.get("audio_mode") == "veo_native" else "video.generate")
+        )
+        charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key=pricing_feature,
+            quantity=int(
+                (job.data.get("estimated_cost") or {}).get("billable_seconds_per_aspect_ratio")
+                or estimate_veo_billable_seconds(
+                    target_duration_seconds=int(job.data.get("target_duration_seconds", 30)),
+                    scene_count_min=int(job.data.get("scene_count_min", 4)),
+                    scene_count_max=int(job.data.get("scene_count_max", 6)),
+                    scene_count_flex=int(job.data.get("scene_count_flex", 2)),
+                )
+            )
+            * len(job.data.get("aspect_ratios") or ["9:16"]),
+            reference_id=job.id,
+        )
+    repo.update(
+        job,
+        status="queued",
+        data={
+            "stages": stages,
+            "current_stage": stage_name,
+            "last_error": None,
+            "retry_requested_at": datetime.now(UTC).isoformat(),
+            "retry_source": "user_stage_retry",
+        },
+    )
+    request.app.state.workflow.schedule(job.id)
+    return {
+        "generation_job_id": job.id,
+        "status": "queued",
+        "resume_from_stage": stage_name,
+        "preserved_stages": [
+            item.get("name") for item in stages[:stage_index] if item.get("status") == "completed"
+        ],
+    }
 
 
 @router.get("/generation-jobs/{job_id}/events", tags=["generations"])

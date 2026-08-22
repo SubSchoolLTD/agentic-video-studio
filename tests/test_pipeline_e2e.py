@@ -308,7 +308,8 @@ def test_native_speech_qa_retries_a_clipped_scene_with_shorter_dialogue(
         "/v1/projects/prj_subschool/generation-jobs",
         json={
             "title": "Speech QA automatic recovery",
-            "visual_mode": "ugc_native_audio",
+            "visual_mode": "ugc_creator",
+            "audio_mode": "veo_native",
             "character_id": uploaded.json()["id"],
             "aspect_ratios": ["9:16"],
             "target_duration_seconds": 8,
@@ -371,6 +372,75 @@ def test_retry_resumes_from_failed_render_checkpoint(client, auth_headers, monke
     assert attempts["research"] == 1
     assert attempts["scene_generation"] == 1
     assert attempts["render"] == 2
+
+
+def test_failed_editorial_stage_retries_from_its_checkpoint_without_research(
+    client, auth_headers, monkeypatch
+) -> None:
+    manager = client.app.state.workflow
+    original_search = manager.parallel.search
+    original_create_package = manager.editorial.create_package
+    research_calls = 0
+    editorial_calls = 0
+
+    async def counted_search(*args, **kwargs):
+        nonlocal research_calls
+        research_calls += 1
+        return await original_search(*args, **kwargs)
+
+    async def fail_editorial_once(*args, **kwargs):
+        nonlocal editorial_calls
+        editorial_calls += 1
+        if editorial_calls == 1:
+            raise RuntimeError(
+                "400 INVALID_ARGUMENT: The specified schema produces a constraint "
+                "that has too many states for serving"
+            )
+        return await original_create_package(*args, **kwargs)
+
+    monkeypatch.setattr(manager.parallel, "search", counted_search)
+    monkeypatch.setattr(manager.editorial, "create_package", fail_editorial_once)
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Resume after editorial schema failure",
+            "visual_mode": "product_demo",
+            "audio_mode": "veo_native",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "scene_count_min": 2,
+            "scene_count_max": 2,
+            "scene_count_flex": 0,
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-editorial-stage-retry-1"},
+    )
+    assert created.status_code == 202, created.text
+    job_id = created.json()["generation_job_id"]
+    failed = wait_for_job(client, job_id, auth_headers)
+    assert failed["status"] == "failed"
+    assert failed["current_stage"] == "editorial_strategy"
+    assert research_calls == 1
+    assert next(stage for stage in failed["stages"] if stage["name"] == "research")["status"] == "completed"
+
+    retried = client.post(
+        f"/v1/generation-jobs/{job_id}/stages/editorial_strategy/retry",
+        headers=auth_headers,
+    )
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["resume_from_stage"] == "editorial_strategy"
+    assert retried.json()["preserved_stages"] == ["intake", "research"]
+
+    completed = wait_for_job(client, job_id, auth_headers)
+    assert completed["status"] == "ready", completed.get("last_error")
+    attempts = {stage["name"]: stage["attempt"] for stage in completed["stages"]}
+    assert attempts["intake"] == 1
+    assert attempts["research"] == 1
+    assert attempts["editorial_strategy"] == 2
+    assert research_calls == 1
+    assert editorial_calls == 2
+    assert completed["visual_mode"] == "product_demo"
+    assert completed["audio_mode"] == "veo_native"
 
 
 def test_selective_scene_regeneration_executes_and_appends_video_version(client, auth_headers) -> None:

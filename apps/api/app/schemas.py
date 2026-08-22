@@ -114,6 +114,16 @@ class ResearchProfileCreate(BaseModel):
     next_run_at: datetime | None = None
 
 
+class ResearchProfilePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    objective: str | None = Field(default=None, min_length=8, max_length=2_000)
+    interval_hours: int | None = Field(default=None, ge=1, le=24 * 30)
+    timezone: str | None = None
+    recency_days: int | None = Field(default=None, ge=1, le=3650)
+    max_candidates: int | None = Field(default=None, ge=1, le=20)
+    status: Literal["active", "paused"] | None = None
+
+
 class IdeaCreate(BaseModel):
     title: str = Field(min_length=3, max_length=300)
     hook: str = Field(default="", max_length=500)
@@ -121,6 +131,7 @@ class IdeaCreate(BaseModel):
     objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"] = "education"
     format: str = "educational_explainer"
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] = "ugc_creator"
+    audio_mode: Literal["google_tts", "veo_native"] | None = None
     character_id: str | None = Field(default=None, max_length=64)
     source_item_id: str | None = None
     topic_candidate_id: str | None = None
@@ -134,6 +145,7 @@ class IdeaPatch(BaseModel):
     objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"] | None = None
     format: str | None = Field(default=None, max_length=120)
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
+    audio_mode: Literal["google_tts", "veo_native"] | None = None
     character_id: str | None = Field(default=None, max_length=64)
     status: Literal["draft", "researching", "ready", "planned"] | None = None
 
@@ -147,6 +159,7 @@ class GenerationCreate(BaseModel):
     approval_mode: Literal["manual_all", "final_only", "auto_low_risk", "draft_only"] = "final_only"
     variants: int = Field(default=1, ge=1, le=3)
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
+    audio_mode: Literal["google_tts", "veo_native"] | None = None
     character_id: str | None = Field(default=None, max_length=64)
     scene_count_min: int = Field(default=4, ge=2, le=20)
     scene_count_max: int = Field(default=6, ge=2, le=20)

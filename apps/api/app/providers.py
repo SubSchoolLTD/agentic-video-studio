@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import Settings
 
@@ -640,6 +640,7 @@ class EditorialProvider:
         evidence: ResearchPacket,
         duration_seconds: int,
         visual_mode: VisualMode,
+        native_audio: bool = False,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str = "",
         content_format: str = "educational_explainer",
@@ -657,6 +658,7 @@ class EditorialProvider:
                 evidence,
                 duration_seconds,
                 visual_mode,
+                native_audio,
                 aspect_ratios,
                 requested_hook,
                 content_format,
@@ -676,6 +678,7 @@ class EditorialProvider:
             evidence,
             duration_seconds,
             visual_mode,
+            native_audio,
             aspect_ratios,
             requested_hook,
             content_format,
@@ -780,6 +783,7 @@ class EditorialProvider:
         evidence: ResearchPacket,
         duration_seconds: int,
         visual_mode: VisualMode,
+        native_audio: bool,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
         content_format: str,
@@ -823,27 +827,55 @@ class EditorialProvider:
                 "generation_boundary": "No readable text, captions, prices, logos, brands or invented UI inside generative video",
                 "audio_boundary": (
                     "Plan short direct-to-camera dialogue for native Veo speech; each narration must fit its scene duration"
-                    if visual_mode == "ugc_native_audio"
+                    if native_audio
                     else "Plan silent visual performance; voiceover and captions are added after scene generation"
                 ),
                 "cta": "must match brand policy",
             },
             "mode_direction": VISUAL_MODE_DIRECTIONS[visual_mode],
             "selected_creator": character_profile or None,
+            "output_contract": {
+                "production_brief": [
+                    "objective", "audience", "format", "duration_target", "mandatory_points",
+                    "forbidden_claims", "budget_class", "visual_mode", "aspect_ratios",
+                ],
+                "concepts": "2-4 objects with title, hook, angle and integer score",
+                "script": [
+                    "title", "hook", "voiceover", "duration_target", "cta",
+                    "caption_candidates", "hashtags",
+                ],
+                "policy": ["decision", "high_risk", "unsupported_claims"],
+                "storyboard": {
+                    "fields": ["scenes", "visual_mode", "creator_profile", "visual_bible"],
+                    "scene_fields": list(EditorialScene.model_fields),
+                },
+            },
         }
-        response = client.models.generate_content(
-            model=self.settings.gemini_model,
-            contents=json.dumps(prompt, ensure_ascii=False),
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=EditorialPackage,
-                system_instruction=EDITORIAL_SYSTEM_INSTRUCTION,
-            ),
-        )
-        if isinstance(response.parsed, EditorialPackage):
-            package = response.parsed.model_dump()
-        else:
-            package = EditorialPackage.model_validate_json(response.text or "{}").model_dump()
+        package: dict[str, Any] | None = None
+        validation_error = ""
+        for attempt in range(2):
+            request_prompt = dict(prompt)
+            if attempt:
+                request_prompt["repair_instruction"] = (
+                    "The previous JSON did not match the output contract. Return a complete corrected object. "
+                    f"Validation summary: {validation_error[:1200]}"
+                )
+            response = client.models.generate_content(
+                model=self.settings.gemini_model,
+                contents=json.dumps(request_prompt, ensure_ascii=False),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.35,
+                    system_instruction=EDITORIAL_SYSTEM_INSTRUCTION,
+                ),
+            )
+            try:
+                package = EditorialPackage.model_validate_json(response.text or "{}").model_dump()
+                break
+            except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+                validation_error = str(exc)
+        if package is None:
+            raise RuntimeError(f"Editorial provider returned invalid JSON twice: {validation_error}")
         scenes = package["storyboard"]["scenes"]
         allowed_min = max(2, scene_count_min - scene_count_flex)
         allowed_max = min(20, scene_count_max + scene_count_flex)
@@ -894,7 +926,7 @@ class EditorialProvider:
                 apply_narration_to_scene(
                     scene,
                     str(scene.get("narration") or "").strip(),
-                    native_audio=visual_mode == "ugc_native_audio",
+                    native_audio=native_audio,
                 )
             )
             cursor = end
@@ -921,6 +953,7 @@ class EditorialProvider:
         evidence: ResearchPacket,
         duration_seconds: int,
         visual_mode: VisualMode,
+        native_audio: bool,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
         content_format: str,
@@ -983,7 +1016,7 @@ class EditorialProvider:
                     "camera_direction": "handheld smartphone framing with subtle natural movement",
                     "performance_direction": (
                         "natural direct-to-camera speech with restrained gestures"
-                        if visual_mode == "ugc_native_audio"
+                        if native_audio
                         else "natural understated action, relaxed mouth, no visible speaking"
                     ),
                     "locked": False,
@@ -994,7 +1027,7 @@ class EditorialProvider:
                 apply_narration_to_scene(
                     scene,
                     narration,
-                    native_audio=visual_mode == "ugc_native_audio",
+                    native_audio=native_audio,
                 )
             )
             cursor = end

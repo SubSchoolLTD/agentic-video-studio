@@ -12,11 +12,20 @@ test('research persists candidates, exposes details and hides rejected cards', a
   await page.getByRole('button', { name: 'Start research' }).click()
   await expect(page.getByText('Research completed')).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId('research-running')).toHaveCount(0)
+  await expect(page.getByTestId('research-filters')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Configure automatic research' }).first()).toHaveAttribute('href', '/settings?tab=automation')
 
   const cards = page.locator('.candidate-card')
   await expect(cards.first()).toBeVisible()
   const countBefore = await cards.count()
   expect(countBefore).toBeGreaterThan(0)
+  const firstTitle = await cards.first().locator('h3').innerText()
+  await page.getByLabel('Search research candidates').fill(firstTitle.slice(0, 12))
+  await expect(cards.first()).toContainText(firstTitle)
+  await page.getByLabel('Filter minimum opportunity score').selectOption('70')
+  await expect(cards.first()).toBeVisible()
+  await page.getByLabel('Filter minimum opportunity score').selectOption('')
+  await page.getByLabel('Search research candidates').fill('')
   await cards.first().getByRole('button', { name: 'Details' }).click()
 
   const details = page.getByTestId('candidate-details')
@@ -72,6 +81,14 @@ test('ideas move between kanban columns and settings require explicit edit mode'
     await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible()
   }
 
+  await page.getByTestId('settings-tab-automation').click()
+  await page.getByRole('button', { name: 'Edit automation settings' }).click()
+  await page.getByLabel('Run idea research automatically').check()
+  await page.getByLabel('Research interval, hours').fill('48')
+  await page.getByTestId('save-settings').click()
+  await expect(page.getByText('Every 48 hours', { exact: true })).toBeVisible()
+
+  await page.getByTestId('settings-tab-general').click()
   await page.getByTestId('edit-settings').click()
   const projectName = page.getByLabel('Project name')
   await expect(projectName).toHaveValue(account.projectName)

@@ -389,6 +389,29 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
     assert not any(item["id"] == candidates[1]["id"] for item in visible_candidates)
 
 
+def test_research_profile_cadence_can_be_edited_and_paused(client, auth_headers) -> None:
+    created = client.post(
+        "/v1/projects/prj_subschool/research-profiles",
+        json={
+            "name": "Editable cadence",
+            "objective": "Find evidence-backed short video topics",
+            "interval_hours": 24,
+        },
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+
+    changed = client.patch(
+        f"/v1/research-profiles/{created.json()['id']}",
+        json={"interval_hours": 48, "status": "paused"},
+        headers=auth_headers,
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["interval_hours"] == 48
+    assert changed.json()["status"] == "paused"
+    assert changed.json()["next_run_at"]
+
+
 def test_calendar_update_returns_cadence_warnings(client, auth_headers) -> None:
     idea = client.post(
         "/v1/projects/prj_subschool/ideas",

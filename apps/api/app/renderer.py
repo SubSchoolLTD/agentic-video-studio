@@ -188,12 +188,15 @@ def render_motion_video(
                 f"w={round((safe_width - 60) * ((index + 1) / scene_count))}:h=8:color=0xa24cb8@1:t=fill:"
                 f"enable='between(t,{start},{end})'"
             )
-    overlays.extend(
-        [
-            "fade=t=in:st=0:d=0.35",
-            f"fade=t=out:st={max(0, duration_seconds - 0.5)}:d=0.5",
-        ]
-    )
+    # Generated Veo clips already contain complete shots. A renderer-level fade used to
+    # create an unwanted opening transition and forced the final frames to black.
+    if not scene_video_paths:
+        overlays.extend(
+            [
+                "fade=t=in:st=0:d=0.35",
+                f"fade=t=out:st={max(0, duration_seconds - 0.5)}:d=0.5",
+            ]
+        )
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     if scene_video_paths:
         for path in scene_video_paths:
@@ -210,9 +213,12 @@ def render_motion_video(
                 command.extend(["-f", "lavfi", "-i", f"sine=frequency=174:sample_rate=48000:duration={duration_seconds}"])
         segment_duration = duration_seconds / len(scene_video_paths)
         chains = []
+        overscan_width = round(width * 1.04 / 2) * 2
+        overscan_height = round(height * 1.04 / 2) * 2
         for index in range(len(scene_video_paths)):
             chains.append(
-                f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+                f"[{index}:v]scale={overscan_width}:{overscan_height}:"
+                f"force_original_aspect_ratio=increase,crop={width}:{height},"
                 f"fps=30,trim=duration={segment_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
             )
             if use_scene_audio:
@@ -323,6 +329,7 @@ def render_motion_video(
         "logo_path": str(logo_path) if logo_path else None,
         "logo_applied": bool(logo_path and scene_video_paths),
         "captions_burned_in": bool(burn_in_captions and scene_video_paths),
+        "generated_clip_edge_overscan_percent": 4 if scene_video_paths else 0,
         "output": str(output_path),
         "checksum": hashlib.sha256(output_path.read_bytes()).hexdigest(),
     }
@@ -411,7 +418,7 @@ def technical_qa(path: Path, *, aspect_ratio: str, duration_target: int) -> dict
                 "-i",
                 str(path),
                 "-vf",
-                "blackdetect=d=1.0:pix_th=0.10",
+                "blackdetect=d=0.08:pix_th=0.02",
                 "-an",
                 "-f",
                 "null",

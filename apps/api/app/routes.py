@@ -2543,6 +2543,11 @@ async def create_generation(
         or (idea.data.get("audio_mode") if idea else None)
         or ("veo_native" if legacy_native_audio else "google_tts")
     )
+    effective_native_voice_preset = str(
+        payload.native_voice_preset
+        or (idea.data.get("native_voice_preset") if idea else None)
+        or "warm_conversational"
+    )
     character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
     if character_id:
         character = require_resource(repo, str(character_id), principal, kind="character", project_id=project_id)
@@ -2554,6 +2559,7 @@ async def create_generation(
             "title": payload.title or (idea.data.get("title") if idea else None),
             "visual_mode": effective_visual_mode,
             "audio_mode": effective_audio_mode,
+            "native_voice_preset": effective_native_voice_preset,
             "character_id": character_id,
             "created_by_id": principal.actor_id,
         }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from shutil import which
@@ -16,6 +17,36 @@ def run_ffmpeg(arguments: list[str]) -> None:
         check=True,
         capture_output=True,
     )
+
+
+def edge_frame_luma(path: Path, *, from_end: bool = False) -> float:
+    ffmpeg = which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required for renderer tests")
+    seek = ["-sseof", "-0.04"] if from_end else []
+    completed = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            *seek,
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "signalstats,metadata=print",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r"lavfi\.signalstats\.YAVG=([0-9.]+)", completed.stderr)
+    assert match, completed.stderr
+    return float(match.group(1))
 
 
 def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None:
@@ -65,6 +96,9 @@ def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None
     assert manifest["overlay_style"] == "none"
     assert manifest["logo_applied"] is False
     assert manifest["captions_burned_in"] is False
+    assert manifest["generated_clip_edge_overscan_percent"] == 4
+    assert edge_frame_luma(output) > 25
+    assert edge_frame_luma(output, from_end=True) > 25
     assert technical_qa(output, aspect_ratio="9:16", duration_target=4)["passed"] is True
 
 

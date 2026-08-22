@@ -132,6 +132,9 @@ class IdeaCreate(BaseModel):
     format: str = "educational_explainer"
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] = "ugc_creator"
     audio_mode: Literal["google_tts", "veo_native"] | None = None
+    native_voice_preset: Literal[
+        "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
+    ] = "warm_conversational"
     character_id: str | None = Field(default=None, max_length=64)
     source_item_id: str | None = None
     topic_candidate_id: str | None = None
@@ -146,6 +149,9 @@ class IdeaPatch(BaseModel):
     format: str | None = Field(default=None, max_length=120)
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
     audio_mode: Literal["google_tts", "veo_native"] | None = None
+    native_voice_preset: Literal[
+        "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
+    ] | None = None
     character_id: str | None = Field(default=None, max_length=64)
     status: Literal["draft", "researching", "ready", "planned"] | None = None
 
@@ -160,6 +166,9 @@ class GenerationCreate(BaseModel):
     variants: int = Field(default=1, ge=1, le=3)
     visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
     audio_mode: Literal["google_tts", "veo_native"] | None = None
+    native_voice_preset: Literal[
+        "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
+    ] | None = None
     character_id: str | None = Field(default=None, max_length=64)
     scene_count_min: int = Field(default=4, ge=2, le=20)
     scene_count_max: int = Field(default=6, ge=2, le=20)

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .config import Settings
 
@@ -89,6 +89,12 @@ class EditorialScene(BaseModel):
     camera_direction: str
     performance_direction: str
 
+    @field_validator("on_screen_text", mode="before")
+    @classmethod
+    def normalize_optional_on_screen_text(cls, value: Any) -> str:
+        """Gemini uses null to mean that a scene intentionally has no overlay copy."""
+        return "" if value is None else str(value)
+
 
 class EditorialConcept(BaseModel):
     title: str
@@ -107,6 +113,15 @@ class ProductionBrief(BaseModel):
     budget_class: str
     visual_mode: VisualMode
     aspect_ratios: list[Literal["9:16", "16:9"]]
+
+    @field_validator("mandatory_points", mode="before")
+    @classmethod
+    def normalize_mandatory_points(cls, value: Any) -> Any:
+        """Accept Gemini's lossless shorthand while preserving the strict stored shape."""
+        if isinstance(value, str):
+            normalized = value.strip()
+            return [normalized] if normalized else []
+        return value
 
 
 class EditorialScript(BaseModel):
@@ -896,10 +911,13 @@ class EditorialProvider:
             "mode_direction": VISUAL_MODE_DIRECTIONS[visual_mode],
             "selected_creator": character_profile or None,
             "output_contract": {
-                "production_brief": [
-                    "objective", "audience", "format", "duration_target", "mandatory_points",
-                    "forbidden_claims", "budget_class", "visual_mode", "aspect_ratios",
-                ],
+                "production_brief": {
+                    "fields": [
+                        "objective", "audience", "format", "duration_target", "mandatory_points",
+                        "forbidden_claims", "budget_class", "visual_mode", "aspect_ratios",
+                    ],
+                    "mandatory_points": "JSON array of strings, even when there is only one point",
+                },
                 "concepts": "2-4 objects with title, hook, angle and integer score",
                 "script": [
                     "title", "hook", "voiceover", "duration_target", "cta",
@@ -909,6 +927,7 @@ class EditorialProvider:
                 "storyboard": {
                     "fields": ["scenes", "visual_mode", "creator_profile", "visual_bible"],
                     "scene_fields": list(EditorialScene.model_fields),
+                    "on_screen_text": "JSON string; use an empty string when no overlay copy is wanted, never null",
                 },
             },
         }
@@ -919,6 +938,7 @@ class EditorialProvider:
             if attempt:
                 request_prompt["repair_instruction"] = (
                     "The previous JSON did not match the output contract. Return a complete corrected object. "
+                    "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
                     f"Validation summary: {validation_error[:1200]}"
                 )
             response = client.models.generate_content(

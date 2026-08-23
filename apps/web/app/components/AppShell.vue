@@ -33,11 +33,11 @@ const hydrated = ref(false)
 
 onMounted(() => { hydrated.value = true })
 
-const baseNav = [
+const baseNav: any[] = [
   { label: 'Overview', to: '/app', icon: Gauge },
   { label: 'Sources', to: '/sources', icon: FileStack },
-  { label: 'Research', to: '/research', icon: RadioTower, badge: '3' },
-  { label: 'Ideas', to: '/ideas', icon: Sparkles, badge: '7' },
+  { label: 'Research', to: '/research', icon: RadioTower },
+  { label: 'Ideas', to: '/ideas', icon: Sparkles },
   { label: 'Characters', to: '/characters', icon: UserRound },
   { label: 'Calendar', to: '/calendar', icon: CalendarDays },
   { label: 'Productions', to: '/productions', icon: Clapperboard },
@@ -50,8 +50,6 @@ const baseNav = [
   { label: 'Project settings', to: '/settings', icon: Settings },
   { label: 'Balance & billing', to: '/billing', icon: BadgeDollarSign },
 ]
-const nav = computed(() => baseNav)
-
 const { data: projects } = await useAsyncData('shell-projects', () => api<any>('/v1/projects'), {
   default: () => ({ items: [] }),
 })
@@ -61,6 +59,17 @@ const { data: health } = await useAsyncData('shell-health', () => api<any>('/v1/
 const { data: billingSummary } = await useAsyncData('billing-summary', () => api<any>('/v1/billing/summary'), {
   default: () => ({ balance_cents: 0, balance_usd: 0, currency: 'USD', prices: [] }),
 })
+const { data: shellCandidates } = await useAsyncData(
+  'shell-research-candidates',
+  () => projectId.value
+    ? api<any>(`/v1/projects/${projectId.value}/topic-candidates?include_hidden=true`)
+    : Promise.resolve({ items: [] }),
+  { default: () => ({ items: [] }), watch: [projectId] },
+)
+const unresolvedCandidateCount = computed(() => (shellCandidates.value?.items || []).filter((item: any) => item.status === 'candidate' && !item.idea_id).length)
+const nav = computed(() => baseNav.map(item => item.to === '/research'
+  ? { ...item, badge: unresolvedCandidateCount.value ? String(unresolvedCandidateCount.value) : undefined }
+  : item))
 const activeProject = computed(() => projects.value?.items?.find((item: any) => item.id === projectId.value) || projects.value?.items?.[0])
 const initials = computed(() => (auth.user.value?.display_name || auth.user.value?.email || 'U').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase())
 const projectInitials = computed(() => (activeProject.value?.name || 'Project').split(/\s+/).map((part: string) => part[0]).join('').slice(0, 2).toUpperCase())

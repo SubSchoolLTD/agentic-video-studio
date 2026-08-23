@@ -92,6 +92,45 @@ def extract_last_frame(video_path: Path, output_path: Path) -> Path:
     return output_path
 
 
+def extract_video_tail(video_path: Path, output_path: Path, *, duration_seconds: float = 7.0) -> Path:
+    """Materialize only the newly generated tail of a cumulative Veo extension."""
+    if not shutil.which("ffmpeg"):
+        raise RenderError("FFmpeg is required")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-sseof",
+        f"-{max(0.5, float(duration_seconds)):.3f}",
+        "-i",
+        str(video_path),
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30",
+        "-af",
+        "aresample=48000",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+        raise RenderError(completed.stderr.strip() or "Could not extract the Veo extension tail")
+    return output_path
+
+
 def _font_path() -> str:
     candidates = (
         "/System/Library/Fonts/SFNS.ttf",
@@ -249,8 +288,8 @@ def render_motion_video(
         volume = "1" if use_scene_audio or (audio_path and audio_path.exists()) else "0.035"
         audio_source = "[scene_audio]" if use_scene_audio else f"[{audio_input_index}:a]"
         chains.append(
-            f"{audio_source}volume={volume},apad,atrim=duration={duration_seconds},"
-            f"afade=t=in:st=0:d=0.4,afade=t=out:st={max(0, duration_seconds - 0.6)}:d=0.6[a]"
+            f"{audio_source}volume={volume},loudnorm=I=-16:LRA=7:TP=-1.0,"
+            f"apad,atrim=duration={duration_seconds},afade=t=out:st={max(0, duration_seconds - 0.15)}:d=0.15[a]"
         )
         command.extend(["-filter_complex", ";".join(chains), "-map", "[vout]", "-map", "[a]"])
     else:
@@ -271,8 +310,8 @@ def render_motion_video(
         command.extend(
             [
                 "-filter_complex",
-                f"[1:a]volume={volume},apad,atrim=duration={duration_seconds},afade=t=in:st=0:d=0.4,"
-                f"afade=t=out:st={max(0, duration_seconds - 0.6)}:d=0.6[a]",
+                f"[1:a]volume={volume},loudnorm=I=-16:LRA=7:TP=-1.0,apad,atrim=duration={duration_seconds},"
+                f"afade=t=out:st={max(0, duration_seconds - 0.15)}:d=0.15[a]",
                 "-map",
                 "0:v",
                 "-map",

@@ -110,6 +110,34 @@ def test_backlog_scheduler_enqueues_only_one_replenishment_run() -> None:
     assert second == []
 
 
+def test_backlog_limit_counts_only_unresolved_research_candidates() -> None:
+    with SessionLocal() as session:
+        repo = ResourceRepository(session)
+        project = repo.add(
+            kind="project",
+            organization_id="org_demo",
+            project_id=None,
+            status="active",
+            data={
+                "name": "Candidate backlog fixture",
+                "autopilot_paused": False,
+                "settings": {"research": {"backlog_target": 1, "recency_days": 30}},
+            },
+        )
+        project.project_id = project.id
+        session.add(project)
+        session.commit()
+        repo.add(kind="idea", organization_id="org_demo", project_id=project.id, status="draft", data={"title": "Existing idea"})
+        repo.add(kind="video", organization_id="org_demo", project_id=project.id, status="approved", data={"title": "Existing video"})
+
+        queued = enqueue_backlog_replenishment(session, BackgroundTasks(), get_settings())
+        run = repo.get_any(queued[0], kind="research_run")
+
+    assert run is not None
+    assert run.data["backlog_before"] == 0
+    assert run.data["backlog_metric"] == "unresolved_candidates"
+
+
 def test_project_activation_requires_brief_policy_and_input(client, auth_headers) -> None:
     created = client.post(
         "/v1/projects",

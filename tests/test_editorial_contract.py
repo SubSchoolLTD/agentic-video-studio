@@ -6,7 +6,15 @@ import pytest
 
 from apps.api.app.config import Settings
 from apps.api.app.database import SessionLocal
-from apps.api.app.providers import EditorialPackage, EditorialProvider, apply_narration_to_scene
+from apps.api.app.providers import (
+    EditorialPackage,
+    EditorialProvider,
+    ResearchPacket,
+    _rebalance_candidate_mix,
+    _strip_prompt_tokens,
+    apply_narration_to_scene,
+    continuous_ugc_scene_layout,
+)
 from apps.api.app.repository import ResourceRepository
 from apps.api.app.workflow import (
     editorial_deployment_repair_field,
@@ -214,3 +222,85 @@ def test_vertex_quota_retry_uses_long_exponential_backoff() -> None:
 
     assert [generation_retry_delay_seconds(error, attempt) for attempt in range(5)] == [30, 60, 120, 240, 240]
     assert generation_retry_delay_seconds(RuntimeError("connection reset"), 3) == 8
+
+
+def test_continuous_ugc_layout_uses_one_opening_and_seven_second_extensions() -> None:
+    layout = continuous_ugc_scene_layout(30, allowed_min=4, allowed_max=6)
+
+    assert layout == [4.0, 7.0, 7.0, 7.0, 5.0]
+    assert sum(layout) == 30
+
+
+def test_candidate_mix_covers_three_intents_and_four_video_formats() -> None:
+    candidates = [
+        {
+            "title": f"Candidate {index}",
+            "candidate_type": "problem_solution",
+            "recommended_visual_mode": "ugc_creator",
+            "suitable_visual_modes": ["ugc_creator", "storytelling", "cinematic", "motion_graphics"],
+        }
+        for index in range(6)
+    ]
+
+    balanced = _rebalance_candidate_mix(candidates, 6)
+
+    assert {item["candidate_type"] for item in balanced} == {
+        "problem_solution",
+        "educational_value",
+        "entertaining_viral",
+    }
+    assert {item["recommended_visual_mode"] for item in balanced} == {
+        "ugc_creator",
+        "storytelling",
+        "cinematic",
+        "motion_graphics",
+    }
+
+
+def test_prompt_sanitizer_removes_renderable_ui_and_palette_tokens() -> None:
+    cleaned = _strip_prompt_tokens("Show the platform UI in #A24CB8 with kinetic typography")
+
+    assert "#A24CB8" not in cleaned
+    assert " UI " not in f" {cleaned} "
+    assert "kinetic typography" not in cleaned.lower()
+
+
+@pytest.mark.asyncio
+async def test_mock_editorial_package_carries_candidate_strategy_into_detailed_scenes() -> None:
+    provider = EditorialProvider(Settings(provider_mode="mock"))
+    packet = ResearchPacket(
+        request_id="research_test",
+        objective="Help independent teachers package expertise",
+        sources=[{"id": "source_1", "title": "Evidence"}],
+        claims=[{"id": "claim_1", "status": "supported", "claim": "Reusable lessons reduce repetition"}],
+        raw={},
+    )
+
+    package = await provider.create_package(
+        title="Stop rebuilding the same lesson",
+        audience="Independent teachers",
+        objective="awareness",
+        brand={"identity": {"name": "SubSchool"}},
+        evidence=packet,
+        duration_seconds=30,
+        visual_mode="ugc_creator",
+        native_audio=True,
+        aspect_ratios=["9:16"],
+        creative_context={
+            "candidate_type": "problem_solution",
+            "target_audience_insight": "Teachers lose evenings repeating delivery work",
+            "problem_or_tension": "A live lesson disappears after one cohort",
+            "core_message": "Turn one explanation into a reusable learning experience",
+            "informational_value": "A concrete packaging sequence",
+            "virality_mechanism": "An instantly recognizable late-night teacher moment",
+            "creative_direction": "Follow a teacher from a noisy class to an organized worktable",
+        },
+        scene_count_min=4,
+        scene_count_max=6,
+        scene_count_flex=0,
+    )
+
+    assert package["production_brief"]["audience_insight"].startswith("Teachers lose")
+    assert [scene["duration_target"] for scene in package["storyboard"]["scenes"]] == [4, 7, 7, 7, 5]
+    assert all(scene["story_beat"] and scene["blocking"] and scene["sound_direction"] for scene in package["storyboard"]["scenes"])
+    assert all(scene["generation_strategy"] == "continuous_veo_extension" for scene in package["storyboard"]["scenes"])

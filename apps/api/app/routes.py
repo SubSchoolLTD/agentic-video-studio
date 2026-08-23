@@ -1720,22 +1720,14 @@ def enqueue_backlog_replenishment(
         target = int(((project.data.get("settings") or {}).get("research") or {}).get("backlog_target", 0))
         if target <= 0:
             continue
-        ideas = repo.list(
+        candidates = repo.list(
             organization_id=project.organization_id,
             project_id=project.id,
-            kind="idea",
+            kind="topic_candidate",
             limit=200,
         )
-        videos = repo.list(
-            organization_id=project.organization_id,
-            project_id=project.id,
-            kind="video",
-            limit=200,
-        )
-        ready_count = sum(item.status in {"ready", "draft", "planned"} for item in ideas) + sum(
-            item.status in {"approval_required", "approved"} for item in videos
-        )
-        if ready_count >= target:
+        unresolved_count = sum(item.status == "candidate" and not item.data.get("idea_id") for item in candidates)
+        if unresolved_count >= target:
             continue
         existing = session.scalar(
             select(Resource.id).where(
@@ -1747,7 +1739,7 @@ def enqueue_backlog_replenishment(
         )
         if existing:
             continue
-        gap = min(3, target - ready_count)
+        gap = min(3, target - unresolved_count)
         run = repo.add(
             kind="research_run",
             organization_id=project.organization_id,
@@ -1761,7 +1753,8 @@ def enqueue_backlog_replenishment(
                 "max_candidates": gap,
                 "trigger_type": "backlog",
                 "backlog_target": target,
-                "backlog_before": ready_count,
+                "backlog_before": unresolved_count,
+                "backlog_metric": "unresolved_candidates",
                 "provider": "parallel",
             },
         )
@@ -1987,6 +1980,8 @@ def _research_feedback_context(
         "negative_patterns": [value for item in negative[:8] if (value := pattern(item))],
         "selected_format_counts": counts(positive, "recommended_visual_mode"),
         "hidden_format_counts": counts(negative, "recommended_visual_mode"),
+        "selected_candidate_type_counts": counts(positive, "candidate_type"),
+        "hidden_candidate_type_counts": counts(negative, "candidate_type"),
         "selected_audience_counts": counts(positive, "audience"),
         "hidden_audience_counts": counts(negative, "audience"),
         "instruction": (
@@ -2018,6 +2013,7 @@ def _record_research_feedback(
             "audience": candidate.data.get("audience"),
             "format": candidate.data.get("format"),
             "recommended_visual_mode": candidate.data.get("recommended_visual_mode"),
+            "candidate_type": candidate.data.get("candidate_type"),
             "reason": reason,
             "created_by": actor_id,
             "recorded_at": datetime.now(UTC).isoformat(),
@@ -2110,6 +2106,18 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                         "objective": draft["objective"],
                         "format": draft["format"],
                         "recommended_visual_mode": draft.get("recommended_visual_mode", "ugc_creator"),
+                        "suitable_visual_modes": draft.get("suitable_visual_modes")
+                        or [draft.get("recommended_visual_mode", "ugc_creator")],
+                        "candidate_type": draft.get("candidate_type") or "problem_solution",
+                        "target_audience_insight": draft.get("target_audience_insight") or draft["audience"],
+                        "content_goal": draft.get("content_goal") or draft["objective"],
+                        "core_message": draft.get("core_message") or angle,
+                        "problem_or_tension": draft.get("problem_or_tension") or "",
+                        "proposed_solution": draft.get("proposed_solution") or "",
+                        "informational_value": draft.get("informational_value") or "",
+                        "entertainment_hook": draft.get("entertainment_hook") or "",
+                        "virality_mechanism": draft.get("virality_mechanism") or "",
+                        "creative_direction": draft.get("creative_direction") or "",
                         "recommended_duration_seconds": int(draft.get("recommended_duration_seconds") or 30),
                         "recommended_scene_count_min": int(draft.get("recommended_scene_count_min") or 4),
                         "recommended_scene_count_max": max(
@@ -2138,46 +2146,6 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                 )
                 created_count += 1
                 candidate_ids.append(candidate.id)
-                if run.data.get("trigger_type") == "backlog":
-                    idea = repo.add(
-                        kind="idea",
-                        organization_id=run.organization_id,
-                        project_id=run.project_id,
-                        status="draft",
-                        data={
-                            "title": title,
-                            "hook": angle,
-                            "audience": draft["audience"],
-                            "objective": draft["objective"],
-                            "format": draft["format"],
-                            "visual_mode": candidate.data["recommended_visual_mode"],
-                            "target_duration_seconds": candidate.data["recommended_duration_seconds"],
-                            "scene_count_min": candidate.data["recommended_scene_count_min"],
-                            "scene_count_max": candidate.data["recommended_scene_count_max"],
-                            "topic_candidate_id": candidate.id,
-                            "research_run_id": run.id,
-                            "source_ids": candidate.data["source_ids"],
-                            "topic_opportunity_score": candidate.data["topic_opportunity_score"],
-                            "score_confidence": candidate.data["score_confidence"],
-                            "provenance": "scheduled_backlog_replenishment",
-                        },
-                    )
-                    candidate = repo.update(
-                        candidate,
-                        status="idea_created",
-                        data={
-                            "idea_id": idea.id,
-                            "feedback_signal": "positive",
-                            "selected_at": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                    _record_research_feedback(
-                        repo,
-                        candidate,
-                        signal="positive",
-                        actor_id=str(run.data.get("created_by_id") or "automation"),
-                        reason="Scheduled backlog replenishment",
-                    )
             repo.update(
                 run,
                 status="completed",
@@ -2334,6 +2302,17 @@ def select_candidate(
             "scene_count_min": int(candidate.data.get("recommended_scene_count_min") or 4),
             "scene_count_max": int(candidate.data.get("recommended_scene_count_max") or 6),
             "format_rationale": candidate.data.get("format_rationale") or "",
+            "candidate_type": candidate.data.get("candidate_type") or "problem_solution",
+            "target_audience_insight": candidate.data.get("target_audience_insight") or "",
+            "content_goal": candidate.data.get("content_goal") or "",
+            "core_message": candidate.data.get("core_message") or "",
+            "problem_or_tension": candidate.data.get("problem_or_tension") or "",
+            "proposed_solution": candidate.data.get("proposed_solution") or "",
+            "informational_value": candidate.data.get("informational_value") or "",
+            "entertainment_hook": candidate.data.get("entertainment_hook") or "",
+            "virality_mechanism": candidate.data.get("virality_mechanism") or "",
+            "creative_direction": candidate.data.get("creative_direction") or "",
+            "suitable_visual_modes": candidate.data.get("suitable_visual_modes") or [],
             "topic_candidate_id": candidate.id,
             "research_run_id": candidate.data.get("research_run_id"),
             "source_ids": candidate.data.get("source_ids", []),
@@ -2729,6 +2708,17 @@ async def create_generation(
         or (idea.data.get("native_voice_preset") if idea else None)
         or "warm_conversational"
     )
+    if effective_visual_mode == "ugc_creator" and effective_audio_mode == "veo_native":
+        if payload.target_duration_seconds > 36:
+            raise HTTPException(
+                422,
+                "Continuous Veo-native UGC is limited to 36 seconds so every extension input stays within Google's 30-second limit. Use Google TTS or a vignette format for a longer video.",
+            )
+        if payload.scene_count_min > 5:
+            raise HTTPException(
+                422,
+                "Continuous Veo-native UGC supports at most five authored fragments: one opening clip and four native extensions.",
+            )
     character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
     if character_id:
         character = require_resource(repo, str(character_id), principal, kind="character", project_id=project_id)
@@ -2768,6 +2758,7 @@ async def create_generation(
         scene_count_min=payload.scene_count_min,
         scene_count_max=payload.scene_count_max,
         scene_count_flex=payload.scene_count_flex,
+        continuous_ugc=effective_visual_mode == "ugc_creator" and effective_audio_mode == "veo_native",
     )
     billable_units = billable_seconds * len(payload.aspect_ratios)
     price_quote = quote_feature(session, pricing_feature, billable_units)
@@ -3268,6 +3259,22 @@ async def regenerate_scene(
         else None
     )
     native_audio = bool(parent_job and parent_job.data.get("audio_mode") == "veo_native")
+    continuous_ugc = bool(native_audio and parent_job and parent_job.data.get("visual_mode") == "ugc_creator")
+    cascade_scenes = (
+        [
+            item
+            for item in repo.list(
+                organization_id=principal.organization_id,
+                project_id=scene.project_id,
+                kind="scene",
+                limit=200,
+            )
+            if str(item.data.get("storyboard_id") or "") == str(scene.data.get("storyboard_id") or "")
+            and int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
+        ]
+        if continuous_ugc
+        else [scene]
+    )
     attempt_no = int(scene.data.get("attempt", 0)) + 1
     prompt = payload.visual_prompt or scene.data.get("visual_prompt")
     regeneration = repo.add(
@@ -3285,6 +3292,7 @@ async def regenerate_scene(
             "audio_mode": "veo_native" if native_audio else "google_tts",
             "character_id": parent_job.data.get("character_id") if parent_job else None,
             "selective": True,
+            "cascade_scene_ids": [item.id for item in cascade_scenes],
         },
     )
     try:
@@ -3295,9 +3303,18 @@ async def regenerate_scene(
             feature_key=(
                 "video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate"
             ),
-            quantity=veo_request_duration(
-                float(scene.data.get("duration_target") or 0)
-                or max(1.0, float(scene.data.get("end_sec") or 0) - float(scene.data.get("start_sec") or 0))
+            quantity=(
+                sum(
+                    veo_request_duration(float(item.data.get("duration_target") or 8))
+                    if int(item.data.get("position") or 0) == 1
+                    else 7
+                    for item in cascade_scenes
+                )
+                if continuous_ugc
+                else veo_request_duration(
+                    float(scene.data.get("duration_target") or 0)
+                    or max(1.0, float(scene.data.get("end_sec") or 0) - float(scene.data.get("start_sec") or 0))
+                )
             ),
             reference_id=regeneration.id,
         )
@@ -3316,6 +3333,7 @@ async def regenerate_scene(
         "regeneration_id": regeneration.id,
         "status": "queued",
         "locked_other_scenes": True,
+        "cascade_scene_count": len(cascade_scenes),
     }
 
 

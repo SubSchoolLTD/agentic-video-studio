@@ -251,8 +251,19 @@ def estimate_veo_billable_seconds(
     scene_count_min: int,
     scene_count_max: int,
     scene_count_flex: int,
+    continuous_ugc: bool = False,
 ) -> int:
     """Reserve for the most expensive allowed scene split after Veo's 4/6/8-second rounding."""
+    if continuous_ugc:
+        candidates: list[int] = []
+        for count in range(2, 6):
+            for opening in (4, 6, 8):
+                final_visible = target_duration_seconds - opening - 7 * max(0, count - 2)
+                if 2.5 <= final_visible <= 7:
+                    candidates.append(opening + 7 * (count - 1))
+        if candidates:
+            return min(candidates)
+        raise ValueError("Target duration cannot be represented as a continuous Veo UGC chain")
     allowed_min = max(2, scene_count_min - scene_count_flex)
     allowed_max = min(20, scene_count_max + scene_count_flex)
     totals = [

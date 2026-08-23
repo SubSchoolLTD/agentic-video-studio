@@ -441,6 +441,45 @@ class WorkflowManager:
             return None
         return str(reference_attempt.data.get("storage_uri") or "") or None
 
+    def _ugc_extension_input_uri(
+        self,
+        repo: ResourceRepository,
+        *,
+        scene: Resource,
+        aspect_ratio: str,
+    ) -> str | None:
+        """Return the accepted cumulative Veo video used to extend a UGC performance."""
+        if int(scene.data.get("position") or 0) <= 1:
+            return None
+        storyboard_id = str(scene.data.get("storyboard_id") or "")
+        previous = next(
+            (
+                item
+                for item in repo.list(
+                    organization_id=scene.organization_id,
+                    project_id=scene.project_id,
+                    kind="scene",
+                    limit=200,
+                )
+                if str(item.data.get("storyboard_id") or "") == storyboard_id
+                and int(item.data.get("position") or 0) == int(scene.data.get("position") or 0) - 1
+            ),
+            None,
+        )
+        if not previous:
+            return None
+        attempt_ids = dict(previous.data.get("latest_attempt_ids") or {})
+        attempt_id = attempt_ids.get(aspect_ratio) or previous.data.get("latest_attempt_id")
+        attempt = repo.get(
+            str(attempt_id or ""),
+            organization_id=scene.organization_id,
+            project_id=scene.project_id,
+            kind="scene_attempt",
+        )
+        if not attempt or attempt.status != "passed":
+            return None
+        return str(attempt.data.get("continuation_storage_uri") or "") or None
+
     async def _generate_scene_with_qa(
         self,
         *,
@@ -459,6 +498,7 @@ class WorkflowManager:
         attempt_number = initial_attempt_number
         voice_preset, locked_voice_profile = native_voice_profile(job.data.get("native_voice_preset"))
         veo_seed = int(job.data.get("veo_seed") or stable_veo_seed(job.id, voice_preset))
+        continuous_ugc = bool(native_audio and job.data.get("visual_mode") == "ugc_creator")
         for automatic_retry in range(max_automatic_retries + 1):
             prompt = str(scene.data.get("visual_prompt") or "").strip()
             if not prompt:
@@ -468,6 +508,8 @@ class WorkflowManager:
             output_uris: dict[str, str | None] = {}
             speech_passed = True
             voice_passed = True
+            speech_needs_compression = False
+            speech_prompt_corrections: list[str] = []
             for aspect_ratio in aspect_ratios:
                 ratio_slug = aspect_ratio.replace(":", "x")
                 suffix = f"_attempt_{attempt_number}" if attempt_number > 1 else ""
@@ -478,12 +520,35 @@ class WorkflowManager:
                     / "scenes"
                     / f"{scene.id}{suffix}_{ratio_slug}.mp4"
                 )
-                input_uri, input_mime_type, input_kind = self._continuity_input(
-                    repo,
-                    scene=scene,
-                    aspect_ratio=aspect_ratio,
-                    default_uri=default_reference_uri,
-                    default_mime_type=default_reference_mime_type,
+                extension_video_uri = (
+                    self._ugc_extension_input_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
+                    if continuous_ugc
+                    else None
+                )
+                if continuous_ugc and int(scene.data.get("position") or 0) > 1 and not extension_video_uri:
+                    raise RuntimeError(f"Previous cumulative UGC video is missing for {scene.id} ({aspect_ratio})")
+                if extension_video_uri:
+                    input_uri, input_mime_type, input_kind = extension_video_uri, "video/mp4", "previous_veo_video_extension"
+                elif continuous_ugc and int(scene.data.get("position") or 0) == 1:
+                    input_uri, input_mime_type, input_kind = (
+                        default_reference_uri,
+                        default_reference_mime_type or "image/jpeg",
+                        "character_reference" if default_reference_uri else "text_only",
+                    )
+                elif job.data.get("visual_mode") in {"storytelling", "cinematic", "motion_graphics"}:
+                    input_uri, input_mime_type, input_kind = None, None, "independent_scene_vignette"
+                else:
+                    input_uri, input_mime_type, input_kind = self._continuity_input(
+                        repo,
+                        scene=scene,
+                        aspect_ratio=aspect_ratio,
+                        default_uri=default_reference_uri,
+                        default_mime_type=default_reference_mime_type,
+                    )
+                continuation_output_path = (
+                    output_path.with_name(f"{output_path.stem}_continuation.mp4")
+                    if continuous_ugc
+                    else None
                 )
                 scene_started = time.perf_counter()
                 if self.settings.uses_live_video:
@@ -496,6 +561,8 @@ class WorkflowManager:
                         reference_image_mime_type=input_mime_type,
                         duration_seconds=float(scene.data.get("duration_target") or 8),
                         seed=veo_seed,
+                        extension_video_uri=extension_video_uri,
+                        continuation_output_path=continuation_output_path,
                     )
                     if generated is None:
                         raise RuntimeError(f"Live Veo returned no output for {scene.id} ({aspect_ratio})")
@@ -508,6 +575,16 @@ class WorkflowManager:
                         duration_seconds=min(2.0, float(scene.data.get("duration_target") or 2)),
                     )
                 persisted = await asyncio.to_thread(self.storage.persist, generated, content_type="video/mp4")
+                continuation_generated = (
+                    continuation_output_path
+                    if continuation_output_path and continuation_output_path.exists()
+                    else generated
+                )
+                persisted_continuation = (
+                    await asyncio.to_thread(self.storage.persist, continuation_generated, content_type="video/mp4")
+                    if continuous_ugc
+                    else None
+                )
                 last_frame_path = output_path.with_name(f"{output_path.stem}_last.jpg")
                 await asyncio.to_thread(extract_last_frame, generated, last_frame_path)
                 persisted_last_frame = await asyncio.to_thread(
@@ -516,21 +593,46 @@ class WorkflowManager:
                     content_type="image/jpeg",
                 )
                 if native_audio:
-                    speech_qa = await self.speech_qa.analyze(
-                        video_uri=persisted["storage_uri"],
-                        expected_text=str(scene.data.get("narration") or ""),
-                        duration_target=float(scene.data.get("duration_target") or 8),
-                    )
-                    voice_reference_uri = self._native_voice_reference_uri(
-                        repo,
-                        scene=scene,
-                        aspect_ratio=aspect_ratio,
-                    )
-                    voice_qa = await self.speech_qa.compare_voice(
-                        reference_video_uri=voice_reference_uri,
-                        candidate_video_uri=persisted["storage_uri"],
-                        voice_profile=locked_voice_profile,
-                    )
+                    try:
+                        speech_qa = await self.speech_qa.analyze(
+                            video_uri=persisted["storage_uri"],
+                            expected_text=str(scene.data.get("narration") or ""),
+                            duration_target=float(scene.data.get("duration_target") or 8),
+                            require_immediate_hook=int(scene.data.get("position") or 0) == 1,
+                            require_voice_at_end=bool(scene.data.get("continuous_extension_has_next")),
+                        )
+                    except TypeError as exc:
+                        if "unexpected keyword" not in str(exc):
+                            raise
+                        # Compatibility for injected test/evaluation adapters using the pre-v5 interface.
+                        speech_qa = await self.speech_qa.analyze(
+                            video_uri=persisted["storage_uri"],
+                            expected_text=str(scene.data.get("narration") or ""),
+                            duration_target=float(scene.data.get("duration_target") or 8),
+                        )
+                    if continuous_ugc:
+                        voice_reference_uri = self._native_voice_reference_uri(
+                            repo,
+                            scene=scene,
+                            aspect_ratio=aspect_ratio,
+                        )
+                        voice_qa = await self.speech_qa.compare_voice(
+                            reference_video_uri=voice_reference_uri,
+                            candidate_video_uri=persisted["storage_uri"],
+                            voice_profile=locked_voice_profile,
+                        )
+                        voice_qa["generation_strategy"] = "continuous_veo_extension"
+                    else:
+                        voice_reference_uri = None
+                        voice_qa = {
+                            "passed": True,
+                            "same_speaker": None,
+                            "similarity": None,
+                            "issues": [],
+                            "mode": "intentional_scene_local_voice",
+                            "provider": "internal",
+                            "generation_strategy": "independent_scene_vignette",
+                        }
                 else:
                     timing = dict(scene.data.get("speech_timing") or {})
                     speech_qa = {
@@ -558,6 +660,21 @@ class WorkflowManager:
                     }
                 speech_passed = speech_passed and bool(speech_qa.get("passed"))
                 voice_passed = voice_passed and bool(voice_qa.get("passed"))
+                if not speech_qa.get("passed"):
+                    speech_needs_compression = speech_needs_compression or bool(
+                        float(speech_qa.get("coverage") or 0) < 0.82
+                        or not speech_qa.get("last_phrase_complete", True)
+                        or "edit point" in " ".join(speech_qa.get("issues") or []).lower()
+                    )
+                    issue_text = " ".join(speech_qa.get("issues") or []).lower()
+                    if "starts too late" in issue_text:
+                        speech_prompt_corrections.append(
+                            "HOOK TIMING CORRECTION: open on the first spoken word at time zero; no breath, silence, reaction or lead-in."
+                        )
+                    if "final second" in issue_text:
+                        speech_prompt_corrections.append(
+                            "EXTENSION AUDIO CORRECTION: keep the same creator audibly speaking through the final second."
+                        )
                 if self.settings.uses_live_video:
                     await self._emit(
                         session,
@@ -594,17 +711,27 @@ class WorkflowManager:
                         "automatic_retry": automatic_retry,
                         "aspect_ratio": aspect_ratio,
                         "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-continuity-v4",
+                        "prompt_version": "editorial-director-v5",
                         "visual_prompt": prompt,
                         "narration": scene.data.get("narration"),
                         "output_uri": str(generated),
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
+                        "continuation_output_uri": str(continuation_generated) if continuous_ugc else None,
+                        "continuation_storage_uri": (
+                            persisted_continuation["storage_uri"] if persisted_continuation else None
+                        ),
+                        "continuation_public_path": (
+                            persisted_continuation["public_path"] if persisted_continuation else None
+                        ),
                         "last_frame_storage_uri": persisted_last_frame["storage_uri"],
                         "last_frame_public_path": persisted_last_frame["public_path"],
                         "last_frame_mime_type": "image/jpeg",
                         "continuity_input_uri": input_uri,
                         "continuity_input_kind": input_kind,
+                        "generation_strategy": (
+                            "continuous_veo_extension" if continuous_ugc else "independent_scene_vignette"
+                        ),
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
                         "voice_reference_uri": voice_reference_uri,
@@ -617,7 +744,7 @@ class WorkflowManager:
                         "character_id": job.data.get("character_id"),
                         "regeneration_id": regeneration_id,
                         "billable_seconds": (
-                            veo_request_duration(float(scene.data.get("duration_target") or 8))
+                            (7 if extension_video_uri else veo_request_duration(float(scene.data.get("duration_target") or 8)))
                             if self.settings.uses_live_video
                             else 0
                         ),
@@ -637,12 +764,19 @@ class WorkflowManager:
                         "output_uri": str(generated),
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
+                        "continuation_output_uri": str(continuation_generated) if continuous_ugc else None,
+                        "continuation_storage_uri": (
+                            persisted_continuation["storage_uri"] if persisted_continuation else None
+                        ),
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
                         "voice_reference_uri": voice_reference_uri,
                         "native_voice_preset": voice_preset,
                         "veo_seed": veo_seed,
                         "continuity_input_kind": input_kind,
+                        "generation_strategy": (
+                            "continuous_veo_extension" if continuous_ugc else "independent_scene_vignette"
+                        ),
                         "last_frame_storage_uri": persisted_last_frame["storage_uri"],
                         "billable_seconds": attempt.data["billable_seconds"],
                     }
@@ -659,7 +793,7 @@ class WorkflowManager:
                     f"Native audio {failed_checks} QA failed for {scene.id} "
                     f"after {max_automatic_retries + 1} attempts"
                 )
-            if not speech_passed:
+            if not speech_passed and speech_needs_compression:
                 fitted = await self.editorial.fit_dialogue(
                     [dict(scene.data)],
                     native_audio=True,
@@ -670,6 +804,8 @@ class WorkflowManager:
             else:
                 updated_scene = dict(scene.data)
             retry_prompt = str(updated_scene.get("visual_prompt") or "").strip()
+            if speech_prompt_corrections:
+                retry_prompt = f"{retry_prompt} {' '.join(dict.fromkeys(speech_prompt_corrections))}"
             if not voice_passed:
                 retry_prompt = (
                     f"{retry_prompt} VOICE IDENTITY CORRECTION: The previous take was rejected because the "
@@ -724,7 +860,6 @@ class WorkflowManager:
                 repo.update(scene, status="generated")
                 return
 
-            repo.update(regeneration, status="running", data={"started_at": datetime.now(UTC).isoformat()})
             prompt = str(regeneration.data.get("visual_prompt") or scene.data.get("visual_prompt") or "").strip()
             if not prompt:
                 repo.update(regeneration, status="failed", data={"error": "Scene visual prompt is empty"})
@@ -742,26 +877,64 @@ class WorkflowManager:
                 "stages": job.data.get("stages"),
             }
             try:
+                repo.update(scene, status="regenerating", data={"visual_prompt": prompt})
+                repo.update(regeneration, status="running", data={"started_at": datetime.now(UTC).isoformat()})
                 native_audio = job.data.get("audio_mode") == "veo_native"
-                replacement_attempts, latest_attempt_ids, output_uris = await self._generate_scene_with_qa(
-                    session=session,
-                    repo=repo,
-                    job=job,
-                    scene=scene,
-                    aspect_ratios=aspect_ratios,
-                    initial_attempt_number=attempt_number,
-                    native_audio=native_audio,
-                    default_reference_uri=job.data.get("reference_image_uri"),
-                    default_reference_mime_type=job.data.get("reference_image_mime_type"),
-                    regeneration_id=regeneration.id,
-                )
-                attempt_number = max(int(item.get("attempt") or attempt_number) for item in replacement_attempts)
+                cascade_scenes = [scene]
+                if native_audio and job.data.get("visual_mode") == "ugc_creator":
+                    cascade_scenes = sorted(
+                        [
+                            item
+                            for item in repo.list(
+                                organization_id=job.organization_id,
+                                project_id=job.project_id,
+                                kind="scene",
+                                limit=200,
+                            )
+                            if str(item.data.get("storyboard_id") or "") == storyboard.id
+                            and int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
+                        ],
+                        key=lambda item: int(item.data.get("position") or 0),
+                    )
+                affected_scene_ids = {item.id for item in cascade_scenes}
+                for cascade_index, target_scene in enumerate(cascade_scenes):
+                    target_attempt = int(target_scene.data.get("attempt", 0)) + 1
+                    generated, generated_ids, generated_uris = await self._generate_scene_with_qa(
+                        session=session,
+                        repo=repo,
+                        job=job,
+                        scene=target_scene,
+                        aspect_ratios=aspect_ratios,
+                        initial_attempt_number=target_attempt,
+                        native_audio=native_audio,
+                        default_reference_uri=job.data.get("reference_image_uri"),
+                        default_reference_mime_type=job.data.get("reference_image_mime_type"),
+                        regeneration_id=regeneration.id,
+                    )
+                    resolved_attempt = max(int(item.get("attempt") or target_attempt) for item in generated)
+                    repo.update(
+                        target_scene,
+                        status="generated",
+                        data={
+                            "attempt": resolved_attempt,
+                            "latest_attempt_id": generated_ids.get(aspect_ratios[0]),
+                            "latest_attempt_ids": generated_ids,
+                            "output_uri": generated_uris.get(aspect_ratios[0]),
+                            "output_uris": generated_uris,
+                            "cascade_regeneration_id": regeneration.id if cascade_index else None,
+                        },
+                    )
+                    replacement_attempts.extend(generated)
+                    if cascade_index == 0:
+                        latest_attempt_ids = generated_ids
+                        output_uris = generated_uris
+                        attempt_number = resolved_attempt
 
                 generation_output = self._completed_stage_output(job, "scene_generation")
                 retained_attempts = [
                     item
                     for item in list(generation_output.get("attempts") or [])
-                    if item.get("scene_id") != scene.id
+                    if item.get("scene_id") not in affected_scene_ids
                 ]
                 updated_generation_output = {"attempts": [*retained_attempts, *replacement_attempts]}
                 stages = [dict(item) for item in job.data.get("stages", [])]
@@ -789,9 +962,13 @@ class WorkflowManager:
                     },
                 )
                 storyboard_scenes = [dict(item) for item in storyboard.data.get("scenes", [])]
+                cascade_by_position = {
+                    int(item.data.get("position") or 0): dict(item.data) for item in cascade_scenes
+                }
                 for index, item in enumerate(storyboard_scenes):
-                    if int(item.get("position") or 0) == int(scene.data.get("position") or 0):
-                        storyboard_scenes[index] = dict(scene.data)
+                    position = int(item.get("position") or 0)
+                    if position in cascade_by_position:
+                        storyboard_scenes[index] = cascade_by_position[position]
                 repo.update(storyboard, data={"scenes": storyboard_scenes})
                 script_stage = self._completed_stage_output(job, "script")
                 script = repo.get_any(str(script_stage.get("script_id") or ""), kind="script")
@@ -1196,6 +1373,17 @@ class WorkflowManager:
                     ],
                     "freshness_expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
                     "suggested_formats": ["problem_solution", "explainer"],
+                    "candidate_type": "problem_solution",
+                    "target_audience_insight": audience,
+                    "content_goal": objective,
+                    "core_message": title,
+                    "problem_or_tension": f"{audience} needs a concrete, credible way to act on this topic.",
+                    "proposed_solution": f"Explain {title} through one observable human situation and a supported action.",
+                    "informational_value": "A researched explanation with one directly useful example.",
+                    "entertainment_hook": "A recognizable before-and-after contrast.",
+                    "virality_mechanism": "Fast recognition, specific payoff and shareable practical value.",
+                    "creative_direction": "Turn the core claim into physical action in a believable real-world location.",
+                    "suitable_visual_modes": [visual_mode],
                     "topic_opportunity_score": opportunity["score"],
                     "score_confidence": opportunity["confidence"],
                     "score_breakdown": opportunity["breakdown"],
@@ -1231,6 +1419,10 @@ class WorkflowManager:
                 aspect_ratios=aspect_ratios,
                 requested_hook=requested_hook,
                 content_format=content_format,
+                creative_context={
+                    **dict(candidate.data),
+                    **(dict(input_resource.data) if input_resource else {}),
+                },
                 character_profile=character_profile,
                 scene_count_min=int(job.data.get("scene_count_min", 4)),
                 scene_count_max=int(job.data.get("scene_count_max", 6)),
@@ -1640,6 +1832,14 @@ class WorkflowManager:
                             storage_uri=storage_uri,
                             local_path=Path(output_uri),
                         )
+                    continuation_output_uri = latest_attempt.data.get("continuation_output_uri")
+                    continuation_storage_uri = latest_attempt.data.get("continuation_storage_uri")
+                    if continuation_output_uri and continuation_storage_uri:
+                        await asyncio.to_thread(
+                            self.storage.materialize,
+                            storage_uri=continuation_storage_uri,
+                            local_path=Path(str(continuation_output_uri)),
+                        )
                     if output_uri and not latest_attempt.data.get("last_frame_storage_uri"):
                         last_frame_path = Path(output_uri).with_name(f"{Path(output_uri).stem}_last.jpg")
                         await asyncio.to_thread(extract_last_frame, Path(output_uri), last_frame_path)
@@ -1666,6 +1866,8 @@ class WorkflowManager:
                             "output_uri": output_uri,
                             "storage_uri": storage_uri,
                             "public_path": latest_attempt.data.get("public_path"),
+                            "continuation_output_uri": latest_attempt.data.get("continuation_output_uri"),
+                            "continuation_storage_uri": latest_attempt.data.get("continuation_storage_uri"),
                             "speech_qa": latest_attempt.data.get("speech_qa"),
                             "voice_qa": latest_attempt.data.get("voice_qa"),
                             "last_frame_storage_uri": latest_attempt.data.get("last_frame_storage_uri"),
@@ -1794,12 +1996,22 @@ class WorkflowManager:
                 item.setdefault("aspect_ratio", persisted_attempt.data.get("aspect_ratio"))
                 item.setdefault("model_id", persisted_attempt.data.get("model_id"))
                 item.setdefault("demo_data", persisted_attempt.data.get("demo_data", False))
+                item.setdefault("continuation_output_uri", persisted_attempt.data.get("continuation_output_uri"))
+                item.setdefault("continuation_storage_uri", persisted_attempt.data.get("continuation_storage_uri"))
             output_uri = item.get("output_uri")
             if output_uri:
                 await asyncio.to_thread(
                     self.storage.materialize,
                     storage_uri=item.get("storage_uri"),
                     local_path=Path(output_uri),
+                )
+            continuation_output_uri = item.get("continuation_output_uri")
+            continuation_storage_uri = item.get("continuation_storage_uri")
+            if continuation_output_uri and continuation_storage_uri:
+                await asyncio.to_thread(
+                    self.storage.materialize,
+                    storage_uri=continuation_storage_uri,
+                    local_path=Path(continuation_output_uri),
                 )
         if audio_value:
             await asyncio.to_thread(
@@ -1903,6 +2115,22 @@ class WorkflowManager:
             render_started = time.perf_counter()
             output_dir = self.settings.storage_root / (job.project_id or "unknown") / job.id / "renders"
             output_path = output_dir / f"version_{index}_{aspect_ratio.replace(':', 'x')}.mp4"
+            matching_attempts = [
+                item for item in scene_attempts if item.get("aspect_ratio") in {None, aspect_ratio}
+            ]
+            if job.data.get("audio_mode") == "veo_native" and job.data.get("visual_mode") == "ugc_creator":
+                cumulative_paths = [
+                    Path(str(item["continuation_output_uri"]))
+                    for item in matching_attempts
+                    if item.get("continuation_output_uri")
+                ]
+                scene_video_paths = cumulative_paths[-1:] or [
+                    Path(str(item["output_uri"])) for item in matching_attempts if item.get("output_uri")
+                ][-1:]
+            else:
+                scene_video_paths = [
+                    Path(str(item["output_uri"])) for item in matching_attempts if item.get("output_uri")
+                ]
             manifest = await asyncio.to_thread(
                 render_motion_video,
                 title=title,
@@ -1911,13 +2139,7 @@ class WorkflowManager:
                 aspect_ratio=aspect_ratio,
                 duration_seconds=duration_seconds,
                 output_path=output_path,
-                scene_video_paths=[
-                    path
-                    for item in scene_attempts
-                    if item.get("output_uri")
-                    and item.get("aspect_ratio") in {None, aspect_ratio}
-                    and (path := Path(item["output_uri"]))
-                ],
+                scene_video_paths=scene_video_paths,
                 audio_path=audio_path,
                 use_scene_audio=job.data.get("audio_mode") == "veo_native",
                 logo_path=logo_path,
@@ -2116,6 +2338,8 @@ class WorkflowManager:
             source_count=source_count,
             technical_pass=technical_pass,
             policy_pass=policy.get("decision") == "pass",
+            hard_gate_passed=qa_report_data["hard_gate_passed"],
+            visual_pass=multimodal_pass,
         )
         score_report = repo.add(
             kind="score_report",
@@ -2126,7 +2350,7 @@ class WorkflowManager:
                 "generation_job_id": job.id,
                 "topic_opportunity": opportunity_score,
                 **scores,
-                "evaluator_version": "score-v1",
+                "evaluator_version": "score-v2-hard-gates",
             },
         )
         self._set_stage(repo, job, "scoring", "completed", output={"score_report_id": score_report.id, **scores})

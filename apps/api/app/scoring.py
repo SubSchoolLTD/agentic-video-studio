@@ -48,14 +48,21 @@ def topic_score(source_count: int, brand_match: bool = True) -> dict[str, Any]:
     return {"score": weighted_score(breakdown, TOPIC_WEIGHTS), "confidence": round(confidence, 2), "breakdown": breakdown}
 
 
-def final_scores(*, source_count: int, technical_pass: bool, policy_pass: bool) -> dict[str, Any]:
+def final_scores(
+    *,
+    source_count: int,
+    technical_pass: bool,
+    policy_pass: bool,
+    hard_gate_passed: bool = True,
+    visual_pass: bool = True,
+) -> dict[str, Any]:
     breakdown = {
         "hook_clarity": 91,
         "narrative_clarity": 88,
         "audience_fit": 92,
         "value_density": 86,
         "brand_consistency": 90,
-        "visual_quality": 84 if technical_pass else 30,
+        "visual_quality": 84 if technical_pass and visual_pass else 30,
         "audio_subtitles": 88 if technical_pass else 25,
         "platform_fit": 91 if technical_pass else 35,
         "factual_confidence": min(94, 62 + source_count * 9) if policy_pass else 15,
@@ -63,6 +70,8 @@ def final_scores(*, source_count: int, technical_pass: bool, policy_pass: bool) 
         "visual_continuity": 85,
     }
     readiness = weighted_score(breakdown, READINESS_WEIGHTS)
+    if not hard_gate_passed:
+        readiness = min(readiness, 59)
     predicted = round(0.35 * 82 + 0.20 * 91 + 0.15 * 74 + 0.15 * 86 + 0.15 * 72)
     # Evidence improves editorial confidence, but a project with no measured
     # publication history must remain below the default auto-publish threshold.
@@ -76,5 +85,9 @@ def final_scores(*, source_count: int, technical_pass: bool, policy_pass: bool) 
         "breakdown": breakdown,
         "strongest_factors": ["Clear audience", "Immediate hook", "Platform-safe overlays"],
         "weakest_factors": ["Cold-start performance history", "Limited platform metrics"],
-        "suggested_fixes": ["Collect the 24h and 7d retention windows before enabling auto-safe publishing."],
+        "suggested_fixes": [
+            *([] if hard_gate_passed else ["Resolve every failed QA hard gate before publication."]),
+            "Collect the 24h and 7d retention windows before enabling auto-safe publishing.",
+        ],
+        "blocked_by_hard_gate": not hard_gate_passed,
     }

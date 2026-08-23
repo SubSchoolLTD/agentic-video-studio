@@ -173,7 +173,7 @@ class EditorialStoryboard(BaseModel):
 
 class EditorialPackage(BaseModel):
     production_brief: ProductionBrief
-    concepts: list[EditorialConcept] = Field(min_length=2, max_length=4)
+    concepts: list[EditorialConcept] = Field(min_length=1, max_length=4)
     script: EditorialScript
     policy: EditorialPolicy
     storyboard: EditorialStoryboard
@@ -942,7 +942,7 @@ class EditorialProvider:
                     ],
                     "mandatory_points": "JSON array of strings, even when there is only one point",
                 },
-                "concepts": "2-4 objects with title, hook, angle and integer score",
+                "concepts": "1-4 objects with title, hook, angle and integer score",
                 "script": {
                     "fields": [
                         "title", "hook", "voiceover", "duration_target", "cta",
@@ -1611,7 +1611,10 @@ class VeoProvider:
             operation = client.operations.get(operation)
         if operation.error:
             raise RuntimeError(f"Veo operation failed: {operation.error}")
-        generated = operation.response.generated_videos[0]
+        generated_videos = list(getattr(operation.response, "generated_videos", None) or [])
+        if not generated_videos:
+            raise RuntimeError("Veo completed without generated video output")
+        generated = generated_videos[0]
         if not generated.video or not generated.video.video_bytes:
             raise RuntimeError("Veo returned no downloadable video bytes")
         output_path.parent.mkdir(parents=True, exist_ok=True)

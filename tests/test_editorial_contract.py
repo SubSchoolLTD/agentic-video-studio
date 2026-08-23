@@ -257,6 +257,8 @@ def test_native_speech_edge_gate_is_recovered_from_scene_checkpoint_once() -> No
 
     assert repair_field == "native_speech_edge_gate_v1_retry_at"
     job_data[repair_field] = "2026-08-24T02:00:00+00:00"
+    assert generation_deployment_repair_field(job_data) == "native_speech_completion_v2_retry_at"
+    job_data["native_speech_completion_v2_retry_at"] = "2026-08-24T02:30:00+00:00"
     assert generation_deployment_repair_field(job_data) is None
 
 
@@ -294,6 +296,44 @@ def test_complete_native_line_can_end_naturally_before_extension_edge(monkeypatc
     assert result["passed"] is True
     assert result["voice_at_extension_edge"] is False
     assert not any("final second" in issue.lower() for issue in result["issues"])
+
+
+def test_exact_transcript_overrides_contradictory_incomplete_phrase_flag(monkeypatch) -> None:
+    assessment = SceneSpeechAssessment(
+        transcript="Teach what you know before AI turns it generic.",
+        speech_present=True,
+        last_phrase_complete=False,
+        speech_start_seconds=0.0,
+        speech_end_seconds=3.0,
+        issues=["The final phrase is incomplete or cut off"],
+    )
+
+    class FakeModels:
+        @staticmethod
+        def generate_content(**_kwargs):
+            return SimpleNamespace(parsed=assessment, response_id="speech-qa-exact-transcript")
+
+    monkeypatch.setattr(
+        "apps.api.app.providers.google_genai_client",
+        lambda _settings: SimpleNamespace(models=FakeModels()),
+    )
+    provider = SpeechQAProvider(
+        Settings(provider_mode="live", google_cloud_project="test-project")
+    )
+
+    result = provider._analyze_with_gemini(
+        "gs://test-bucket/scene.mp4",
+        assessment.transcript,
+        8,
+        True,
+        True,
+    )
+
+    assert result["passed"] is True
+    assert result["last_phrase_complete"] is True
+    assert result["model_last_phrase_complete"] is False
+    assert result["completion_inferred_from_transcript"] is True
+    assert result["issues"] == []
 
 
 def test_invalid_editorial_json_is_automatically_retryable() -> None:

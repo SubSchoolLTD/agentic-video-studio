@@ -2346,13 +2346,14 @@ class SpeechQAProvider:
             "expected_dialogue": expected_text,
             "edit_point_seconds": duration_target,
             "require_immediate_hook": require_immediate_hook,
-            "require_voice_in_final_second_for_extension": require_voice_at_end,
+            "observe_voice_in_final_second_for_extension": require_voice_at_end,
             "rules": [
                 "Return the actual words heard, including omissions or substitutions.",
                 "Ignore music and room ambience.",
                 "last_phrase_complete is false when speech is cut off, trails into the edit point, or ends mid-thought.",
                 "speech_end_seconds is the end time of the last spoken word when measurable.",
                 "speech_start_seconds is the start time of the first spoken word when measurable.",
+                "Voice in the final second is an informational continuity signal, not a speech-quality requirement. A complete line may end naturally before it.",
             ],
         }
         response = client.models.generate_content(
@@ -2390,7 +2391,7 @@ class SpeechQAProvider:
             not require_immediate_hook
             or (parsed.speech_start_seconds is not None and parsed.speech_start_seconds <= 0.65)
         )
-        reaches_extension_edge = bool(
+        voice_at_extension_edge = bool(
             not require_voice_at_end
             or (
                 parsed.speech_end_seconds is not None
@@ -2403,7 +2404,6 @@ class SpeechQAProvider:
             and finishes_in_time
             and coverage >= 0.82
             and starts_immediately
-            and reaches_extension_edge
         )
         issues = list(parsed.issues)
         if coverage < 0.82:
@@ -2414,8 +2414,6 @@ class SpeechQAProvider:
             issues.append("The final phrase is incomplete or cut off")
         if not starts_immediately:
             issues.append("Opening speech starts too late for an immediate hook")
-        if not reaches_extension_edge:
-            issues.append("Voice is absent from the final second required for a stable Veo extension")
         return {
             "passed": passed,
             "transcript": parsed.transcript,
@@ -2424,6 +2422,7 @@ class SpeechQAProvider:
             "last_phrase_complete": parsed.last_phrase_complete,
             "speech_start_seconds": parsed.speech_start_seconds,
             "speech_end_seconds": parsed.speech_end_seconds,
+            "voice_at_extension_edge": voice_at_extension_edge,
             "issues": list(dict.fromkeys(issues)),
             "recommended_narration": parsed.recommended_narration,
             "provider": "gemini",

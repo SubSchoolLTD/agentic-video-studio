@@ -74,7 +74,7 @@ def native_voice_profile(preset: str | None) -> tuple[str, str]:
     return selected, NATIVE_VOICE_PROFILES[selected]
 
 
-def google_genai_client(settings: Settings):
+def google_genai_client(settings: Settings, *, location: str | None = None):
     from google import genai
 
     if settings.google_genai_use_vertexai:
@@ -83,11 +83,36 @@ def google_genai_client(settings: Settings):
         return genai.Client(
             vertexai=True,
             project=settings.google_cloud_project,
-            location=settings.google_cloud_location,
+            location=location or settings.google_cloud_location,
         )
     if not settings.google_api_key:
         raise RuntimeError("GOOGLE_API_KEY is required when Vertex AI mode is disabled")
     return genai.Client(api_key=settings.google_api_key)
+
+
+def vertex_capacity_error(exc: Exception) -> bool:
+    """Return whether Vertex rejected a request because shared capacity is unavailable."""
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "429",
+            "resource_exhausted",
+            "resource exhausted",
+            "high load",
+            "please try again later",
+            "temporarily unavailable",
+            "service unavailable",
+        )
+    )
+
+
+def vertex_text_locations(settings: Settings) -> list[str | None]:
+    """Prefer Vertex's global text endpoint, retaining the configured region as failover."""
+    if not settings.google_genai_use_vertexai:
+        return [None]
+    locations = ["global", settings.google_cloud_location]
+    return list(dict.fromkeys(location for location in locations if location))
 
 
 @dataclass
@@ -1372,7 +1397,6 @@ class EditorialProvider:
     ) -> dict[str, Any]:
         from google.genai import types
 
-        client = google_genai_client(self.settings)
         requested_min = max(2, scene_count_min - scene_count_flex)
         requested_max = min(2_000, scene_count_max + scene_count_flex)
         required_for_duration = max(2, math.ceil(duration_seconds / 8))
@@ -1535,8 +1559,7 @@ class EditorialProvider:
                     "Always include budget_class as a short string such as standard. "
                     f"Validation summary: {validation_error[:1200]}"
                 )
-            response = client.models.generate_content(
-                model=self.settings.gemini_model,
+            response = self._generate_editorial_content(
                 contents=json.dumps(request_prompt, ensure_ascii=False),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -1698,6 +1721,32 @@ class EditorialProvider:
             "response_id": getattr(response, "response_id", None),
         }
         return package
+
+    def _generate_editorial_content(self, *, contents: str, config: Any) -> Any:
+        """Generate editorial JSON with endpoint failover for transient Vertex capacity errors."""
+        last_capacity_error: Exception | None = None
+        locations = vertex_text_locations(self.settings)
+        for index, location in enumerate(locations):
+            try:
+                client = google_genai_client(self.settings, location=location)
+                return client.models.generate_content(
+                    model=self.settings.gemini_model,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as exc:
+                if not vertex_capacity_error(exc):
+                    raise
+                last_capacity_error = exc
+                logger.warning(
+                    "editorial_vertex_capacity_unavailable location=%s fallback_remaining=%s error=%s",
+                    location or "api-key",
+                    max(0, len(locations) - index - 1),
+                    exc,
+                )
+        if last_capacity_error is not None:
+            raise last_capacity_error
+        raise RuntimeError("Editorial provider has no configured Gemini endpoint")
 
     @staticmethod
     def _mock_package(

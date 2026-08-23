@@ -61,6 +61,7 @@ MAX_AUTOMATIC_STAGE_RETRIES = 4
 LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
 EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
+EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD = "editorial_global_capacity_v1_retry_at"
 LEGACY_VEO_EMPTY_RESPONSE_ERROR = "'nonetype' object is not subscriptable"
 VEO_EMPTY_RESPONSE_REPAIR_FIELD = "veo_empty_response_v1_retry_at"
 VEO_HIGH_LOAD_REPAIR_FIELD = "veo_high_load_v1_retry_at"
@@ -115,6 +116,11 @@ def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         return "editorial_schema_repair_retry_at"
     if EDITORIAL_PAYLOAD_SHAPE_ERROR in error_message and not job_data.get(EDITORIAL_PAYLOAD_REPAIR_FIELD):
         return EDITORIAL_PAYLOAD_REPAIR_FIELD
+    if (
+        any(marker in error_message for marker in ("429", "resource_exhausted", "resource exhausted"))
+        and not job_data.get(EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD)
+    ):
+        return EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD
     return None
 
 
@@ -240,10 +246,14 @@ class WorkflowManager:
                 repair_field = generation_deployment_repair_field(failed_job.data)
                 if not repair_field:
                     continue
+                current_stage = str(failed_job.data.get("current_stage") or "intake")
+                retry_counts = dict(failed_job.data.get("automatic_stage_retries") or {})
+                retry_counts[current_stage] = 0
                 failed_job.status = "queued"
                 failed_job.data = {
                     **failed_job.data,
                     **{
+                        "automatic_stage_retries": retry_counts,
                         "last_error": None,
                         repair_field: datetime.now(UTC).isoformat(),
                         "retry_requested_at": datetime.now(UTC).isoformat(),
@@ -1151,8 +1161,12 @@ class WorkflowManager:
                         )
                     raise
                 except Exception as exc:
-                    logger.exception("generation_stage_failed", extra={"job_id": job_id})
                     current_stage = str(job.data.get("current_stage") or "intake")
+                    logger.exception(
+                        "generation_stage_failed job_id=%s stage=%s",
+                        job_id,
+                        current_stage,
+                    )
                     retry_counts = dict(job.data.get("automatic_stage_retries") or {})
                     retry_count = int(retry_counts.get(current_stage, 0))
                     if retryable_generation_error(exc) and retry_count < MAX_AUTOMATIC_STAGE_RETRIES:

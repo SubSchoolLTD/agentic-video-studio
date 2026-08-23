@@ -16,6 +16,7 @@ from apps.api.app.providers import (
     _strip_prompt_tokens,
     apply_narration_to_scene,
     continuous_ugc_scene_layout,
+    vertex_text_locations,
 )
 from apps.api.app.repository import ResourceRepository
 from apps.api.app.workflow import (
@@ -224,6 +225,87 @@ def test_vertex_quota_retry_uses_long_exponential_backoff() -> None:
 
     assert [generation_retry_delay_seconds(error, attempt) for attempt in range(5)] == [30, 60, 120, 240, 240]
     assert generation_retry_delay_seconds(RuntimeError("connection reset"), 3) == 8
+
+
+def test_editorial_capacity_failure_is_requeued_once_for_global_endpoint_deployment() -> None:
+    job_data = {
+        "current_stage": "editorial_strategy",
+        "last_error": {"message": "429 RESOURCE_EXHAUSTED: Resource exhausted. Please try again later."},
+    }
+
+    repair_field = editorial_deployment_repair_field(job_data)
+
+    assert repair_field == "editorial_global_capacity_v1_retry_at"
+    job_data[repair_field] = "2026-08-24T00:00:00+00:00"
+    assert editorial_deployment_repair_field(job_data) is None
+
+
+def test_vertex_text_generation_prefers_global_with_regional_failover() -> None:
+    assert vertex_text_locations(
+        Settings(
+            provider_mode="live",
+            google_cloud_project="test-project",
+            google_cloud_location="us-central1",
+        )
+    ) == ["global", "us-central1"]
+
+
+def test_editorial_generation_falls_back_to_regional_endpoint_when_global_is_exhausted(monkeypatch) -> None:
+    calls: list[str | None] = []
+    payload = editorial_payload()
+
+    class FakeModels:
+        def __init__(self, location: str | None):
+            self.location = location
+
+        def generate_content(self, **_kwargs):
+            calls.append(self.location)
+            if self.location == "global":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED: Resource exhausted. Please try again later.")
+            return SimpleNamespace(text=json.dumps(payload))
+
+    monkeypatch.setattr(
+        "apps.api.app.providers.google_genai_client",
+        lambda _settings, *, location=None: SimpleNamespace(models=FakeModels(location)),
+    )
+    provider = EditorialProvider(
+        Settings(
+            provider_mode="live",
+            google_cloud_project="test-project",
+            google_cloud_location="us-central1",
+        )
+    )
+    packet = ResearchPacket(
+        request_id="research_capacity_failover",
+        objective="Explain reusable learning",
+        sources=[{"id": "source_1", "title": "Evidence"}],
+        claims=[],
+        raw={},
+    )
+
+    package = provider._generate_with_gemini(
+        "Reusable expertise",
+        "Independent teachers",
+        "awareness",
+        {"identity": {"name": "SubSchool"}},
+        packet,
+        8,
+        "ugc_creator",
+        False,
+        False,
+        "",
+        ["9:16"],
+        "",
+        "educational_explainer",
+        {},
+        "",
+        2,
+        2,
+        0,
+    )
+
+    assert calls == ["global", "us-central1"]
+    assert len(package["storyboard"]["scenes"]) == 2
 
 
 def test_continuous_ugc_layout_uses_one_opening_and_seven_second_extensions() -> None:

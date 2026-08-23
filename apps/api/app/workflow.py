@@ -92,6 +92,7 @@ def retryable_generation_error(exc: Exception) -> bool:
             "veo returned no downloadable video bytes",
             "high load",
             "please try again later",
+            "editorial provider returned invalid json",
         )
     )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import logging
 import math
 import re
 import time
@@ -15,6 +16,8 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .config import Settings
+
+logger = logging.getLogger("avs.providers")
 
 VisualMode = Literal[
     "ugc_creator",
@@ -117,7 +120,7 @@ class ProductionBrief(BaseModel):
     duration_target: int
     mandatory_points: list[str]
     forbidden_claims: list[str]
-    budget_class: str
+    budget_class: str = "standard"
     visual_mode: VisualMode
     aspect_ratios: list[Literal["9:16", "16:9"]]
 
@@ -361,7 +364,7 @@ class TopicCandidateDraft(BaseModel):
 
 
 class TopicCandidateSet(BaseModel):
-    candidates: list[TopicCandidateDraft] = Field(min_length=1, max_length=5)
+    candidates: list[TopicCandidateDraft] = Field(min_length=1, max_length=20)
 
 
 class ParallelSearchProvider:
@@ -873,7 +876,13 @@ class EditorialProvider:
         ]
         replacements: dict[str, str] = {}
         if needs_rewrite and self.settings.uses_live_research:
-            replacements = await asyncio.to_thread(self._fit_dialogue_with_gemini, needs_rewrite, budgets)
+            try:
+                replacements = await asyncio.to_thread(self._fit_dialogue_with_gemini, needs_rewrite, budgets)
+            except Exception as exc:
+                # Dialogue fitting is an optimization, not a hard generation gate. A conservative
+                # local compressor is deterministic and keeps the production moving when Vertex
+                # temporarily throttles this secondary request.
+                logger.warning("dialogue_fit_provider_failed_using_local_fallback error=%s", exc)
         for scene in needs_rewrite:
             scene_id = str(scene.get("id"))
             replacement = replacements.get(scene_id) or compact_narration(
@@ -1062,6 +1071,7 @@ class EditorialProvider:
                     "The previous JSON did not match the output contract. Return a complete corrected object. "
                     "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
                     "Keep voiceover and creator_profile as strings, never arrays or objects. "
+                    "Always include budget_class as a short string such as standard. "
                     f"Validation summary: {validation_error[:1200]}"
                 )
             response = client.models.generate_content(

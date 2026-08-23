@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from apps.api.app.config import Settings
 from apps.api.app.database import SessionLocal
-from apps.api.app.providers import EditorialPackage, apply_narration_to_scene
+from apps.api.app.providers import EditorialPackage, EditorialProvider, apply_narration_to_scene
 from apps.api.app.repository import ResourceRepository
 from apps.api.app.workflow import (
     editorial_deployment_repair_field,
@@ -86,6 +89,40 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
     assert [scene["on_screen_text"] for scene in package["storyboard"]["scenes"]] == ["", ""]
 
 
+def test_editorial_package_defaults_budget_class_when_gemini_omits_it() -> None:
+    payload = editorial_payload()
+    payload["production_brief"].pop("budget_class")
+
+    package = EditorialPackage.model_validate(payload).model_dump()
+
+    assert package["production_brief"]["budget_class"] == "standard"
+
+
+@pytest.mark.asyncio
+async def test_dialogue_fit_uses_local_fallback_when_vertex_is_throttled(monkeypatch) -> None:
+    provider = EditorialProvider(Settings(provider_mode="live"))
+
+    def throttled(*_args, **_kwargs):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED")
+
+    monkeypatch.setattr(provider, "_fit_dialogue_with_gemini", throttled)
+    scenes = [
+        {
+            "id": "scene_1",
+            "duration_target": 4,
+            "purpose": "hook",
+            "narration": "This deliberately long spoken sentence must be shortened before the generated scene ends abruptly.",
+            "visual_prompt_base": "A creator speaks to camera.",
+            "visual_mode": "ugc_creator",
+        }
+    ]
+
+    fitted = await provider.fit_dialogue(scenes, native_audio=True)
+
+    assert fitted[0]["speech_timing"]["adjusted_before_generation"] is True
+    assert fitted[0]["speech_timing"]["word_count"] <= fitted[0]["speech_timing"]["word_budget"]
+
+
 def test_storytelling_native_audio_locks_the_named_role_without_a_global_narrator() -> None:
     scene = apply_narration_to_scene(
         {
@@ -163,3 +200,9 @@ def test_veo_high_load_is_retryable_and_recovered_from_scene_checkpoint_once() -
     assert repair_field == "veo_high_load_v1_retry_at"
     job_data[repair_field] = "2026-08-23T02:26:33+00:00"
     assert generation_deployment_repair_field(job_data) is None
+
+
+def test_invalid_editorial_json_is_automatically_retryable() -> None:
+    assert retryable_generation_error(
+        RuntimeError("Editorial provider returned invalid JSON twice: budget_class Field required")
+    ) is True

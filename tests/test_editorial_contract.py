@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from apps.api.app.database import SessionLocal
-from apps.api.app.providers import EditorialPackage
+from apps.api.app.providers import EditorialPackage, apply_narration_to_scene
 from apps.api.app.repository import ResourceRepository
 from apps.api.app.workflow import (
     editorial_deployment_repair_field,
@@ -84,6 +84,24 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
         "name: Alex; age range: 30-40; delivery: warm and conversational"
     )
     assert [scene["on_screen_text"] for scene in package["storyboard"]["scenes"]] == ["", ""]
+
+
+def test_storytelling_native_audio_locks_the_named_role_without_a_global_narrator() -> None:
+    scene = apply_narration_to_scene(
+        {
+            "visual_mode": "storytelling",
+            "speaker": "Maya",
+            "visual_prompt_base": "Locked cast bible: Maya and Leo keep their identity.",
+        },
+        "I taught this lesson twice already.",
+        native_audio=True,
+        voice_profile="a grounded conversational cast",
+    )
+
+    assert 'Maya says exactly' in scene["visual_prompt"]
+    assert "Preserve Maya's distinct" in scene["visual_prompt"]
+    assert "Do not swap voices between roles" in scene["visual_prompt"]
+    assert "add a narrator" in scene["visual_prompt"]
 
 
 def test_invalid_editorial_payload_failure_is_recovered_once_after_deployment() -> None:

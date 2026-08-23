@@ -269,8 +269,8 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
         f"/v1/projects/{customer['default_project_id']}/generation-jobs",
         headers=headers(customer),
         json={
-            "title": "Native product demo",
-            "visual_mode": "product_demo",
+            "title": "Native storytelling sketch",
+            "visual_mode": "storytelling",
             "audio_mode": "veo_native",
             "aspect_ratios": ["9:16"],
             "variants": 1,
@@ -281,8 +281,8 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     native_job = jwt_client.get(
         f"/v1/generation-jobs/{native_generation.json()['generation_job_id']}", headers=headers(customer)
     ).json()
-    assert native_job["title"] == "Native product demo"
-    assert native_job["visual_mode"] == "product_demo"
+    assert native_job["title"] == "Native storytelling sketch"
+    assert native_job["visual_mode"] == "storytelling"
     assert native_job["audio_mode"] == "veo_native"
     assert native_job["character_id"] is None
     assert native_job["estimated_cost"]["basis"] == "video.generate_native_audio"

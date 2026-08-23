@@ -1013,7 +1013,13 @@ class WorkflowManager:
         objective = (input_resource.data.get("objective") if input_resource else None) or project.data.get("brief", {}).get("objective") or "awareness"
         requested_hook = str(input_resource.data.get("hook") or "").strip() if input_resource else ""
         content_format = str(input_resource.data.get("format") or "educational_explainer") if input_resource else "educational_explainer"
-        supported_visual_modes = {"ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"}
+        supported_visual_modes = {
+            "ugc_creator",
+            "ugc_native_audio",
+            "storytelling",
+            "cinematic",
+            "motion_graphics",
+        }
         visual_mode = str(
             job.data.get("visual_mode")
             or (input_resource.data.get("visual_mode") if input_resource else None)
@@ -1022,6 +1028,8 @@ class WorkflowManager:
         legacy_native_audio = visual_mode == "ugc_native_audio"
         if legacy_native_audio:
             visual_mode = "ugc_creator"
+        if visual_mode == "product_demo":
+            visual_mode = "storytelling"
         if visual_mode not in supported_visual_modes:
             raise RuntimeError(f"Unsupported visual mode: {visual_mode}")
         aspect_ratios = list(job.data.get("aspect_ratios") or ["9:16"])

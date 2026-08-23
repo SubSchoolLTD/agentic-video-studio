@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import secrets
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -1924,6 +1925,106 @@ async def retry_due_webhook_deliveries(session: Session, settings: Settings) -> 
     return results
 
 
+def _research_feedback_context(
+    repo: ResourceRepository,
+    *,
+    organization_id: str,
+    project_id: str,
+) -> dict[str, Any]:
+    """Build bounded project preference memory without treating feedback as factual evidence."""
+    feedback = repo.list(
+        organization_id=organization_id,
+        project_id=project_id,
+        kind="research_feedback",
+        limit=200,
+    )
+    if feedback:
+        records = [ResourceRepository.serialize(item) for item in feedback]
+    else:
+        candidates = repo.list(
+            organization_id=organization_id,
+            project_id=project_id,
+            kind="topic_candidate",
+            limit=200,
+        )
+        records = [
+            {
+                **ResourceRepository.serialize(item),
+                "signal": (
+                    "positive"
+                    if item.status in {"selected", "idea_created"} or item.data.get("idea_id")
+                    else "negative"
+                ),
+            }
+            for item in candidates
+            if item.status in {"selected", "idea_created", "hidden", "rejected", "muted"}
+            or item.data.get("idea_id")
+        ]
+
+    positive = [item for item in records if item.get("signal") == "positive"]
+    negative = [item for item in records if item.get("signal") == "negative"]
+
+    def pattern(item: dict[str, Any]) -> str:
+        parts = [item.get("title"), item.get("angle"), item.get("audience")]
+        visual_mode = item.get("recommended_visual_mode") or item.get("visual_mode")
+        if visual_mode:
+            parts.append(f"format {visual_mode}")
+        return " · ".join(str(value).strip() for value in parts if str(value or "").strip())[:500]
+
+    def counts(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+        return dict(
+            Counter(
+                str(item.get(key) or "").strip()
+                for item in items
+                if str(item.get(key) or "").strip()
+            ).most_common(8)
+        )
+
+    return {
+        "selected_count": len(positive),
+        "hidden_count": len(negative),
+        "positive_patterns": [value for item in positive[:8] if (value := pattern(item))],
+        "negative_patterns": [value for item in negative[:8] if (value := pattern(item))],
+        "selected_format_counts": counts(positive, "recommended_visual_mode"),
+        "hidden_format_counts": counts(negative, "recommended_visual_mode"),
+        "selected_audience_counts": counts(positive, "audience"),
+        "hidden_audience_counts": counts(negative, "audience"),
+        "instruction": (
+            "Use selections as soft positive preference signals and hidden items as soft negative preference signals. "
+            "Never treat either as evidence or repeat a hidden candidate verbatim."
+        ),
+    }
+
+
+def _record_research_feedback(
+    repo: ResourceRepository,
+    candidate: Resource,
+    *,
+    signal: str,
+    actor_id: str,
+    reason: str | None = None,
+) -> Resource:
+    return repo.add(
+        kind="research_feedback",
+        organization_id=candidate.organization_id,
+        project_id=candidate.project_id,
+        status="recorded",
+        data={
+            "topic_candidate_id": candidate.id,
+            "research_run_id": candidate.data.get("research_run_id"),
+            "signal": signal,
+            "title": candidate.data.get("title"),
+            "angle": candidate.data.get("angle"),
+            "audience": candidate.data.get("audience"),
+            "format": candidate.data.get("format"),
+            "recommended_visual_mode": candidate.data.get("recommended_visual_mode"),
+            "reason": reason,
+            "created_by": actor_id,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 async def _run_research_task(run_id: str, settings: Settings) -> None:
     with SessionLocal() as session:
         repo = ResourceRepository(session)
@@ -1932,8 +2033,15 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
             return
         repo.update(run, status="running", data={"started_at": datetime.now(UTC).isoformat()})
         try:
+            preference_context = _research_feedback_context(
+                repo,
+                organization_id=run.organization_id,
+                project_id=str(run.project_id),
+            )
             packet = await ParallelSearchProvider(settings).search(
-                run.data["objective"], recency_days=int(run.data.get("recency_days", 30))
+                run.data["objective"],
+                recency_days=int(run.data.get("recency_days", 30)),
+                preference_context=preference_context,
             )
             repo.update(
                 run,
@@ -1944,6 +2052,8 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                     "parallel_result_metadata": packet.raw,
                     "sources": packet.sources,
                     "claims": packet.claims,
+                    "search_queries": (packet.raw.get("request_strategy") or {}).get("search_queries", []),
+                    "preference_context": preference_context,
                 },
             )
             brand_resource = session.scalar(
@@ -1961,6 +2071,7 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                 brand=brand,
                 evidence=packet,
                 max_candidates=int(run.data.get("max_candidates", 5)),
+                preference_context=preference_context,
             )
             score = min(92, 61 + len(packet.sources) * 7)
             created_count = 0
@@ -1998,6 +2109,14 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                         "audience": draft["audience"],
                         "objective": draft["objective"],
                         "format": draft["format"],
+                        "recommended_visual_mode": draft.get("recommended_visual_mode", "ugc_creator"),
+                        "recommended_duration_seconds": int(draft.get("recommended_duration_seconds") or 30),
+                        "recommended_scene_count_min": int(draft.get("recommended_scene_count_min") or 4),
+                        "recommended_scene_count_max": max(
+                            int(draft.get("recommended_scene_count_min") or 4),
+                            int(draft.get("recommended_scene_count_max") or 6),
+                        ),
+                        "format_rationale": draft.get("format_rationale") or "",
                         "why_now": draft["why_now"],
                         "source_ids": draft["source_ids"],
                         "supported_claims": [claim for claim in packet.claims if claim.get("status") == "supported"],
@@ -2020,7 +2139,7 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                 created_count += 1
                 candidate_ids.append(candidate.id)
                 if run.data.get("trigger_type") == "backlog":
-                    repo.add(
+                    idea = repo.add(
                         kind="idea",
                         organization_id=run.organization_id,
                         project_id=run.project_id,
@@ -2031,6 +2150,10 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                             "audience": draft["audience"],
                             "objective": draft["objective"],
                             "format": draft["format"],
+                            "visual_mode": candidate.data["recommended_visual_mode"],
+                            "target_duration_seconds": candidate.data["recommended_duration_seconds"],
+                            "scene_count_min": candidate.data["recommended_scene_count_min"],
+                            "scene_count_max": candidate.data["recommended_scene_count_max"],
                             "topic_candidate_id": candidate.id,
                             "research_run_id": run.id,
                             "source_ids": candidate.data["source_ids"],
@@ -2038,6 +2161,22 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                             "score_confidence": candidate.data["score_confidence"],
                             "provenance": "scheduled_backlog_replenishment",
                         },
+                    )
+                    candidate = repo.update(
+                        candidate,
+                        status="idea_created",
+                        data={
+                            "idea_id": idea.id,
+                            "feedback_signal": "positive",
+                            "selected_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    _record_research_feedback(
+                        repo,
+                        candidate,
+                        signal="positive",
+                        actor_id=str(run.data.get("created_by_id") or "automation"),
+                        reason="Scheduled backlog replenishment",
                     )
             repo.update(
                 run,
@@ -2158,7 +2297,7 @@ def list_topic_candidates(
         organization_id=principal.organization_id, project_id=project_id, kind="topic_candidate"
     )
     if not include_hidden:
-        items = [item for item in items if item.status not in {"muted", "rejected"}]
+        items = [item for item in items if item.status not in {"hidden", "muted", "rejected"}]
     return serialize_many(items)
 
 
@@ -2190,6 +2329,11 @@ def select_candidate(
             "audience": candidate.data.get("audience"),
             "objective": candidate.data.get("objective") or "awareness",
             "format": candidate.data.get("format") or (candidate.data.get("suggested_formats") or ["explainer"])[0],
+            "visual_mode": candidate.data.get("recommended_visual_mode") or "ugc_creator",
+            "target_duration_seconds": int(candidate.data.get("recommended_duration_seconds") or 30),
+            "scene_count_min": int(candidate.data.get("recommended_scene_count_min") or 4),
+            "scene_count_max": int(candidate.data.get("recommended_scene_count_max") or 6),
+            "format_rationale": candidate.data.get("format_rationale") or "",
             "topic_candidate_id": candidate.id,
             "research_run_id": candidate.data.get("research_run_id"),
             "source_ids": candidate.data.get("source_ids", []),
@@ -2199,7 +2343,16 @@ def select_candidate(
             "created_by_id": principal.actor_id,
         },
     )
-    updated = repo.update(candidate, status="selected", data={"idea_id": idea.id})
+    updated = repo.update(
+        candidate,
+        status="idea_created",
+        data={
+            "idea_id": idea.id,
+            "feedback_signal": "positive",
+            "selected_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    _record_research_feedback(repo, updated, signal="positive", actor_id=principal.actor_id)
     return {**ResourceRepository.serialize(updated), "idea_id": idea.id}
 
 
@@ -2213,9 +2366,18 @@ def reject_candidate(
     principal.require("research:run")
     repo = ResourceRepository(session)
     candidate = require_resource(repo, candidate_id, principal, kind="topic_candidate")
-    return ResourceRepository.serialize(
-        repo.update(candidate, status="rejected", data={"review": payload.model_dump(exclude_none=True)})
+    reason = payload.comment or payload.reason_code or "Hidden by the editor"
+    updated = repo.update(
+        candidate,
+        status="hidden",
+        data={
+            "review": payload.model_dump(exclude_none=True),
+            "feedback_signal": "negative",
+            "hidden_at": datetime.now(UTC).isoformat(),
+        },
     )
+    _record_research_feedback(repo, updated, signal="negative", actor_id=principal.actor_id, reason=reason)
+    return ResourceRepository.serialize(updated)
 
 
 @router.post("/topic-candidates/{candidate_id}/mute", tags=["research"])
@@ -2246,7 +2408,22 @@ def mute_candidate(
             "created_by": principal.actor_id,
         },
     )
-    repo.update(candidate, status="muted", data={"mute_id": mute.id})
+    updated = repo.update(
+        candidate,
+        status="hidden",
+        data={
+            "mute_id": mute.id,
+            "feedback_signal": "negative",
+            "hidden_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    _record_research_feedback(
+        repo,
+        updated,
+        signal="negative",
+        actor_id=principal.actor_id,
+        reason=payload.reason,
+    )
     return ResourceRepository.serialize(mute)
 
 
@@ -2324,6 +2501,8 @@ def patch_idea(
     if effective_visual_mode == "ugc_native_audio":
         allowed["visual_mode"] = "ugc_creator"
         allowed.setdefault("audio_mode", "veo_native")
+    elif effective_visual_mode == "product_demo":
+        allowed["visual_mode"] = "storytelling"
     return ResourceRepository.serialize(repo.update(idea, data=allowed, status=new_status))
 
 
@@ -2538,6 +2717,8 @@ async def create_generation(
     legacy_native_audio = effective_visual_mode == "ugc_native_audio"
     if legacy_native_audio:
         effective_visual_mode = "ugc_creator"
+    if effective_visual_mode == "product_demo":
+        effective_visual_mode = "storytelling"
     effective_audio_mode = str(
         payload.audio_mode
         or (idea.data.get("audio_mode") if idea else None)

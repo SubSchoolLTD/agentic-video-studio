@@ -487,7 +487,7 @@ def test_failed_editorial_stage_retries_from_its_checkpoint_without_research(
         "/v1/projects/prj_subschool/generation-jobs",
         json={
             "title": "Resume after editorial schema failure",
-            "visual_mode": "product_demo",
+            "visual_mode": "storytelling",
             "audio_mode": "veo_native",
             "aspect_ratios": ["9:16"],
             "target_duration_seconds": 8,
@@ -522,7 +522,7 @@ def test_failed_editorial_stage_retries_from_its_checkpoint_without_research(
     assert attempts["editorial_strategy"] == 2
     assert research_calls == 1
     assert editorial_calls == 2
-    assert completed["visual_mode"] == "product_demo"
+    assert completed["visual_mode"] == "storytelling"
     assert completed["audio_mode"] == "veo_native"
 
 

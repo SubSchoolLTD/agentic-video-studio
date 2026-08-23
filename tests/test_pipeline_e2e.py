@@ -573,6 +573,61 @@ def test_selective_scene_regeneration_executes_and_appends_video_version(client,
     assert "authentic handheld" in refreshed_scene["visual_prompt"].lower()
 
 
+def test_native_ugc_regeneration_cascades_through_following_extensions(client, auth_headers) -> None:
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Continuous native UGC regeneration",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 15,
+            "visual_mode": "ugc_creator",
+            "audio_mode": "veo_native",
+            "scene_count_min": 2,
+            "scene_count_max": 3,
+            "scene_count_flex": 0,
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-native-ugc-cascade-1"},
+    )
+    assert created.status_code == 202, created.text
+    job = wait_for_job(client, created.json()["generation_job_id"], auth_headers)
+    assert job["status"] == "ready", job.get("last_error")
+    video = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    scenes = sorted(video["scenes"], key=lambda item: item["position"])
+    assert len(scenes) == 2
+
+    queued = client.post(
+        f"/v1/scenes/{scenes[0]['id']}/regenerate",
+        json={"reason": "Strengthen the opening action and rebuild the dependent extension."},
+        headers=auth_headers,
+    )
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["cascade_scene_count"] == 2
+    regeneration = wait_for_scene_regeneration(client, queued.json()["regeneration_id"], auth_headers)
+    assert regeneration["status"] == "completed", regeneration.get("error")
+    assert len(regeneration["attempt_ids"]) == 2
+
+    refreshed = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    refreshed_scenes = sorted(refreshed["scenes"], key=lambda item: item["position"])
+    assert [item["attempt"] for item in refreshed_scenes] == [2, 2]
+
+
+def test_continuous_native_ugc_rejects_durations_beyond_the_veo_extension_limit(client, auth_headers) -> None:
+    response = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Native UGC too long",
+            "target_duration_seconds": 37,
+            "visual_mode": "ugc_creator",
+            "audio_mode": "veo_native",
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 422
+    assert "limited to 36 seconds" in response.text
+
+
 def test_interrupted_job_resumes_from_scene_checkpoint_without_duplicate_provider_work(
     client, auth_headers, monkeypatch
 ) -> None:

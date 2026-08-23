@@ -59,7 +59,7 @@ test('uploads a reusable character and starts native-audio UGC from an idea', as
   ))
   await card.getByRole('button', { name: 'Configure video' }).click()
   await expect(page.getByTestId('generation-config')).toBeVisible()
-  await expect(page.getByLabel('Creator-led UGC')).toBeChecked()
+  await expect(page.getByRole('radio', { name: 'Creator-led UGC', exact: true })).toBeChecked()
   await expect(page.getByLabel('Veo 3 native voice')).toBeChecked()
   await expect(page.getByLabel('Native voice profile')).toHaveValue('grounded_storyteller')
   await expect(page.getByLabel('Character')).toHaveValue(/char_/)

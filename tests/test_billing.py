@@ -6,12 +6,23 @@ from sqlalchemy import select
 
 from apps.api.app.billing import (
     charge_feature,
+    estimate_veo_billable_seconds,
     outstanding_charge_cents,
     refund_feature_charges,
     settle_feature_charge,
 )
 from apps.api.app.database import SessionLocal
 from apps.api.app.models import CreditLedger, Wallet
+
+
+def test_continuous_ugc_quote_uses_one_opening_and_native_extensions() -> None:
+    assert estimate_veo_billable_seconds(
+        target_duration_seconds=30,
+        scene_count_min=4,
+        scene_count_max=6,
+        scene_count_flex=2,
+        continuous_ugc=True,
+    ) == 32
 
 
 def test_failed_feature_charge_is_refunded_once(client) -> None:

@@ -22,3 +22,15 @@ def test_policy_failure_lowers_readiness() -> None:
     failed = final_scores(source_count=3, technical_pass=True, policy_pass=False)
     assert failed["publish_readiness"] < passed["publish_readiness"]
 
+
+def test_failed_hard_gate_caps_publish_readiness() -> None:
+    scores = final_scores(
+        source_count=4,
+        technical_pass=True,
+        policy_pass=True,
+        hard_gate_passed=False,
+        visual_pass=False,
+    )
+
+    assert scores["publish_readiness"] <= 59
+    assert scores["blocked_by_hard_gate"] is True

@@ -15,14 +15,26 @@ from apps.api.app.database import SessionLocal
 from apps.api.app.models import CreditLedger, Wallet
 
 
-def test_continuous_scene_quote_uses_one_opening_and_extensions() -> None:
+def test_continuous_scene_quote_reserves_for_role_specific_roots() -> None:
     assert estimate_veo_billable_seconds(
         target_duration_seconds=30,
         scene_count_min=4,
         scene_count_max=6,
         scene_count_flex=2,
         continuous_scenes=True,
-    ) == 32
+    ) == 34
+
+
+def test_continuous_scene_quote_supports_longer_rolling_timelines() -> None:
+    billable_seconds = estimate_veo_billable_seconds(
+        target_duration_seconds=3_600,
+        scene_count_min=5,
+        scene_count_max=8,
+        scene_count_flex=2,
+        continuous_scenes=True,
+    )
+
+    assert billable_seconds >= 3_600
 
 
 def test_failed_feature_charge_is_refunded_once(client) -> None:

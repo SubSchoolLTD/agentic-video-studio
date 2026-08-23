@@ -231,9 +231,9 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     assert generation.status_code == 202, generation.text
     summary = jwt_client.get("/v1/billing/summary", headers=headers(customer))
     assert summary.status_code == 200
-    assert summary.json()["balance_cents"] == 652
+    assert summary.json()["balance_cents"] == 604
     ledger = jwt_client.get("/v1/billing/ledger", headers=headers(customer)).json()["items"]
-    assert any(item["feature_key"] == "video.generate" and item["amount_cents"] == -768 for item in ledger)
+    assert any(item["feature_key"] == "video.generate" and item["amount_cents"] == -816 for item in ledger)
 
     insufficient = jwt_client.post(
         f"/v1/projects/{customer['default_project_id']}/generation-jobs",
@@ -245,9 +245,9 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
         "code": "insufficient_balance",
         "message": "Not enough balance for this action",
         "details": {
-            "required_cents": 768,
-            "available_cents": 652,
-            "shortfall_cents": 116,
+            "required_cents": 816,
+            "available_cents": 604,
+            "shortfall_cents": 212,
             "currency": "USD",
         },
         "request_id": insufficient.headers["X-Request-ID"],

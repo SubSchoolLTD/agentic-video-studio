@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import secrets
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
@@ -255,17 +256,20 @@ def estimate_veo_billable_seconds(
 ) -> int:
     """Reserve for the most expensive allowed scene split after Veo's 4/6/8-second rounding."""
     if continuous_scenes:
-        candidates: list[int] = []
-        for count in range(2, 6):
-            for opening in (4, 6, 8):
-                final_visible = target_duration_seconds - opening - 7 * max(0, count - 2)
-                if 2.5 <= final_visible <= 7:
-                    candidates.append(opening + 7 * (count - 1))
-        if candidates:
-            return min(candidates)
-        raise ValueError("Target duration cannot be represented as a continuous Veo scene chain")
-    allowed_min = max(2, scene_count_min - scene_count_flex)
-    allowed_max = min(20, scene_count_max + scene_count_flex)
+        # Editorial may create several independent character/narrator roots. Reserve the
+        # conservative case in which every authored fragment is a root; actual settlement later
+        # charges seven seconds for each true extension and releases the unused reservation.
+        from .providers import continuous_ugc_scene_layout
+
+        layout = continuous_ugc_scene_layout(
+            target_duration_seconds,
+            allowed_min=max(2, scene_count_min - scene_count_flex),
+            allowed_max=min(2_000, scene_count_max + scene_count_flex),
+        )
+        return sum(veo_request_duration(seconds) for seconds in layout)
+    required_for_duration = max(2, math.ceil(target_duration_seconds / 8))
+    allowed_min = max(2, scene_count_min - scene_count_flex, required_for_duration)
+    allowed_max = min(2_000, max(scene_count_max + scene_count_flex, required_for_duration))
     totals = [
         scene_count * veo_request_duration(target_duration_seconds / scene_count)
         for scene_count in range(allowed_min, allowed_max + 1)

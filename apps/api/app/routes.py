@@ -120,6 +120,14 @@ logger = logging.getLogger("avs.routes")
 router = APIRouter(prefix="/v1")
 
 
+def _continuation_track(data: dict[str, Any]) -> str:
+    explicit = str(data.get("continuation_track") or data.get("character_key") or "").strip()
+    speaker = str(data.get("speaker") or "").strip()
+    speaker_kind = str(data.get("speaker_kind") or "on_camera")
+    raw = explicit or (speaker if speaker else "voice_over_narrator" if speaker_kind == "voice_over" else "creator")
+    return "_".join(part for part in "".join(char.lower() if char.isalnum() else " " for char in raw).split()) or "creator"
+
+
 def get_workflow(request: Request) -> WorkflowManager:
     return request.app.state.workflow
 
@@ -2713,17 +2721,6 @@ async def create_generation(
         if payload.continue_scenes is not None
         else effective_visual_mode == "ugc_creator"
     )
-    if continue_scenes:
-        if payload.target_duration_seconds > 36:
-            raise HTTPException(
-                422,
-                "Continuous Veo scenes are limited to 36 seconds so every extension input stays within Google's 30-second limit. Disable scene continuation for a longer video.",
-            )
-        if payload.scene_count_min > 5:
-            raise HTTPException(
-                422,
-                "Continuous Veo scenes support at most five authored fragments: one opening clip and four extensions.",
-            )
     character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
     if character_id:
         character = require_resource(repo, str(character_id), principal, kind="character", project_id=project_id)
@@ -3268,17 +3265,23 @@ async def regenerate_scene(
     )
     native_audio = bool(parent_job and parent_job.data.get("audio_mode") == "veo_native")
     continuous_scenes = bool(parent_job and parent_job.data.get("continue_scenes"))
+    selected_track = _continuation_track(scene.data)
+    storyboard_scenes = [
+        item
+        for item in repo.list(
+            organization_id=principal.organization_id,
+            project_id=scene.project_id,
+            kind="scene",
+            limit=5000,
+        )
+        if str(item.data.get("storyboard_id") or "") == str(scene.data.get("storyboard_id") or "")
+    ]
     cascade_scenes = (
         [
             item
-            for item in repo.list(
-                organization_id=principal.organization_id,
-                project_id=scene.project_id,
-                kind="scene",
-                limit=200,
-            )
-            if str(item.data.get("storyboard_id") or "") == str(scene.data.get("storyboard_id") or "")
-            and int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
+            for item in storyboard_scenes
+            if int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
+            and _continuation_track(item.data) == selected_track
         ]
         if continuous_scenes
         else [scene]
@@ -3314,7 +3317,11 @@ async def regenerate_scene(
             quantity=(
                 sum(
                     veo_request_duration(float(item.data.get("duration_target") or 8))
-                    if int(item.data.get("position") or 0) == 1
+                    if not any(
+                        _continuation_track(previous.data) == _continuation_track(item.data)
+                        and int(previous.data.get("position") or 0) < int(item.data.get("position") or 0)
+                        for previous in storyboard_scenes
+                    )
                     else 7
                     for item in cascade_scenes
                 )
@@ -3408,7 +3415,7 @@ async def revise_script(
         payload=GenerationCreate(
             title=str(edits.get("title") or current_script.get("title") or video.data.get("title")),
             aspect_ratios=aspect_ratios,
-            target_duration_seconds=max(8, min(60, duration_seconds)),
+            target_duration_seconds=max(8, duration_seconds),
             approval_mode="final_only",
             variants=1,
             max_cost_usd=20,

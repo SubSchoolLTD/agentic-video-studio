@@ -62,7 +62,7 @@ test('uploads a reusable character and starts native-audio UGC from an idea', as
   await expect(page.getByRole('radio', { name: 'Creator-led UGC', exact: true })).toBeChecked()
   await expect(page.getByLabel('Veo 3 native voice')).toBeChecked()
   await expect(page.getByLabel('Native voice profile')).toHaveValue('grounded_storyteller')
-  await expect(page.getByLabel('Character')).toHaveValue(/char_/)
+  await expect(page.getByLabel('Character', { exact: true })).toHaveValue(/char_/)
   await expect(page.getByText(/Native speech is transcribed after every clip/)).toBeVisible()
   await page.getByLabel('Target duration').fill('8')
   await page.getByLabel('Preferred scene count').fill('2')

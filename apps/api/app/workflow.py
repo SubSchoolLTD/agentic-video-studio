@@ -29,6 +29,7 @@ from .providers import (
 )
 from .renderer import (
     extract_last_frame,
+    prepare_veo_extension_input,
     render_motion_video,
     render_scene_fixture,
     technical_qa,
@@ -409,24 +410,9 @@ class WorkflowManager:
         scene: Resource,
         aspect_ratio: str,
     ) -> str | None:
-        """Use the first accepted scene as the immutable voice reference to prevent drift."""
-        if int(scene.data.get("position") or 0) <= 1:
-            return None
-        storyboard_id = str(scene.data.get("storyboard_id") or "")
-        reference_scene = next(
-            (
-                item
-                for item in repo.list(
-                    organization_id=scene.organization_id,
-                    project_id=scene.project_id,
-                    kind="scene",
-                    limit=200,
-                )
-                if str(item.data.get("storyboard_id") or "") == storyboard_id
-                and int(item.data.get("position") or 0) == 1
-            ),
-            None,
-        )
+        """Use the first accepted scene on this character/narrator track as its voice anchor."""
+        earlier = self._earlier_continuation_scenes(repo, scene=scene)
+        reference_scene = earlier[0] if earlier else None
         if not reference_scene:
             return None
         attempt_ids = dict(reference_scene.data.get("latest_attempt_ids") or {})
@@ -441,6 +427,39 @@ class WorkflowManager:
             return None
         return str(reference_attempt.data.get("storage_uri") or "") or None
 
+    @staticmethod
+    def _continuation_track(scene: Resource) -> str:
+        explicit = str(scene.data.get("continuation_track") or scene.data.get("character_key") or "").strip()
+        speaker = str(scene.data.get("speaker") or "").strip()
+        speaker_kind = str(scene.data.get("speaker_kind") or "on_camera")
+        raw = explicit or (speaker or "voice_over_narrator" if speaker_kind == "voice_over" else speaker) or "creator"
+        return "_".join(part for part in "".join(char.lower() if char.isalnum() else " " for char in raw).split()) or "creator"
+
+    def _earlier_continuation_scenes(
+        self,
+        repo: ResourceRepository,
+        *,
+        scene: Resource,
+    ) -> list[Resource]:
+        storyboard_id = str(scene.data.get("storyboard_id") or "")
+        position = int(scene.data.get("position") or 0)
+        track = self._continuation_track(scene)
+        return sorted(
+            [
+                item
+                for item in repo.list(
+                    organization_id=scene.organization_id,
+                    project_id=scene.project_id,
+                    kind="scene",
+                    limit=5000,
+                )
+                if str(item.data.get("storyboard_id") or "") == storyboard_id
+                and int(item.data.get("position") or 0) < position
+                and self._continuation_track(item) == track
+            ],
+            key=lambda item: int(item.data.get("position") or 0),
+        )
+
     def _scene_extension_input_uri(
         self,
         repo: ResourceRepository,
@@ -448,24 +467,9 @@ class WorkflowManager:
         scene: Resource,
         aspect_ratio: str,
     ) -> str | None:
-        """Return the accepted cumulative Veo video used to extend a scene chain."""
-        if int(scene.data.get("position") or 0) <= 1:
-            return None
-        storyboard_id = str(scene.data.get("storyboard_id") or "")
-        previous = next(
-            (
-                item
-                for item in repo.list(
-                    organization_id=scene.organization_id,
-                    project_id=scene.project_id,
-                    kind="scene",
-                    limit=200,
-                )
-                if str(item.data.get("storyboard_id") or "") == storyboard_id
-                and int(item.data.get("position") or 0) == int(scene.data.get("position") or 0) - 1
-            ),
-            None,
-        )
+        """Return the rolling Veo context from the latest scene owned by the same role."""
+        earlier = self._earlier_continuation_scenes(repo, scene=scene)
+        previous = earlier[-1] if earlier else None
         if not previous:
             return None
         attempt_ids = dict(previous.data.get("latest_attempt_ids") or {})
@@ -503,9 +507,9 @@ class WorkflowManager:
             if job.data.get("continue_scenes") is not None
             else native_audio and job.data.get("visual_mode") == "ugc_creator"
         )
-        voice_locked_continuation = bool(
-            continue_scenes and native_audio and job.data.get("visual_mode") == "ugc_creator"
-        )
+        voice_locked_continuation = bool(continue_scenes and native_audio)
+        continuation_track = self._continuation_track(scene)
+        scene_voice_profile = str(scene.data.get("voice_direction") or locked_voice_profile)
         for automatic_retry in range(max_automatic_retries + 1):
             prompt = str(scene.data.get("visual_prompt") or "").strip()
             if not prompt:
@@ -532,15 +536,26 @@ class WorkflowManager:
                     if continue_scenes
                     else None
                 )
-                if continue_scenes and int(scene.data.get("position") or 0) > 1 and not extension_video_uri:
-                    raise RuntimeError(f"Previous cumulative Veo video is missing for {scene.id} ({aspect_ratio})")
+                earlier_track_scenes = self._earlier_continuation_scenes(repo, scene=scene) if continue_scenes else []
+                if continue_scenes and earlier_track_scenes and not extension_video_uri:
+                    raise RuntimeError(
+                        f"Previous Veo context for continuation track {continuation_track} is missing "
+                        f"for {scene.id} ({aspect_ratio})"
+                    )
                 if extension_video_uri:
-                    input_uri, input_mime_type, input_kind = extension_video_uri, "video/mp4", "previous_veo_video_extension"
-                elif continue_scenes and int(scene.data.get("position") or 0) == 1:
                     input_uri, input_mime_type, input_kind = (
-                        default_reference_uri,
-                        default_reference_mime_type or "image/jpeg",
-                        "character_reference" if default_reference_uri else "text_only",
+                        extension_video_uri,
+                        "video/mp4",
+                        f"continuation_track:{continuation_track}",
+                    )
+                elif continue_scenes:
+                    root_reference_uri = (
+                        default_reference_uri if job.data.get("visual_mode") == "ugc_creator" else None
+                    )
+                    input_uri, input_mime_type, input_kind = (
+                        root_reference_uri,
+                        (default_reference_mime_type or "image/jpeg") if root_reference_uri else None,
+                        f"continuation_track_root:{continuation_track}",
                     )
                 elif job.data.get("visual_mode") in {"storytelling", "cinematic", "motion_graphics"}:
                     input_uri, input_mime_type, input_kind = None, None, "independent_scene_vignette"
@@ -587,8 +602,16 @@ class WorkflowManager:
                     if continuation_output_path and continuation_output_path.exists()
                     else generated
                 )
+                continuation_conditioning = continuation_generated
+                if continue_scenes:
+                    conditioning_path = output_path.with_name(f"{output_path.stem}_conditioning.mp4")
+                    continuation_conditioning = await asyncio.to_thread(
+                        prepare_veo_extension_input,
+                        continuation_generated,
+                        conditioning_path,
+                    )
                 persisted_continuation = (
-                    await asyncio.to_thread(self.storage.persist, continuation_generated, content_type="video/mp4")
+                    await asyncio.to_thread(self.storage.persist, continuation_conditioning, content_type="video/mp4")
                     if continue_scenes
                     else None
                 )
@@ -608,7 +631,6 @@ class WorkflowManager:
                             require_immediate_hook=int(scene.data.get("position") or 0) == 1,
                             require_voice_at_end=bool(
                                 scene.data.get("continuous_extension_has_next")
-                                and job.data.get("visual_mode") == "ugc_creator"
                             ),
                         )
                     except TypeError as exc:
@@ -629,9 +651,11 @@ class WorkflowManager:
                         voice_qa = await self.speech_qa.compare_voice(
                             reference_video_uri=voice_reference_uri,
                             candidate_video_uri=persisted["storage_uri"],
-                            voice_profile=locked_voice_profile,
+                            voice_profile=scene_voice_profile,
                         )
-                        voice_qa["generation_strategy"] = "continuous_veo_extension"
+                        voice_qa["generation_strategy"] = (
+                            "character_track_extension" if extension_video_uri else "continuation_track_root"
+                        )
                     else:
                         voice_reference_uri = None
                         voice_qa = {
@@ -721,13 +745,14 @@ class WorkflowManager:
                         "automatic_retry": automatic_retry,
                         "aspect_ratio": aspect_ratio,
                         "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-director-v5",
+                        "prompt_version": "editorial-director-v6-character-tracks",
                         "visual_prompt": prompt,
                         "narration": scene.data.get("narration"),
                         "output_uri": str(generated),
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
                         "continuation_output_uri": str(continuation_generated) if continue_scenes else None,
+                        "continuation_conditioning_uri": str(continuation_conditioning) if continue_scenes else None,
                         "continuation_storage_uri": (
                             persisted_continuation["storage_uri"] if persisted_continuation else None
                         ),
@@ -740,13 +765,19 @@ class WorkflowManager:
                         "continuity_input_uri": input_uri,
                         "continuity_input_kind": input_kind,
                         "generation_strategy": (
-                            "continuous_veo_extension" if continue_scenes else "independent_scene_vignette"
+                            "character_track_extension"
+                            if extension_video_uri
+                            else "continuation_track_root"
+                            if continue_scenes
+                            else "independent_scene_vignette"
                         ),
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
                         "voice_reference_uri": voice_reference_uri,
                         "native_voice_preset": voice_preset,
                         "native_voice_profile": locked_voice_profile,
+                        "scene_voice_profile": scene_voice_profile,
+                        "continuation_track": continuation_track,
                         "veo_seed": veo_seed,
                         "qa_status": "passed" if attempt_passed else "failed",
                         "demo_data": not self.settings.uses_live_video,
@@ -775,6 +806,7 @@ class WorkflowManager:
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
                         "continuation_output_uri": str(continuation_generated) if continue_scenes else None,
+                        "continuation_conditioning_uri": str(continuation_conditioning) if continue_scenes else None,
                         "continuation_storage_uri": (
                             persisted_continuation["storage_uri"] if persisted_continuation else None
                         ),
@@ -785,8 +817,13 @@ class WorkflowManager:
                         "veo_seed": veo_seed,
                         "continuity_input_kind": input_kind,
                         "generation_strategy": (
-                            "continuous_veo_extension" if continue_scenes else "independent_scene_vignette"
+                            "character_track_extension"
+                            if extension_video_uri
+                            else "continuation_track_root"
+                            if continue_scenes
+                            else "independent_scene_vignette"
                         ),
+                        "continuation_track": continuation_track,
                         "last_frame_storage_uri": persisted_last_frame["storage_uri"],
                         "billable_seconds": attempt.data["billable_seconds"],
                     }
@@ -819,8 +856,9 @@ class WorkflowManager:
             if not voice_passed:
                 retry_prompt = (
                     f"{retry_prompt} VOICE IDENTITY CORRECTION: The previous take was rejected because the "
-                    f"speaker changed. Cast exactly this locked voice: {locked_voice_profile}. Keep the same "
-                    "speaker identity as the opening scene; do not improvise a different narrator."
+                    f"speaker changed. Cast exactly this role-specific voice: {scene_voice_profile}. Keep the same "
+                    f"speaker identity as the first accepted scene on continuation track {continuation_track}; "
+                    "do not borrow a voice from another character or narrator track."
                 )
             repo.update(
                 scene,
@@ -892,6 +930,7 @@ class WorkflowManager:
                 native_audio = job.data.get("audio_mode") == "veo_native"
                 cascade_scenes = [scene]
                 if job.data.get("continue_scenes"):
+                    selected_track = self._continuation_track(scene)
                     cascade_scenes = sorted(
                         [
                             item
@@ -899,10 +938,11 @@ class WorkflowManager:
                                 organization_id=job.organization_id,
                                 project_id=job.project_id,
                                 kind="scene",
-                                limit=200,
+                                limit=5000,
                             )
                             if str(item.data.get("storyboard_id") or "") == storyboard.id
                             and int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
+                            and self._continuation_track(item) == selected_track
                         ],
                         key=lambda item: int(item.data.get("position") or 0),
                     )
@@ -2136,19 +2176,13 @@ class WorkflowManager:
             matching_attempts = [
                 item for item in scene_attempts if item.get("aspect_ratio") in {None, aspect_ratio}
             ]
-            if job.data.get("continue_scenes"):
-                cumulative_paths = [
-                    Path(str(item["continuation_output_uri"]))
-                    for item in matching_attempts
-                    if item.get("continuation_output_uri")
-                ]
-                scene_video_paths = cumulative_paths[-1:] or [
-                    Path(str(item["output_uri"])) for item in matching_attempts if item.get("output_uri")
-                ][-1:]
-            else:
-                scene_video_paths = [
-                    Path(str(item["output_uri"])) for item in matching_attempts if item.get("output_uri")
-                ]
+            # The final timeline is always made from the authored per-scene tails in storyboard
+            # order. Cumulative/rolling videos are private conditioning context for their own role;
+            # rendering one of those would reorder interleaved characters and reintroduce hidden
+            # in-model transitions. FFmpeg concat below is an instantaneous hard cut.
+            scene_video_paths = [
+                Path(str(item["output_uri"])) for item in matching_attempts if item.get("output_uri")
+            ]
             manifest = await asyncio.to_thread(
                 render_motion_video,
                 title=title,

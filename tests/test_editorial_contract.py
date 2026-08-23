@@ -306,7 +306,48 @@ async def test_mock_editorial_package_carries_candidate_strategy_into_detailed_s
     assert package["production_brief"]["audience_insight"].startswith("Teachers lose")
     assert [scene["duration_target"] for scene in package["storyboard"]["scenes"]] == [4, 7, 7, 7, 5]
     assert all(scene["story_beat"] and scene["blocking"] and scene["sound_direction"] for scene in package["storyboard"]["scenes"])
-    assert all(scene["generation_strategy"] == "continuous_veo_extension" for scene in package["storyboard"]["scenes"])
+    scenes = package["storyboard"]["scenes"]
+    assert scenes[0]["generation_strategy"] == "continuation_track_root"
+    assert all(scene["generation_strategy"] == "character_track_extension" for scene in scenes[1:])
+    assert {scene["continuation_track"] for scene in scenes} == {"creator"}
+    assert all("No fade, dissolve" in scene["visual_prompt"] for scene in scenes)
+    assert all("transition sound" in scene["visual_prompt"] for scene in scenes)
+
+
+@pytest.mark.asyncio
+async def test_storytelling_builds_independent_continuation_branches_per_role() -> None:
+    provider = EditorialProvider(Settings(provider_mode="mock"))
+    packet = ResearchPacket(
+        request_id="research_story_tracks",
+        objective="Show a teacher and colleague improving a course",
+        sources=[{"id": "source_1", "title": "Evidence"}],
+        claims=[{"id": "claim_1", "status": "supported", "claim": "Reusable lessons reduce repetition"}],
+        raw={},
+    )
+
+    package = await provider.create_package(
+        title="Stop rebuilding the same lesson",
+        audience="Independent teachers",
+        objective="awareness",
+        brand={"identity": {"name": "SubSchool"}},
+        evidence=packet,
+        duration_seconds=40,
+        visual_mode="storytelling",
+        native_audio=True,
+        continue_scenes=True,
+        aspect_ratios=["9:16"],
+        scene_count_min=5,
+        scene_count_max=8,
+        scene_count_flex=0,
+    )
+
+    scenes = package["storyboard"]["scenes"]
+    assert sum(scene["duration_target"] for scene in scenes) == 40
+    assert [scene["continuation_track"] for scene in scenes[:4]] == ["maya", "leo", "maya", "leo"]
+    assert [scene["continuation_track_position"] for scene in scenes[:4]] == [1, 1, 2, 2]
+    assert scenes[0]["generation_strategy"] == scenes[1]["generation_strategy"] == "continuation_track_root"
+    assert scenes[2]["generation_strategy"] == scenes[3]["generation_strategy"] == "character_track_extension"
+    assert {item["key"] for item in package["storyboard"]["character_map"]} == {"maya", "leo"}
 
 
 def test_live_candidate_generation_uses_json_mode_without_vertex_response_schema(monkeypatch) -> None:

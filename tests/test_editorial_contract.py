@@ -11,6 +11,8 @@ from apps.api.app.providers import (
     EditorialPackage,
     EditorialProvider,
     ResearchPacket,
+    SceneSpeechAssessment,
+    SpeechQAProvider,
     TopicCandidateProvider,
     _rebalance_candidate_mix,
     _strip_prompt_tokens,
@@ -241,6 +243,57 @@ def test_veo_high_load_is_retryable_and_recovered_from_scene_checkpoint_once() -
     assert repair_field == "veo_high_load_v1_retry_at"
     job_data[repair_field] = "2026-08-23T02:26:33+00:00"
     assert generation_deployment_repair_field(job_data) is None
+
+
+def test_native_speech_edge_gate_is_recovered_from_scene_checkpoint_once() -> None:
+    job_data = {
+        "current_stage": "scene_generation",
+        "last_error": {
+            "message": "Native audio speech QA failed for gener_job_scene_1 after 3 attempts"
+        },
+    }
+
+    repair_field = generation_deployment_repair_field(job_data)
+
+    assert repair_field == "native_speech_edge_gate_v1_retry_at"
+    job_data[repair_field] = "2026-08-24T02:00:00+00:00"
+    assert generation_deployment_repair_field(job_data) is None
+
+
+def test_complete_native_line_can_end_naturally_before_extension_edge(monkeypatch) -> None:
+    assessment = SceneSpeechAssessment(
+        transcript="Here is the complete opening line.",
+        speech_present=True,
+        last_phrase_complete=True,
+        speech_start_seconds=0.2,
+        speech_end_seconds=5.1,
+        issues=[],
+    )
+
+    class FakeModels:
+        @staticmethod
+        def generate_content(**_kwargs):
+            return SimpleNamespace(parsed=assessment, response_id="speech-qa-natural-ending")
+
+    monkeypatch.setattr(
+        "apps.api.app.providers.google_genai_client",
+        lambda _settings: SimpleNamespace(models=FakeModels()),
+    )
+    provider = SpeechQAProvider(
+        Settings(provider_mode="live", google_cloud_project="test-project")
+    )
+
+    result = provider._analyze_with_gemini(
+        "gs://test-bucket/scene.mp4",
+        assessment.transcript,
+        8,
+        True,
+        True,
+    )
+
+    assert result["passed"] is True
+    assert result["voice_at_extension_edge"] is False
+    assert not any("final second" in issue.lower() for issue in result["issues"])
 
 
 def test_invalid_editorial_json_is_automatically_retryable() -> None:

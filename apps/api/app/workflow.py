@@ -65,6 +65,8 @@ EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD = "editorial_global_capacity_v1_retry_at"
 LEGACY_VEO_EMPTY_RESPONSE_ERROR = "'nonetype' object is not subscriptable"
 VEO_EMPTY_RESPONSE_REPAIR_FIELD = "veo_empty_response_v1_retry_at"
 VEO_HIGH_LOAD_REPAIR_FIELD = "veo_high_load_v1_retry_at"
+NATIVE_SPEECH_EDGE_GATE_ERROR = "native audio speech qa failed"
+NATIVE_SPEECH_EDGE_GATE_REPAIR_FIELD = "native_speech_edge_gate_v1_retry_at"
 
 
 def stable_veo_seed(job_id: str, voice_preset: str) -> int:
@@ -141,6 +143,12 @@ def generation_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         and not job_data.get(VEO_HIGH_LOAD_REPAIR_FIELD)
     ):
         return VEO_HIGH_LOAD_REPAIR_FIELD
+    if (
+        job_data.get("current_stage") == "scene_generation"
+        and NATIVE_SPEECH_EDGE_GATE_ERROR in error_message
+        and not job_data.get(NATIVE_SPEECH_EDGE_GATE_REPAIR_FIELD)
+    ):
+        return NATIVE_SPEECH_EDGE_GATE_REPAIR_FIELD
     return None
 
 
@@ -264,7 +272,7 @@ class WorkflowManager:
                 repaired_job_ids.append(failed_job.id)
             session.commit()
         for repaired_job_id in repaired_job_ids:
-            logger.info("editorial_deployment_repair_job_requeued job_id=%s", repaired_job_id)
+            logger.info("generation_deployment_repair_job_requeued job_id=%s", repaired_job_id)
             loop.call_later(RESUME_GRACE_SECONDS, self.schedule, repaired_job_id)
         with SessionLocal() as session:
             regenerations = list(
@@ -715,10 +723,18 @@ class WorkflowManager:
                         speech_prompt_corrections.append(
                             "HOOK TIMING CORRECTION: open on the first spoken word at time zero; no breath, silence, reaction or lead-in."
                         )
-                    if "final second" in issue_text:
-                        speech_prompt_corrections.append(
-                            "EXTENSION AUDIO CORRECTION: keep the same creator audibly speaking through the final second."
-                        )
+                    logger.warning(
+                        "scene_speech_qa_rejected job_id=%s scene_id=%s attempt=%s coverage=%s "
+                        "speech_start_seconds=%s speech_end_seconds=%s last_phrase_complete=%s issues=%s",
+                        job.id,
+                        scene.id,
+                        attempt_number,
+                        speech_qa.get("coverage"),
+                        speech_qa.get("speech_start_seconds"),
+                        speech_qa.get("speech_end_seconds"),
+                        speech_qa.get("last_phrase_complete"),
+                        speech_qa.get("issues"),
+                    )
                 if self.settings.uses_live_video:
                     await self._emit(
                         session,
@@ -1886,7 +1902,20 @@ class WorkflowManager:
             if legacy_attempt_id and aspect_ratios[0] not in latest_attempt_ids:
                 latest_attempt_ids[aspect_ratios[0]] = str(legacy_attempt_id)
             output_uris = dict(scene.data.get("output_uris") or {})
-            attempt_number = int(scene.data.get("attempt", 0))
+            persisted_attempt_numbers = [
+                int(item.data.get("attempt") or 0)
+                for item in repo.list(
+                    organization_id=job.organization_id,
+                    project_id=job.project_id,
+                    kind="scene_attempt",
+                    limit=200,
+                )
+                if item.data.get("generation_job_id") == job.id
+                and item.data.get("scene_id") == scene.id
+            ]
+            attempt_number = max(
+                [int(scene.data.get("attempt", 0)), *persisted_attempt_numbers]
+            )
             missing_ratios: list[str] = []
             for aspect_ratio in aspect_ratios:
                 latest_attempt_id = latest_attempt_ids.get(aspect_ratio)

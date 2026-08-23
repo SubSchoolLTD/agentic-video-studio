@@ -58,6 +58,7 @@ STAGES = (
 RESUME_GRACE_SECONDS = 20
 MAX_AUTOMATIC_STAGE_RETRIES = 2
 LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
+EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 
 
 def stable_veo_seed(job_id: str, voice_preset: str) -> int:
@@ -85,6 +86,20 @@ def retryable_generation_error(exc: Exception) -> bool:
             "status: \"unavailable\"",
         )
     )
+
+
+def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
+    """Return a one-shot recovery marker for editorial failures fixed by this deployment."""
+    if job_data.get("current_stage") != "editorial_strategy":
+        return None
+    error_message = str((job_data.get("last_error") or {}).get("message") or "").lower()
+    if LEGACY_EDITORIAL_SCHEMA_ERROR in error_message and not job_data.get("editorial_schema_repair_retry_at"):
+        return "editorial_schema_repair_retry_at"
+    if EDITORIAL_PAYLOAD_SHAPE_ERROR in error_message and not job_data.get(
+        "editorial_payload_normalization_retry_at"
+    ):
+        return "editorial_payload_normalization_retry_at"
+    return None
 
 
 def initial_stage_state() -> list[dict[str, Any]]:
@@ -162,26 +177,22 @@ class WorkflowManager:
                 )
             )
             for failed_job in failed_jobs:
-                error_message = str((failed_job.data.get("last_error") or {}).get("message") or "").lower()
-                if (
-                    failed_job.data.get("current_stage") != "editorial_strategy"
-                    or LEGACY_EDITORIAL_SCHEMA_ERROR not in error_message
-                    or failed_job.data.get("editorial_schema_repair_retry_at")
-                ):
+                repair_field = editorial_deployment_repair_field(failed_job.data)
+                if not repair_field:
                     continue
                 repo.update(
                     failed_job,
                     status="queued",
                     data={
                         "last_error": None,
-                        "editorial_schema_repair_retry_at": datetime.now(UTC).isoformat(),
+                        repair_field: datetime.now(UTC).isoformat(),
                         "retry_requested_at": datetime.now(UTC).isoformat(),
                         "retry_source": "deployment_repair",
                     },
                 )
                 repaired_job_ids.append(failed_job.id)
         for repaired_job_id in repaired_job_ids:
-            logger.info("legacy_editorial_schema_job_requeued job_id=%s", repaired_job_id)
+            logger.info("editorial_deployment_repair_job_requeued job_id=%s", repaired_job_id)
             loop.call_later(RESUME_GRACE_SECONDS, self.schedule, repaired_job_id)
         with SessionLocal() as session:
             regenerations = list(

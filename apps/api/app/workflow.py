@@ -56,7 +56,7 @@ STAGES = (
     "scoring",
 )
 RESUME_GRACE_SECONDS = 20
-MAX_AUTOMATIC_STAGE_RETRIES = 2
+MAX_AUTOMATIC_STAGE_RETRIES = 4
 LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
 EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
@@ -95,6 +95,14 @@ def retryable_generation_error(exc: Exception) -> bool:
             "editorial provider returned invalid json",
         )
     )
+
+
+def generation_retry_delay_seconds(exc: Exception, retry_count: int) -> int:
+    """Back off long enough for constrained Vertex LRO slots to become available."""
+    message = str(exc).lower()
+    if any(marker in message for marker in ("429", "resource_exhausted", "high load", "please try again later")):
+        return min(30 * (2**retry_count), 240)
+    return min(2**retry_count, 30)
 
 
 def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
@@ -921,6 +929,7 @@ class WorkflowManager:
                     retry_counts = dict(job.data.get("automatic_stage_retries") or {})
                     retry_count = int(retry_counts.get(current_stage, 0))
                     if retryable_generation_error(exc) and retry_count < MAX_AUTOMATIC_STAGE_RETRIES:
+                        retry_delay = generation_retry_delay_seconds(exc, retry_count)
                         self._set_stage(repo, job, current_stage, "failed", error=str(exc))
                         retry_counts[current_stage] = retry_count + 1
                         repo.update(
@@ -935,15 +944,21 @@ class WorkflowManager:
                                     "stage": current_stage,
                                 },
                                 "retry_requested_at": datetime.now(UTC).isoformat(),
+                                "retry_after_seconds": retry_delay,
                             },
                         )
                         await self._emit(
                             session,
                             job,
                             "generation.retry_scheduled",
-                            {"stage": current_stage, "attempt": retry_count + 1, "error": str(exc)},
+                            {
+                                "stage": current_stage,
+                                "attempt": retry_count + 1,
+                                "retry_after_seconds": retry_delay,
+                                "error": str(exc),
+                            },
                         )
-                        await asyncio.sleep(2 ** retry_count)
+                        await asyncio.sleep(retry_delay)
                         continue
                     logger.exception("generation_failed", extra={"job_id": job_id})
                     self._set_stage(repo, job, current_stage, "failed", error=str(exc))

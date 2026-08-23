@@ -11,6 +11,7 @@ from apps.api.app.repository import ResourceRepository
 from apps.api.app.workflow import (
     editorial_deployment_repair_field,
     generation_deployment_repair_field,
+    generation_retry_delay_seconds,
     retryable_generation_error,
 )
 
@@ -206,3 +207,10 @@ def test_invalid_editorial_json_is_automatically_retryable() -> None:
     assert retryable_generation_error(
         RuntimeError("Editorial provider returned invalid JSON twice: budget_class Field required")
     ) is True
+
+
+def test_vertex_quota_retry_uses_long_exponential_backoff() -> None:
+    error = RuntimeError("429 RESOURCE_EXHAUSTED long_running_online_prediction_requests_per_base_model")
+
+    assert [generation_retry_delay_seconds(error, attempt) for attempt in range(5)] == [30, 60, 120, 240, 240]
+    assert generation_retry_delay_seconds(RuntimeError("connection reset"), 3) == 8

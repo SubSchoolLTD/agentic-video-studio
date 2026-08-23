@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { creditTestBalance, registerThroughUi } from './helpers'
 
-test('research persists candidates, exposes details and hides rejected cards', async ({ page }) => {
+test('research keeps action candidates focused and exposes created and hidden history', async ({ page }) => {
   const account = await registerThroughUi(page, 'Research UX')
   await creditTestBalance(page.request, account.email, 1_000)
   await page.goto('/research')
@@ -13,6 +13,8 @@ test('research persists candidates, exposes details and hides rejected cards', a
   await expect(page.getByText('Research completed')).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId('research-running')).toHaveCount(0)
   await expect(page.getByTestId('research-filters')).toBeVisible()
+  await expect(page.getByTestId('research-history')).toContainText('Research history')
+  await expect(page.getByTestId('research-history')).toContainText('5 / 5 candidates')
   await expect(page.getByRole('link', { name: 'Configure automatic research' }).first()).toHaveAttribute('href', '/settings?tab=automation')
 
   const cards = page.locator('.candidate-card')
@@ -34,9 +36,29 @@ test('research persists candidates, exposes details and hides rejected cards', a
   await expect(details.getByRole('heading', { name: 'Supported claims' })).toBeVisible()
   await expect(details.getByRole('heading', { name: 'Unresolved questions' })).toBeVisible()
   await expect(details.getByRole('heading', { name: 'Sources' })).toBeVisible()
-  await details.getByRole('button', { name: 'Hide' }).click()
-  await expect(details).toHaveCount(0)
+  await expect(details.getByRole('heading', { name: 'Recommended production' })).toBeVisible()
+  await details.getByRole('button', { name: 'Turn into idea' }).click()
+  await expect(page).toHaveURL(/\/research$/)
+  await expect(details.getByRole('button', { name: 'Open idea' })).toBeVisible()
+  await details.getByLabel('Close candidate details').click()
   await expect(cards).toHaveCount(countBefore - 1)
+
+  await page.getByLabel('Filter candidate status').selectOption('idea_created')
+  const createdCard = page.locator('.candidate-card').filter({ hasText: firstTitle })
+  await expect(createdCard).toBeVisible()
+  await expect(createdCard.getByRole('button', { name: 'Open idea' })).toBeVisible()
+
+  await page.getByLabel('Filter candidate status').selectOption('candidate')
+  const hiddenTitle = await cards.first().locator('h3').innerText()
+  await cards.first().getByRole('button', { name: 'Hide' }).click()
+  await expect(details).toHaveCount(0)
+  await expect(cards).toHaveCount(countBefore - 2)
+  await page.getByLabel('Filter candidate status').selectOption('hidden')
+  await expect(page.locator('.candidate-card').filter({ hasText: hiddenTitle })).toBeVisible()
+
+  await page.getByLabel('Filter candidate status').selectOption('idea_created')
+  await createdCard.getByRole('button', { name: 'Open idea' }).click()
+  await expect(page).toHaveURL(/\/ideas\?idea=/)
 })
 
 test('ideas move between kanban columns and settings require explicit edit mode', async ({ page }, testInfo) => {
@@ -97,6 +119,10 @@ test('ideas move between kanban columns and settings require explicit edit mode'
   await expect(page.getByText('Settings saved')).toBeVisible()
   await expect(page.getByText(`${account.projectName} Updated`, { exact: true })).toBeVisible()
   await expect(page.getByLabel('Project name')).toHaveCount(0)
+
+  await page.goto('/strategy')
+  await expect(page.locator('.strategy-score')).toContainText('Confidence')
+  await expect(page.locator('.score-ring')).toHaveCount(0)
 })
 
 test('library sends a selected video version to the publication composer', async ({ page }) => {

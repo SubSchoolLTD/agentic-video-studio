@@ -130,7 +130,9 @@ class IdeaCreate(BaseModel):
     audience: str = Field(min_length=2, max_length=200)
     objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"] = "education"
     format: str = "educational_explainer"
-    visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] = "ugc_creator"
+    visual_mode: Literal[
+        "ugc_creator", "ugc_native_audio", "storytelling", "cinematic", "motion_graphics"
+    ] = "ugc_creator"
     audio_mode: Literal["google_tts", "veo_native"] | None = None
     native_voice_preset: Literal[
         "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
@@ -147,7 +149,9 @@ class IdeaPatch(BaseModel):
     audience: str | None = Field(default=None, min_length=2, max_length=200)
     objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"] | None = None
     format: str | None = Field(default=None, max_length=120)
-    visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
+    visual_mode: Literal[
+        "ugc_creator", "ugc_native_audio", "storytelling", "cinematic", "motion_graphics"
+    ] | None = None
     audio_mode: Literal["google_tts", "veo_native"] | None = None
     native_voice_preset: Literal[
         "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
@@ -164,7 +168,9 @@ class GenerationCreate(BaseModel):
     target_duration_seconds: int = Field(default=30, ge=8, le=60)
     approval_mode: Literal["manual_all", "final_only", "auto_low_risk", "draft_only"] = "final_only"
     variants: int = Field(default=1, ge=1, le=3)
-    visual_mode: Literal["ugc_creator", "ugc_native_audio", "product_demo", "cinematic", "motion_graphics"] | None = None
+    visual_mode: Literal[
+        "ugc_creator", "ugc_native_audio", "storytelling", "cinematic", "motion_graphics"
+    ] | None = None
     audio_mode: Literal["google_tts", "veo_native"] | None = None
     native_voice_preset: Literal[
         "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"

@@ -11,6 +11,7 @@ from apps.api.app.events import EventSink
 from apps.api.app.ingestion import fetch_public_text
 from apps.api.app.repository import ResourceRepository
 from apps.api.app.routes import (
+    _research_feedback_context,
     enqueue_backlog_replenishment,
     enqueue_due_research_profiles,
     poll_due_rss_sources,
@@ -370,11 +371,21 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
         if item.get("research_run_id") == queued[0]
     ]
     assert len(candidates) >= 2
+    assert candidates[0]["recommended_visual_mode"] in {
+        "ugc_creator",
+        "storytelling",
+        "cinematic",
+        "motion_graphics",
+    }
+    assert 15 <= candidates[0]["recommended_duration_seconds"] <= 60
     selected = client.post(f"/v1/topic-candidates/{candidates[0]['id']}/select", headers=auth_headers)
     assert selected.status_code == 200
     assert selected.json()["idea_id"].startswith("idea_")
+    assert selected.json()["status"] == "idea_created"
     idea = client.get("/v1/projects/prj_subschool/ideas", headers=auth_headers).json()["items"]
-    assert any(item["id"] == selected.json()["idea_id"] for item in idea)
+    selected_idea = next(item for item in idea if item["id"] == selected.json()["idea_id"])
+    assert selected_idea["visual_mode"] == candidates[0]["recommended_visual_mode"]
+    assert selected_idea["target_duration_seconds"] == candidates[0]["recommended_duration_seconds"]
 
     muted = client.post(
         f"/v1/topic-candidates/{candidates[1]['id']}/mute",
@@ -387,6 +398,20 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
         "/v1/projects/prj_subschool/topic-candidates", headers=auth_headers
     ).json()["items"]
     assert not any(item["id"] == candidates[1]["id"] for item in visible_candidates)
+    all_candidates = client.get(
+        "/v1/projects/prj_subschool/topic-candidates?include_hidden=true", headers=auth_headers
+    ).json()["items"]
+    assert next(item for item in all_candidates if item["id"] == candidates[1]["id"])["status"] == "hidden"
+    with SessionLocal() as session:
+        feedback = _research_feedback_context(
+            ResourceRepository(session),
+            organization_id="org_demo",
+            project_id="prj_subschool",
+        )
+    assert feedback["selected_count"] >= 1
+    assert feedback["hidden_count"] >= 1
+    assert any(candidates[0]["title"] in pattern for pattern in feedback["positive_patterns"])
+    assert any(candidates[1]["title"] in pattern for pattern in feedback["negative_patterns"])
 
 
 def test_research_profile_cadence_can_be_edited_and_paused(client, auth_headers) -> None:

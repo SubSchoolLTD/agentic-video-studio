@@ -23,7 +23,7 @@ const sceneRange = ref('4-6')
 const allowSceneFlex = ref(true)
 const videoTypes = [
   { value: 'ugc_creator', label: 'Creator-led UGC', description: 'A recurring or AI-cast creator addresses the viewer in an informal social-first style.' },
-  { value: 'product_demo', label: 'Product demo', description: 'Shows a product, workflow or result through concrete actions and close-up detail.' },
+  { value: 'storytelling', label: 'Storytelling / sketch', description: 'A compact story with recurring roles, a setup, conflict, dialogue, action and payoff.' },
   { value: 'cinematic', label: 'Cinematic b-roll', description: 'Story-driven atmospheric shots with camera movement and no required presenter.' },
   { value: 'motion_graphics', label: 'Motion graphics', description: 'Graphic-led visual explanation for concepts that do not need a physical presenter.' },
 ]
@@ -119,13 +119,15 @@ async function openGeneration(idea: any) {
     native_voice_preset: idea.native_voice_preset || 'warm_conversational',
     character_id: idea.character_id || '',
     aspect_ratios: ['9:16'],
-    target_duration_seconds: 30,
+    target_duration_seconds: Number(idea.target_duration_seconds || 30),
     approval_mode: 'final_only',
     variants: 1,
     burn_in_captions: false,
     max_cost_usd: 30,
   })
-  sceneRange.value = '4-6'
+  const recommendedMin = Number(idea.scene_count_min || 4)
+  const recommendedMax = Number(idea.scene_count_max || 6)
+  sceneRange.value = recommendedMin === recommendedMax ? `${recommendedMin}` : `${recommendedMin}-${recommendedMax}`
   allowSceneFlex.value = true
   generationError.value = ''
   await refreshBilling()

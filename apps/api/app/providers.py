@@ -2387,6 +2387,15 @@ class SpeechQAProvider:
             parsed.speech_end_seconds is None
             or parsed.speech_end_seconds <= float(duration_target) - 0.1
         )
+        completion_inferred_from_transcript = bool(
+            parsed.speech_present
+            and not parsed.last_phrase_complete
+            and coverage >= 0.98
+            and finishes_in_time
+        )
+        last_phrase_complete = bool(
+            parsed.last_phrase_complete or completion_inferred_from_transcript
+        )
         starts_immediately = bool(
             not require_immediate_hook
             or (parsed.speech_start_seconds is not None and parsed.speech_start_seconds <= 0.65)
@@ -2400,17 +2409,24 @@ class SpeechQAProvider:
         )
         passed = bool(
             parsed.speech_present
-            and parsed.last_phrase_complete
+            and last_phrase_complete
             and finishes_in_time
             and coverage >= 0.82
             and starts_immediately
         )
-        issues = list(parsed.issues)
+        issues = [
+            issue
+            for issue in parsed.issues
+            if not (
+                completion_inferred_from_transcript
+                and any(marker in issue.lower() for marker in ("incomplete", "cut off", "mid-thought"))
+            )
+        ]
         if coverage < 0.82:
             issues.append(f"Expected-dialogue coverage is {round(coverage * 100)}%")
         if not finishes_in_time:
             issues.append("Speech reaches or exceeds the planned edit point")
-        if not parsed.last_phrase_complete:
+        if not last_phrase_complete:
             issues.append("The final phrase is incomplete or cut off")
         if not starts_immediately:
             issues.append("Opening speech starts too late for an immediate hook")
@@ -2419,7 +2435,9 @@ class SpeechQAProvider:
             "transcript": parsed.transcript,
             "coverage": round(coverage, 4),
             "speech_present": parsed.speech_present,
-            "last_phrase_complete": parsed.last_phrase_complete,
+            "last_phrase_complete": last_phrase_complete,
+            "model_last_phrase_complete": parsed.last_phrase_complete,
+            "completion_inferred_from_transcript": completion_inferred_from_transcript,
             "speech_start_seconds": parsed.speech_start_seconds,
             "speech_end_seconds": parsed.speech_end_seconds,
             "voice_at_extension_edge": voice_at_extension_edge,

@@ -133,6 +133,14 @@ class EditorialScript(BaseModel):
     caption_candidates: list[str]
     hashtags: list[str]
 
+    @field_validator("voiceover", mode="before")
+    @classmethod
+    def normalize_voiceover_beats(cls, value: Any) -> Any:
+        """Gemini sometimes returns the voiceover as ordered beats instead of one string."""
+        if isinstance(value, list):
+            return " ".join(str(item).strip() for item in value if str(item).strip())
+        return value
+
 
 class EditorialPolicy(BaseModel):
     decision: Literal["pass", "revise", "block"]
@@ -145,6 +153,22 @@ class EditorialStoryboard(BaseModel):
     visual_mode: VisualMode
     creator_profile: str
     visual_bible: list[str] = Field(min_length=3, max_length=8)
+
+    @field_validator("creator_profile", mode="before")
+    @classmethod
+    def normalize_structured_creator_profile(cls, value: Any) -> Any:
+        """Flatten a structured casting brief into the prompt-safe text used downstream."""
+        if isinstance(value, dict):
+            parts = []
+            for key, item in value.items():
+                label = str(key).replace("_", " ").strip()
+                rendered = json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item)
+                if label and rendered.strip():
+                    parts.append(f"{label}: {rendered.strip()}")
+            return "; ".join(parts)
+        if isinstance(value, list):
+            return "; ".join(str(item).strip() for item in value if str(item).strip())
+        return value
 
 
 class EditorialPackage(BaseModel):
@@ -919,15 +943,19 @@ class EditorialProvider:
                     "mandatory_points": "JSON array of strings, even when there is only one point",
                 },
                 "concepts": "2-4 objects with title, hook, angle and integer score",
-                "script": [
-                    "title", "hook", "voiceover", "duration_target", "cta",
-                    "caption_candidates", "hashtags",
-                ],
+                "script": {
+                    "fields": [
+                        "title", "hook", "voiceover", "duration_target", "cta",
+                        "caption_candidates", "hashtags",
+                    ],
+                    "voiceover": "one JSON string, not an array of scene beats",
+                },
                 "policy": ["decision", "high_risk", "unsupported_claims"],
                 "storyboard": {
                     "fields": ["scenes", "visual_mode", "creator_profile", "visual_bible"],
                     "scene_fields": list(EditorialScene.model_fields),
                     "on_screen_text": "JSON string; use an empty string when no overlay copy is wanted, never null",
+                    "creator_profile": "one concise JSON string, not an object or array",
                 },
             },
         }
@@ -939,6 +967,7 @@ class EditorialProvider:
                 request_prompt["repair_instruction"] = (
                     "The previous JSON did not match the output contract. Return a complete corrected object. "
                     "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
+                    "Keep voiceover and creator_profile as strings, never arrays or objects. "
                     f"Validation summary: {validation_error[:1200]}"
                 )
             response = client.models.generate_content(

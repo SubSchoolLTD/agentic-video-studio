@@ -59,6 +59,7 @@ RESUME_GRACE_SECONDS = 20
 MAX_AUTOMATIC_STAGE_RETRIES = 2
 LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
 EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
+EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
 
 
 def stable_veo_seed(job_id: str, voice_preset: str) -> int:
@@ -95,10 +96,8 @@ def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
     error_message = str((job_data.get("last_error") or {}).get("message") or "").lower()
     if LEGACY_EDITORIAL_SCHEMA_ERROR in error_message and not job_data.get("editorial_schema_repair_retry_at"):
         return "editorial_schema_repair_retry_at"
-    if EDITORIAL_PAYLOAD_SHAPE_ERROR in error_message and not job_data.get(
-        "editorial_payload_normalization_retry_at"
-    ):
-        return "editorial_payload_normalization_retry_at"
+    if EDITORIAL_PAYLOAD_SHAPE_ERROR in error_message and not job_data.get(EDITORIAL_PAYLOAD_REPAIR_FIELD):
+        return EDITORIAL_PAYLOAD_REPAIR_FIELD
     return None
 
 
@@ -167,30 +166,31 @@ class WorkflowManager:
             loop.call_later(RESUME_GRACE_SECONDS, self.schedule, job.id)
         repaired_job_ids: list[str] = []
         with SessionLocal() as session:
-            repo = ResourceRepository(session)
             failed_jobs = list(
                 session.scalars(
                     select(Resource).where(
                         Resource.kind == "generation_job",
                         Resource.status == "failed",
-                    )
+                    ).with_for_update(skip_locked=True)
                 )
             )
             for failed_job in failed_jobs:
                 repair_field = editorial_deployment_repair_field(failed_job.data)
                 if not repair_field:
                     continue
-                repo.update(
-                    failed_job,
-                    status="queued",
-                    data={
+                failed_job.status = "queued"
+                failed_job.data = {
+                    **failed_job.data,
+                    **{
                         "last_error": None,
                         repair_field: datetime.now(UTC).isoformat(),
                         "retry_requested_at": datetime.now(UTC).isoformat(),
                         "retry_source": "deployment_repair",
                     },
-                )
+                }
+                session.add(failed_job)
                 repaired_job_ids.append(failed_job.id)
+            session.commit()
         for repaired_job_id in repaired_job_ids:
             logger.info("editorial_deployment_repair_job_requeued job_id=%s", repaired_job_id)
             loop.call_later(RESUME_GRACE_SECONDS, self.schedule, repaired_job_id)

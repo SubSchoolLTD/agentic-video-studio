@@ -48,7 +48,7 @@ def editorial_payload() -> dict:
         "script": {
             "title": "Reusable expertise",
             "hook": "Start here",
-            "voiceover": "A short spoken line.",
+            "voiceover": ["A short spoken line.", "A second concise beat."],
             "duration_target": 8,
             "cta": "Create your first course.",
             "caption_candidates": [],
@@ -58,7 +58,11 @@ def editorial_payload() -> dict:
         "storyboard": {
             "scenes": scenes,
             "visual_mode": "ugc_creator",
-            "creator_profile": "One recurring course creator",
+            "creator_profile": {
+                "name": "Alex",
+                "age_range": "30-40",
+                "delivery": "warm and conversational",
+            },
             "visual_bible": ["same creator", "same room", "warm daylight"],
         },
     }
@@ -70,6 +74,10 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
     assert package["production_brief"]["mandatory_points"] == [
         "Explain the value of reusable learning experiences."
     ]
+    assert package["script"]["voiceover"] == "A short spoken line. A second concise beat."
+    assert package["storyboard"]["creator_profile"] == (
+        "name: Alex; age range: 30-40; delivery: warm and conversational"
+    )
     assert [scene["on_screen_text"] for scene in package["storyboard"]["scenes"]] == ["", ""]
 
 
@@ -83,6 +91,8 @@ def test_invalid_editorial_payload_failure_is_recovered_once_after_deployment() 
 
     repair_field = editorial_deployment_repair_field(job_data)
 
-    assert repair_field == "editorial_payload_normalization_retry_at"
+    assert repair_field == "editorial_payload_normalization_v2_retry_at"
+    job_data["editorial_payload_normalization_retry_at"] = "2026-08-23T00:00:00+00:00"
+    assert editorial_deployment_repair_field(job_data) == repair_field
     job_data[repair_field] = "2026-08-23T00:00:00+00:00"
     assert editorial_deployment_repair_field(job_data) is None

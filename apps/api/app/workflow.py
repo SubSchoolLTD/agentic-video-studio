@@ -62,6 +62,7 @@ EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
 LEGACY_VEO_EMPTY_RESPONSE_ERROR = "'nonetype' object is not subscriptable"
 VEO_EMPTY_RESPONSE_REPAIR_FIELD = "veo_empty_response_v1_retry_at"
+VEO_HIGH_LOAD_REPAIR_FIELD = "veo_high_load_v1_retry_at"
 
 
 def stable_veo_seed(job_id: str, voice_preset: str) -> int:
@@ -89,6 +90,8 @@ def retryable_generation_error(exc: Exception) -> bool:
             "status: \"unavailable\"",
             "veo completed without generated video",
             "veo returned no downloadable video bytes",
+            "high load",
+            "please try again later",
         )
     )
 
@@ -116,6 +119,12 @@ def generation_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         and not job_data.get(VEO_EMPTY_RESPONSE_REPAIR_FIELD)
     ):
         return VEO_EMPTY_RESPONSE_REPAIR_FIELD
+    if (
+        job_data.get("current_stage") == "scene_generation"
+        and ("high load" in error_message or "please try again later" in error_message)
+        and not job_data.get(VEO_HIGH_LOAD_REPAIR_FIELD)
+    ):
+        return VEO_HIGH_LOAD_REPAIR_FIELD
     return None
 
 

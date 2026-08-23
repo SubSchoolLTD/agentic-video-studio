@@ -15,13 +15,13 @@ from apps.api.app.database import SessionLocal
 from apps.api.app.models import CreditLedger, Wallet
 
 
-def test_continuous_ugc_quote_uses_one_opening_and_native_extensions() -> None:
+def test_continuous_scene_quote_uses_one_opening_and_extensions() -> None:
     assert estimate_veo_billable_seconds(
         target_duration_seconds=30,
         scene_count_min=4,
         scene_count_max=6,
         scene_count_flex=2,
-        continuous_ugc=True,
+        continuous_scenes=True,
     ) == 32
 
 

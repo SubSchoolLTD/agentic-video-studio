@@ -364,13 +364,19 @@ def apply_narration_to_scene(
     if native_audio:
         voice_lock = voice_profile or native_voice_profile(None)[1]
         mode = str(scene.get("visual_mode") or "ugc_creator")
+        continued = scene.get("generation_strategy") == "continuous_veo_extension"
         if mode == "storytelling":
             speaker = str(scene.get("speaker") or "the named speaking role").strip()
             audio_direction = (
                 f'{speaker} says exactly in the narration language: "{narration}". '
-                "This is a fully authored scene-local performance: only this named role speaks, with exact blocking "
+                "This is a fully authored performance: only this named role speaks, with exact blocking "
                 "and actions from the director brief. Begin the line immediately and finish it cleanly before the cut. "
-                f"Preserve {speaker}'s distinct role identity. Role-specific vocal direction: "
+                + (
+                    "Continue the inherited cast, wardrobe, room geography and physical action without a transition. "
+                    if continued
+                    else "Treat this as a complete self-contained dramatic fragment. "
+                )
+                + f"Preserve {speaker}'s distinct role identity. Role-specific vocal direction: "
                 f"{_scene_voice_direction(scene, voice_lock)}. Different named roles "
                 "must sound intentionally different. Do not swap voices between roles. Do not add a narrator; never "
                 "invent extra dialogue or overlapping speech."
@@ -379,8 +385,13 @@ def apply_narration_to_scene(
             speaker = str(scene.get("speaker") or "scene-local narrator").strip()
             audio_direction = (
                 f'{speaker} delivers exactly this scene-local line in the narration language: "{narration}". '
-                "Treat this clip as a self-contained vignette with its own person, place, ambience and voice; do not "
-                "imply that the narrator must match another vignette. Start within the first quarter-second and finish "
+                + (
+                    "Continue the inherited cast or visual system, environment, lighting and physical action without "
+                    "a transition; only change speaker when the authored scene explicitly names a different role. "
+                    if continued
+                    else "Treat this clip as a self-contained vignette with its own person, place, ambience and voice. "
+                )
+                + "Start within the first quarter-second and finish "
                 f"before the cut. Scene-local vocal direction: {_scene_voice_direction(scene, voice_lock)}. If the "
                 "speaker is off camera, show no unrelated lip movement."
             )
@@ -483,24 +494,24 @@ class TopicCandidateDraft(BaseModel):
     title: str
     angle: str
     audience: str
-    why_now: str
-    objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"]
-    format: str
-    source_ids: list[str]
-    candidate_type: CandidateType
-    target_audience_insight: str
-    content_goal: str
-    core_message: str
-    problem_or_tension: str
-    proposed_solution: str
-    informational_value: str
-    entertainment_hook: str
-    virality_mechanism: str
-    creative_direction: str
+    why_now: str = ""
+    objective: Literal["awareness", "traffic", "lead", "install", "purchase", "education"] = "awareness"
+    format: str = "problem_solution"
+    source_ids: list[str] = Field(default_factory=list)
+    candidate_type: CandidateType = "problem_solution"
+    target_audience_insight: str = ""
+    content_goal: str = ""
+    core_message: str = ""
+    problem_or_tension: str = ""
+    proposed_solution: str = ""
+    informational_value: str = ""
+    entertainment_hook: str = ""
+    virality_mechanism: str = ""
+    creative_direction: str = ""
     recommended_visual_mode: Literal["ugc_creator", "storytelling", "cinematic", "motion_graphics"] = "ugc_creator"
     suitable_visual_modes: list[
         Literal["ugc_creator", "storytelling", "cinematic", "motion_graphics"]
-    ] = Field(min_length=1, max_length=4)
+    ] = Field(default_factory=list, max_length=4)
     recommended_duration_seconds: int = Field(default=30, ge=15, le=60)
     recommended_scene_count_min: int = Field(default=4, ge=2, le=20)
     recommended_scene_count_max: int = Field(default=6, ge=2, le=20)
@@ -1029,45 +1040,95 @@ class TopicCandidateProvider:
                 "Recommend a realistic 15-60 second duration and a 2-20 scene range that fits the message.",
                 "Explain the format choice briefly in format_rationale.",
             ],
+            "response_shape": {
+                "candidates": [
+                    {
+                        "title": "string",
+                        "angle": "string",
+                        "audience": "string",
+                        "why_now": "string",
+                        "objective": "awareness | traffic | lead | install | purchase | education",
+                        "format": "string",
+                        "source_ids": ["source ID from evidence"],
+                        "candidate_type": "problem_solution | educational_value | entertaining_viral",
+                        "target_audience_insight": "string",
+                        "content_goal": "string",
+                        "core_message": "string",
+                        "problem_or_tension": "string",
+                        "proposed_solution": "string",
+                        "informational_value": "string",
+                        "entertainment_hook": "string",
+                        "virality_mechanism": "string",
+                        "creative_direction": "string",
+                        "recommended_visual_mode": "ugc_creator | storytelling | cinematic | motion_graphics",
+                        "suitable_visual_modes": ["one or more available video formats"],
+                        "recommended_duration_seconds": 30,
+                        "recommended_scene_count_min": 4,
+                        "recommended_scene_count_max": 6,
+                        "format_rationale": "string",
+                    }
+                ]
+            },
         }
         parsed: TopicCandidateSet | None = None
+        last_valid: TopicCandidateSet | None = None
         mix_errors: list[str] = []
-        for attempt in range(2):
+        validation_error = ""
+        for attempt in range(3):
             request_prompt = dict(prompt)
             if attempt:
                 request_prompt["repair_instruction"] = (
-                    "Regenerate the complete candidate set and correct the missing editorial mix. "
-                    + "; ".join(mix_errors)
+                    "Regenerate the complete JSON object. Correct every validation or editorial-mix error; "
+                    "do not wrap the JSON in Markdown. "
+                    + "; ".join([*mix_errors, validation_error])
                 )
             response = client.models.generate_content(
                 model=self.settings.gemini_model,
                 contents=json.dumps(request_prompt, ensure_ascii=False),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=TopicCandidateSet,
                     system_instruction=(
                         "You are an evidence-bounded editorial researcher and content strategist. Output JSON only."
                     ),
                 ),
             )
-            parsed = (
-                response.parsed
-                if isinstance(response.parsed, TopicCandidateSet)
-                else TopicCandidateSet.model_validate_json(response.text or "{}")
-            )
+            try:
+                parsed = TopicCandidateSet.model_validate_json(response.text or "{}")
+            except (ValidationError, ValueError) as exc:
+                parsed = None
+                validation_error = f"invalid candidate JSON: {str(exc)[:900]}"
+                continue
+            last_valid = parsed
             mix_errors = _candidate_mix_errors(parsed.candidates, count)
             if not mix_errors:
                 break
+        parsed = parsed or last_valid
         if parsed is None:
-            raise RuntimeError("Candidate provider returned no usable candidate set")
+            raise RuntimeError(
+                "Candidate provider returned no usable JSON after three attempts"
+                + (f": {validation_error}" if validation_error else "")
+            )
         valid_ids = {str(source["id"]) for source in evidence.sources}
-        candidates = [
-            {
-                **candidate.model_dump(),
-                "source_ids": [source_id for source_id in candidate.source_ids if source_id in valid_ids],
-            }
-            for candidate in parsed.candidates[:count]
-        ]
+        candidates = []
+        for candidate in parsed.candidates[:count]:
+            item = candidate.model_dump()
+            item["source_ids"] = [source_id for source_id in candidate.source_ids if source_id in valid_ids]
+            item["target_audience_insight"] = item["target_audience_insight"] or item["audience"]
+            item["content_goal"] = item["content_goal"] or item["objective"]
+            item["core_message"] = item["core_message"] or item["angle"]
+            item["problem_or_tension"] = item["problem_or_tension"] or item["why_now"] or item["angle"]
+            item["proposed_solution"] = item["proposed_solution"] or item["creative_direction"] or item["angle"]
+            item["informational_value"] = item["informational_value"] or item["core_message"]
+            item["virality_mechanism"] = item["virality_mechanism"] or (
+                "Immediate recognition followed by a specific payoff worth sharing."
+            )
+            item["creative_direction"] = item["creative_direction"] or (
+                "Show the idea through an observable real-world action, tension and payoff."
+            )
+            item["suitable_visual_modes"] = item["suitable_visual_modes"] or [
+                item["recommended_visual_mode"]
+            ]
+            candidates.append(item)
         return _rebalance_candidate_mix(candidates, count)
 
 
@@ -1086,6 +1147,7 @@ class EditorialProvider:
         duration_seconds: int,
         visual_mode: VisualMode,
         native_audio: bool = False,
+        continue_scenes: bool = False,
         native_voice_profile: str = "",
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str = "",
@@ -1106,6 +1168,7 @@ class EditorialProvider:
                 duration_seconds,
                 visual_mode,
                 native_audio,
+                continue_scenes,
                 native_voice_profile,
                 aspect_ratios,
                 requested_hook,
@@ -1128,6 +1191,7 @@ class EditorialProvider:
             duration_seconds,
             visual_mode,
             native_audio,
+            continue_scenes,
             native_voice_profile,
             aspect_ratios,
             requested_hook,
@@ -1249,6 +1313,7 @@ class EditorialProvider:
         duration_seconds: int,
         visual_mode: VisualMode,
         native_audio: bool,
+        continue_scenes: bool,
         native_voice_profile: str,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
@@ -1264,13 +1329,13 @@ class EditorialProvider:
         client = google_genai_client(self.settings)
         allowed_min = max(2, scene_count_min - scene_count_flex)
         allowed_max = min(20, scene_count_max + scene_count_flex)
-        ugc_layout = (
+        continuation_layout = (
             continuous_ugc_scene_layout(
                 duration_seconds,
                 allowed_min=2,
                 allowed_max=5,
             )
-            if visual_mode == "ugc_creator" and native_audio
+            if continue_scenes
             else []
         )
         prompt = {
@@ -1294,9 +1359,9 @@ class EditorialProvider:
                 "scenes": {
                     "preferred_min": scene_count_min,
                     "preferred_max": scene_count_max,
-                    "allowed_min": len(ugc_layout) if ugc_layout else allowed_min,
-                    "allowed_max": len(ugc_layout) if ugc_layout else allowed_max,
-                    "exact_duration_layout_seconds": ugc_layout or None,
+                    "allowed_min": len(continuation_layout) if continuation_layout else allowed_min,
+                    "allowed_max": len(continuation_layout) if continuation_layout else allowed_max,
+                    "exact_duration_layout_seconds": continuation_layout or None,
                     "selection_rule": (
                         "Choose the smallest count that fully explains the idea, but add scenes when dialogue "
                         "would otherwise be rushed. Every scene needs subject, setting, action, camera and performance."
@@ -1349,14 +1414,22 @@ class EditorialProvider:
                     "hook in the first 0.25 seconds. When another fragment follows, keep the creator speaking naturally through "
                     "the final second so voice identity can carry into the extension. Use one coherent location with connected "
                     "zones and a plausible continuous action chain, while varying shot scale, body movement and activity."
-                    if visual_mode == "ugc_creator" and native_audio
+                    if visual_mode == "ugc_creator" and continue_scenes and native_audio
+                    else None
+                ),
+                "scene_continuation_contract": (
+                    "Treat every scene as the next portion of one continuously extended Veo video. The first frame, "
+                    "cast, wardrobe, location geography, lighting and physical action of each extension must follow "
+                    "directly from the previous fragment. Author a connected action chain and never introduce an "
+                    "unmotivated transition, title card, fade, border or new location at an extension boundary."
+                    if continue_scenes
                     else None
                 ),
                 "independent_fragment_contract": (
                     "Each generated scene is an intentionally self-contained vignette with its own complete dramatic beat, "
                     "location logic and scene-local voice. Different voices between scenes are expected and must feel like a "
                     "deliberate montage, not one speaker changing identity. The ordered fragments must still build one idea."
-                    if visual_mode in {"storytelling", "cinematic", "motion_graphics"}
+                    if not continue_scenes and visual_mode in {"storytelling", "cinematic", "motion_graphics"}
                     else None
                 ),
                 "cta": "must match brand policy",
@@ -1419,8 +1492,8 @@ class EditorialProvider:
         if package is None:
             raise RuntimeError(f"Editorial provider returned invalid JSON twice: {validation_error}")
         scenes = package["storyboard"]["scenes"]
-        expected_min = len(ugc_layout) if ugc_layout else allowed_min
-        expected_max = len(ugc_layout) if ugc_layout else allowed_max
+        expected_min = len(continuation_layout) if continuation_layout else allowed_min
+        expected_max = len(continuation_layout) if continuation_layout else allowed_max
         if not expected_min <= len(scenes) <= expected_max:
             raise RuntimeError(
                 f"Editorial provider returned {len(scenes)} scenes; allowed range is {expected_min}-{expected_max}"
@@ -1438,7 +1511,7 @@ class EditorialProvider:
             if str(item).strip()
         ]
         palette_hint = "project-approved plum, purple, warm off-white and charcoal tones; never show palette codes"
-        scene_durations = ugc_layout or [duration_seconds / len(scenes)] * len(scenes)
+        scene_durations = continuation_layout or [duration_seconds / len(scenes)] * len(scenes)
         cursor = 0.0
         if requested_hook:
             package["script"]["hook"] = requested_hook
@@ -1489,11 +1562,11 @@ class EditorialProvider:
                     "visual_prompt_base": visual_prompt_base,
                     "generation_strategy": (
                         "continuous_veo_extension"
-                        if visual_mode == "ugc_creator" and native_audio
+                        if continue_scenes
                         else "independent_scene_vignette"
                     ),
                     "continuous_extension_has_next": bool(
-                        visual_mode == "ugc_creator" and native_audio and index < len(scenes) - 1
+                        continue_scenes and index < len(scenes) - 1
                     ),
                     "locked": False,
                     "status": "planned",
@@ -1533,6 +1606,7 @@ class EditorialProvider:
         duration_seconds: int,
         visual_mode: VisualMode,
         native_audio: bool,
+        continue_scenes: bool,
         native_voice_profile: str,
         aspect_ratios: list[Literal["9:16", "16:9"]],
         requested_hook: str,
@@ -1567,17 +1641,17 @@ class EditorialProvider:
             ]
         allowed_min = max(2, scene_count_min - scene_count_flex)
         allowed_max = min(20, scene_count_max + scene_count_flex)
-        ugc_layout = (
+        continuation_layout = (
             continuous_ugc_scene_layout(
                 duration_seconds,
                 allowed_min=2,
                 allowed_max=5,
             )
-            if visual_mode == "ugc_creator" and native_audio
+            if continue_scenes
             else []
         )
         suggested_count = max(2, round(duration_seconds / 5))
-        scene_count = len(ugc_layout) or min(allowed_max, max(allowed_min, suggested_count))
+        scene_count = len(continuation_layout) or min(allowed_max, max(allowed_min, suggested_count))
         beats = [base_beats[index % len(base_beats)] for index in range(scene_count)]
         creator_profile = character_profile or (
             "Maya: adult woman in her early thirties, natural dark curls, moss-green cardigan, warm grounded voice; "
@@ -1593,7 +1667,7 @@ class EditorialProvider:
             "handheld smartphone texture with restrained movement",
             f"accents from {palette_hint}",
         ]
-        scene_durations = ugc_layout or [duration_seconds / len(beats)] * len(beats)
+        scene_durations = continuation_layout or [duration_seconds / len(beats)] * len(beats)
         scenes = []
         cursor = 0.0
         for index, (purpose, narration, visual) in enumerate(beats):
@@ -1638,18 +1712,18 @@ class EditorialProvider:
                     "sound_direction": "natural room tone and action sounds underneath the exact dialogue",
                     "transition_logic": (
                         "continue the same physical action into the next Veo extension"
-                        if visual_mode == "ugc_creator" and native_audio
+                        if continue_scenes
                         else "end on a complete action that motivates the next independent vignette"
                     ),
                     "fragment_intent": "advance one specific claim through an observable human action",
                     "voice_direction": native_voice_profile or _scene_voice_direction({"speaker": speaker}, ""),
                     "generation_strategy": (
                         "continuous_veo_extension"
-                        if visual_mode == "ugc_creator" and native_audio
+                        if continue_scenes
                         else "independent_scene_vignette"
                     ),
                     "continuous_extension_has_next": bool(
-                        visual_mode == "ugc_creator" and native_audio and index < len(beats) - 1
+                        continue_scenes and index < len(beats) - 1
                     ),
                     "locked": False,
                     "status": "planned",

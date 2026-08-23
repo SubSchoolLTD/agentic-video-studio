@@ -2708,16 +2708,21 @@ async def create_generation(
         or (idea.data.get("native_voice_preset") if idea else None)
         or "warm_conversational"
     )
-    if effective_visual_mode == "ugc_creator" and effective_audio_mode == "veo_native":
+    continue_scenes = (
+        bool(payload.continue_scenes)
+        if payload.continue_scenes is not None
+        else effective_visual_mode == "ugc_creator"
+    )
+    if continue_scenes:
         if payload.target_duration_seconds > 36:
             raise HTTPException(
                 422,
-                "Continuous Veo-native UGC is limited to 36 seconds so every extension input stays within Google's 30-second limit. Use Google TTS or a vignette format for a longer video.",
+                "Continuous Veo scenes are limited to 36 seconds so every extension input stays within Google's 30-second limit. Disable scene continuation for a longer video.",
             )
         if payload.scene_count_min > 5:
             raise HTTPException(
                 422,
-                "Continuous Veo-native UGC supports at most five authored fragments: one opening clip and four native extensions.",
+                "Continuous Veo scenes support at most five authored fragments: one opening clip and four extensions.",
             )
     character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
     if character_id:
@@ -2730,6 +2735,7 @@ async def create_generation(
             "title": payload.title or (idea.data.get("title") if idea else None),
             "visual_mode": effective_visual_mode,
             "audio_mode": effective_audio_mode,
+            "continue_scenes": continue_scenes,
             "native_voice_preset": effective_native_voice_preset,
             "character_id": character_id,
             "created_by_id": principal.actor_id,
@@ -2758,7 +2764,7 @@ async def create_generation(
         scene_count_min=payload.scene_count_min,
         scene_count_max=payload.scene_count_max,
         scene_count_flex=payload.scene_count_flex,
-        continuous_ugc=effective_visual_mode == "ugc_creator" and effective_audio_mode == "veo_native",
+        continuous_scenes=continue_scenes,
     )
     billable_units = billable_seconds * len(payload.aspect_ratios)
     price_quote = quote_feature(session, pricing_feature, billable_units)
@@ -2964,6 +2970,7 @@ async def retry_generation(
                     scene_count_min=int(job.data.get("scene_count_min", 4)),
                     scene_count_max=int(job.data.get("scene_count_max", 6)),
                     scene_count_flex=int(job.data.get("scene_count_flex", 2)),
+                    continuous_scenes=bool(job.data.get("continue_scenes")),
                 )
             )
             * len(job.data.get("aspect_ratios") or ["9:16"]),
@@ -3034,6 +3041,7 @@ async def retry_generation_stage(
                     scene_count_min=int(job.data.get("scene_count_min", 4)),
                     scene_count_max=int(job.data.get("scene_count_max", 6)),
                     scene_count_flex=int(job.data.get("scene_count_flex", 2)),
+                    continuous_scenes=bool(job.data.get("continue_scenes")),
                 )
             )
             * len(job.data.get("aspect_ratios") or ["9:16"]),
@@ -3259,7 +3267,7 @@ async def regenerate_scene(
         else None
     )
     native_audio = bool(parent_job and parent_job.data.get("audio_mode") == "veo_native")
-    continuous_ugc = bool(native_audio and parent_job and parent_job.data.get("visual_mode") == "ugc_creator")
+    continuous_scenes = bool(parent_job and parent_job.data.get("continue_scenes"))
     cascade_scenes = (
         [
             item
@@ -3272,7 +3280,7 @@ async def regenerate_scene(
             if str(item.data.get("storyboard_id") or "") == str(scene.data.get("storyboard_id") or "")
             and int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
         ]
-        if continuous_ugc
+        if continuous_scenes
         else [scene]
     )
     attempt_no = int(scene.data.get("attempt", 0)) + 1
@@ -3310,7 +3318,7 @@ async def regenerate_scene(
                     else 7
                     for item in cascade_scenes
                 )
-                if continuous_ugc
+                if continuous_scenes
                 else veo_request_duration(
                     float(scene.data.get("duration_target") or 0)
                     or max(1.0, float(scene.data.get("end_sec") or 0) - float(scene.data.get("start_sec") or 0))

@@ -5,7 +5,7 @@ import json
 from apps.api.app.database import SessionLocal
 from apps.api.app.providers import EditorialPackage
 from apps.api.app.repository import ResourceRepository
-from apps.api.app.workflow import editorial_deployment_repair_field
+from apps.api.app.workflow import editorial_deployment_repair_field, generation_deployment_repair_field
 
 
 def editorial_payload() -> dict:
@@ -113,3 +113,16 @@ def test_generation_job_can_only_be_claimed_once_across_workers(client) -> None:
     manager = client.app.state.workflow
     assert manager._claim_generation_job(job.id) is True
     assert manager._claim_generation_job(job.id) is False
+
+
+def test_legacy_empty_veo_response_is_recovered_from_scene_checkpoint_once() -> None:
+    job_data = {
+        "current_stage": "scene_generation",
+        "last_error": {"message": "'NoneType' object is not subscriptable"},
+    }
+
+    repair_field = generation_deployment_repair_field(job_data)
+
+    assert repair_field == "veo_empty_response_v1_retry_at"
+    job_data[repair_field] = "2026-08-23T02:07:12+00:00"
+    assert generation_deployment_repair_field(job_data) is None

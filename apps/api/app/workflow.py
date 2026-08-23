@@ -60,6 +60,8 @@ MAX_AUTOMATIC_STAGE_RETRIES = 2
 LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has too many states for serving"
 EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
+LEGACY_VEO_EMPTY_RESPONSE_ERROR = "'nonetype' object is not subscriptable"
+VEO_EMPTY_RESPONSE_REPAIR_FIELD = "veo_empty_response_v1_retry_at"
 
 
 def stable_veo_seed(job_id: str, voice_preset: str) -> int:
@@ -85,6 +87,8 @@ def retryable_generation_error(exc: Exception) -> bool:
             "internal server error",
             "status: 'unavailable'",
             "status: \"unavailable\"",
+            "veo completed without generated video",
+            "veo returned no downloadable video bytes",
         )
     )
 
@@ -98,6 +102,20 @@ def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         return "editorial_schema_repair_retry_at"
     if EDITORIAL_PAYLOAD_SHAPE_ERROR in error_message and not job_data.get(EDITORIAL_PAYLOAD_REPAIR_FIELD):
         return EDITORIAL_PAYLOAD_REPAIR_FIELD
+    return None
+
+
+def generation_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
+    editorial_repair = editorial_deployment_repair_field(job_data)
+    if editorial_repair:
+        return editorial_repair
+    error_message = str((job_data.get("last_error") or {}).get("message") or "").lower()
+    if (
+        job_data.get("current_stage") == "scene_generation"
+        and LEGACY_VEO_EMPTY_RESPONSE_ERROR in error_message
+        and not job_data.get(VEO_EMPTY_RESPONSE_REPAIR_FIELD)
+    ):
+        return VEO_EMPTY_RESPONSE_REPAIR_FIELD
     return None
 
 
@@ -200,7 +218,7 @@ class WorkflowManager:
                 )
             )
             for failed_job in failed_jobs:
-                repair_field = editorial_deployment_repair_field(failed_job.data)
+                repair_field = generation_deployment_repair_field(failed_job.data)
                 if not repair_field:
                     continue
                 failed_job.status = "queued"

@@ -173,7 +173,7 @@ class EditorialStoryboard(BaseModel):
 
 class EditorialPackage(BaseModel):
     production_brief: ProductionBrief
-    concepts: list[EditorialConcept] = Field(min_length=2, max_length=4)
+    concepts: list[EditorialConcept] = Field(min_length=1, max_length=4)
     script: EditorialScript
     policy: EditorialPolicy
     storyboard: EditorialStoryboard
@@ -942,7 +942,7 @@ class EditorialProvider:
                     ],
                     "mandatory_points": "JSON array of strings, even when there is only one point",
                 },
-                "concepts": "2-4 objects with title, hook, angle and integer score",
+                "concepts": "1-4 objects with title, hook, angle and integer score",
                 "script": {
                     "fields": [
                         "title", "hook", "voiceover", "duration_target", "cta",

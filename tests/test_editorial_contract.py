@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
+from apps.api.app.database import SessionLocal
 from apps.api.app.providers import EditorialPackage
+from apps.api.app.repository import ResourceRepository
 from apps.api.app.workflow import editorial_deployment_repair_field
 
 
@@ -43,7 +45,6 @@ def editorial_payload() -> dict:
         },
         "concepts": [
             {"title": "One", "hook": "Start here", "angle": "Value", "score": 90},
-            {"title": "Two", "hook": "Try this", "angle": "Proof", "score": 80},
         ],
         "script": {
             "title": "Reusable expertise",
@@ -96,3 +97,19 @@ def test_invalid_editorial_payload_failure_is_recovered_once_after_deployment() 
     assert editorial_deployment_repair_field(job_data) == repair_field
     job_data[repair_field] = "2026-08-23T00:00:00+00:00"
     assert editorial_deployment_repair_field(job_data) is None
+
+
+def test_generation_job_can_only_be_claimed_once_across_workers(client) -> None:
+    with SessionLocal() as session:
+        job = ResourceRepository(session).add(
+            resource_id="gener_atomic_claim_contract",
+            kind="generation_job",
+            organization_id="org_demo",
+            project_id="prj_subschool",
+            status="queued",
+            data={"current_stage": "intake", "stages": []},
+        )
+
+    manager = client.app.state.workflow
+    assert manager._claim_generation_job(job.id) is True
+    assert manager._claim_generation_job(job.id) is False

@@ -151,6 +151,31 @@ class WorkflowManager:
         self.tasks[task_key] = task
         task.add_done_callback(lambda _: self.tasks.pop(task_key, None))
 
+    @staticmethod
+    def _claim_generation_job(job_id: str) -> bool:
+        """Atomically allow only one Cloud Run instance to execute a queued job."""
+        with SessionLocal() as session:
+            job = session.scalar(
+                select(Resource)
+                .where(Resource.id == job_id, Resource.kind == "generation_job")
+                .with_for_update(skip_locked=True)
+            )
+            if not job:
+                return False
+            interrupted = job.status == "running" and bool(job.data.get("interrupted_at"))
+            if job.status != "queued" and not interrupted:
+                return False
+            job.status = "running"
+            job.data = {
+                **job.data,
+                "workflow_claimed_at": datetime.now(UTC).isoformat(),
+                "workflow_claim_token": ResourceRepository.new_id("claim"),
+                "interrupted_at": None,
+            }
+            session.add(job)
+            session.commit()
+            return True
+
     def resume_pending(self) -> None:
         with SessionLocal() as session:
             jobs = list(
@@ -840,6 +865,9 @@ class WorkflowManager:
         )
 
     async def run(self, job_id: str) -> None:
+        if not self._claim_generation_job(job_id):
+            logger.info("generation_job_claim_skipped job_id=%s", job_id)
+            return
         with SessionLocal() as session:
             repo = ResourceRepository(session)
             job = repo.get_any(job_id, kind="generation_job")

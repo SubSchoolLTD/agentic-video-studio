@@ -59,6 +59,7 @@ def test_mock_source_to_render_to_publication(client, auth_headers) -> None:
             "scene_count_min": 4,
             "scene_count_max": 4,
             "scene_count_flex": 0,
+            "continue_scenes": False,
             "max_cost_usd": 10,
         },
         headers={**auth_headers, "Idempotency-Key": "pipeline-e2e-1"},

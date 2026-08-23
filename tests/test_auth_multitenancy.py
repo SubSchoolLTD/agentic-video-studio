@@ -231,9 +231,9 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     assert generation.status_code == 202, generation.text
     summary = jwt_client.get("/v1/billing/summary", headers=headers(customer))
     assert summary.status_code == 200
-    assert summary.json()["balance_cents"] == 412
+    assert summary.json()["balance_cents"] == 652
     ledger = jwt_client.get("/v1/billing/ledger", headers=headers(customer)).json()["items"]
-    assert any(item["feature_key"] == "video.generate" and item["amount_cents"] == -1_008 for item in ledger)
+    assert any(item["feature_key"] == "video.generate" and item["amount_cents"] == -768 for item in ledger)
 
     insufficient = jwt_client.post(
         f"/v1/projects/{customer['default_project_id']}/generation-jobs",
@@ -245,9 +245,9 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
         "code": "insufficient_balance",
         "message": "Not enough balance for this action",
         "details": {
-            "required_cents": 1_008,
-            "available_cents": 412,
-            "shortfall_cents": 596,
+            "required_cents": 768,
+            "available_cents": 652,
+            "shortfall_cents": 116,
             "currency": "USD",
         },
         "request_id": insufficient.headers["X-Request-ID"],
@@ -284,6 +284,7 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     assert native_job["title"] == "Native storytelling sketch"
     assert native_job["visual_mode"] == "storytelling"
     assert native_job["audio_mode"] == "veo_native"
+    assert native_job["continue_scenes"] is False
     assert native_job["character_id"] is None
     assert native_job["estimated_cost"]["basis"] == "video.generate_native_audio"
 

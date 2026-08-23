@@ -108,7 +108,7 @@ function subtitleUrl(format: string) { const item = subtitleAssets.value.find((a
 <template>
   <div v-if="job">
     <div class="production-breadcrumb"><NuxtLink to="/productions"><ArrowLeft :size="14" /> Productions</NuxtLink><span>/</span><span>{{ job.id }}</span></div>
-    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · ${(job.visual_mode || 'ugc_creator').replaceAll('_', ' ')} · ${job.audio_mode === 'veo_native' ? `Veo native speech · ${(job.native_voice_preset || 'warm_conversational').replaceAll('_', ' ')}` : 'Google TTS voiceover'} · immutable brand profile v${job.brand_profile_version || 1}`">
+    <UiPageHeader eyebrow="Production workspace" :title="job.title || 'Video production'" :description="`${job.aspect_ratios?.join(' + ') || '9:16'} · ${job.target_duration_seconds || 30} seconds · ${(job.visual_mode || 'ugc_creator').replaceAll('_', ' ')} · ${job.audio_mode === 'veo_native' ? `Veo native speech · ${(job.native_voice_preset || 'warm_conversational').replaceAll('_', ' ')}` : 'Google TTS voiceover'} · ${job.continue_scenes ? 'continued Veo scenes' : 'independent scenes'} · immutable brand profile v${job.brand_profile_version || 1}`">
       <UiStatusBadge :status="job.status" />
       <a v-if="subtitleUrl('srt')" :href="subtitleUrl('srt')" download="captions.srt" class="button" data-testid="download-captions-srt"><Download :size="14" /> Download SRT</a>
       <a v-if="subtitleUrl('vtt')" :href="subtitleUrl('vtt')" download="captions.vtt" class="button" data-testid="download-captions-vtt"><Download :size="14" /> VTT</a>

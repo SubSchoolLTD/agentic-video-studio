@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from apps.api.app.providers import (
     EditorialPackage,
     EditorialProvider,
     ResearchPacket,
+    TopicCandidateProvider,
     _rebalance_candidate_mix,
     _strip_prompt_tokens,
     apply_narration_to_scene,
@@ -285,6 +287,7 @@ async def test_mock_editorial_package_carries_candidate_strategy_into_detailed_s
         duration_seconds=30,
         visual_mode="ugc_creator",
         native_audio=True,
+        continue_scenes=True,
         aspect_ratios=["9:16"],
         creative_context={
             "candidate_type": "problem_solution",
@@ -304,3 +307,62 @@ async def test_mock_editorial_package_carries_candidate_strategy_into_detailed_s
     assert [scene["duration_target"] for scene in package["storyboard"]["scenes"]] == [4, 7, 7, 7, 5]
     assert all(scene["story_beat"] and scene["blocking"] and scene["sound_direction"] for scene in package["storyboard"]["scenes"])
     assert all(scene["generation_strategy"] == "continuous_veo_extension" for scene in package["storyboard"]["scenes"])
+
+
+def test_live_candidate_generation_uses_json_mode_without_vertex_response_schema(monkeypatch) -> None:
+    calls: list[object] = []
+    candidates = [
+        {
+            "title": f"Candidate {index}",
+            "angle": f"Filmable angle {index}",
+            "audience": "Independent teachers",
+            "source_ids": ["source_1"],
+            "candidate_type": ("problem_solution", "educational_value", "entertaining_viral")[index % 3],
+            "recommended_visual_mode": ("ugc_creator", "storytelling", "cinematic", "motion_graphics")[index],
+            "suitable_visual_modes": [("ugc_creator", "storytelling", "cinematic", "motion_graphics")[index]],
+        }
+        for index in range(4)
+    ]
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            calls.append(kwargs["config"])
+            if len(calls) == 1:
+                return SimpleNamespace(text="not-json")
+            return SimpleNamespace(text=json.dumps({"candidates": candidates}))
+
+    monkeypatch.setattr(
+        "apps.api.app.providers.google_genai_client",
+        lambda _settings: SimpleNamespace(models=FakeModels()),
+    )
+    provider = TopicCandidateProvider(
+        Settings(
+            provider_mode="live",
+            google_cloud_project="test-project",
+        )
+    )
+    packet = ResearchPacket(
+        request_id="research_schema_test",
+        objective="Find useful course creator topics",
+        sources=[{"id": "source_1", "title": "Primary evidence"}],
+        claims=[],
+        raw={},
+    )
+
+    result = provider._generate_with_gemini(
+        "Find useful course creator topics",
+        {"audiences": {"primary": ["Independent teachers"]}},
+        packet,
+        4,
+        {},
+    )
+
+    assert len(calls) == 2
+    assert all(getattr(config, "response_schema", None) is None for config in calls)
+    assert {item["recommended_visual_mode"] for item in result} == {
+        "ugc_creator",
+        "storytelling",
+        "cinematic",
+        "motion_graphics",
+    }
+    assert all(item["core_message"] and item["creative_direction"] for item in result)

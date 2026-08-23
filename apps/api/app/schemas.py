@@ -172,6 +172,7 @@ class GenerationCreate(BaseModel):
         "ugc_creator", "ugc_native_audio", "storytelling", "cinematic", "motion_graphics"
     ] | None = None
     audio_mode: Literal["google_tts", "veo_native"] | None = None
+    continue_scenes: bool | None = None
     native_voice_preset: Literal[
         "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
     ] | None = None

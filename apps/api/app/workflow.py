@@ -441,14 +441,14 @@ class WorkflowManager:
             return None
         return str(reference_attempt.data.get("storage_uri") or "") or None
 
-    def _ugc_extension_input_uri(
+    def _scene_extension_input_uri(
         self,
         repo: ResourceRepository,
         *,
         scene: Resource,
         aspect_ratio: str,
     ) -> str | None:
-        """Return the accepted cumulative Veo video used to extend a UGC performance."""
+        """Return the accepted cumulative Veo video used to extend a scene chain."""
         if int(scene.data.get("position") or 0) <= 1:
             return None
         storyboard_id = str(scene.data.get("storyboard_id") or "")
@@ -498,7 +498,14 @@ class WorkflowManager:
         attempt_number = initial_attempt_number
         voice_preset, locked_voice_profile = native_voice_profile(job.data.get("native_voice_preset"))
         veo_seed = int(job.data.get("veo_seed") or stable_veo_seed(job.id, voice_preset))
-        continuous_ugc = bool(native_audio and job.data.get("visual_mode") == "ugc_creator")
+        continue_scenes = bool(
+            job.data.get("continue_scenes")
+            if job.data.get("continue_scenes") is not None
+            else native_audio and job.data.get("visual_mode") == "ugc_creator"
+        )
+        voice_locked_continuation = bool(
+            continue_scenes and native_audio and job.data.get("visual_mode") == "ugc_creator"
+        )
         for automatic_retry in range(max_automatic_retries + 1):
             prompt = str(scene.data.get("visual_prompt") or "").strip()
             if not prompt:
@@ -521,15 +528,15 @@ class WorkflowManager:
                     / f"{scene.id}{suffix}_{ratio_slug}.mp4"
                 )
                 extension_video_uri = (
-                    self._ugc_extension_input_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
-                    if continuous_ugc
+                    self._scene_extension_input_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
+                    if continue_scenes
                     else None
                 )
-                if continuous_ugc and int(scene.data.get("position") or 0) > 1 and not extension_video_uri:
-                    raise RuntimeError(f"Previous cumulative UGC video is missing for {scene.id} ({aspect_ratio})")
+                if continue_scenes and int(scene.data.get("position") or 0) > 1 and not extension_video_uri:
+                    raise RuntimeError(f"Previous cumulative Veo video is missing for {scene.id} ({aspect_ratio})")
                 if extension_video_uri:
                     input_uri, input_mime_type, input_kind = extension_video_uri, "video/mp4", "previous_veo_video_extension"
-                elif continuous_ugc and int(scene.data.get("position") or 0) == 1:
+                elif continue_scenes and int(scene.data.get("position") or 0) == 1:
                     input_uri, input_mime_type, input_kind = (
                         default_reference_uri,
                         default_reference_mime_type or "image/jpeg",
@@ -547,7 +554,7 @@ class WorkflowManager:
                     )
                 continuation_output_path = (
                     output_path.with_name(f"{output_path.stem}_continuation.mp4")
-                    if continuous_ugc
+                    if continue_scenes
                     else None
                 )
                 scene_started = time.perf_counter()
@@ -582,7 +589,7 @@ class WorkflowManager:
                 )
                 persisted_continuation = (
                     await asyncio.to_thread(self.storage.persist, continuation_generated, content_type="video/mp4")
-                    if continuous_ugc
+                    if continue_scenes
                     else None
                 )
                 last_frame_path = output_path.with_name(f"{output_path.stem}_last.jpg")
@@ -599,7 +606,10 @@ class WorkflowManager:
                             expected_text=str(scene.data.get("narration") or ""),
                             duration_target=float(scene.data.get("duration_target") or 8),
                             require_immediate_hook=int(scene.data.get("position") or 0) == 1,
-                            require_voice_at_end=bool(scene.data.get("continuous_extension_has_next")),
+                            require_voice_at_end=bool(
+                                scene.data.get("continuous_extension_has_next")
+                                and job.data.get("visual_mode") == "ugc_creator"
+                            ),
                         )
                     except TypeError as exc:
                         if "unexpected keyword" not in str(exc):
@@ -610,7 +620,7 @@ class WorkflowManager:
                             expected_text=str(scene.data.get("narration") or ""),
                             duration_target=float(scene.data.get("duration_target") or 8),
                         )
-                    if continuous_ugc:
+                    if voice_locked_continuation:
                         voice_reference_uri = self._native_voice_reference_uri(
                             repo,
                             scene=scene,
@@ -717,7 +727,7 @@ class WorkflowManager:
                         "output_uri": str(generated),
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
-                        "continuation_output_uri": str(continuation_generated) if continuous_ugc else None,
+                        "continuation_output_uri": str(continuation_generated) if continue_scenes else None,
                         "continuation_storage_uri": (
                             persisted_continuation["storage_uri"] if persisted_continuation else None
                         ),
@@ -730,7 +740,7 @@ class WorkflowManager:
                         "continuity_input_uri": input_uri,
                         "continuity_input_kind": input_kind,
                         "generation_strategy": (
-                            "continuous_veo_extension" if continuous_ugc else "independent_scene_vignette"
+                            "continuous_veo_extension" if continue_scenes else "independent_scene_vignette"
                         ),
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
@@ -764,7 +774,7 @@ class WorkflowManager:
                         "output_uri": str(generated),
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
-                        "continuation_output_uri": str(continuation_generated) if continuous_ugc else None,
+                        "continuation_output_uri": str(continuation_generated) if continue_scenes else None,
                         "continuation_storage_uri": (
                             persisted_continuation["storage_uri"] if persisted_continuation else None
                         ),
@@ -775,7 +785,7 @@ class WorkflowManager:
                         "veo_seed": veo_seed,
                         "continuity_input_kind": input_kind,
                         "generation_strategy": (
-                            "continuous_veo_extension" if continuous_ugc else "independent_scene_vignette"
+                            "continuous_veo_extension" if continue_scenes else "independent_scene_vignette"
                         ),
                         "last_frame_storage_uri": persisted_last_frame["storage_uri"],
                         "billable_seconds": attempt.data["billable_seconds"],
@@ -881,7 +891,7 @@ class WorkflowManager:
                 repo.update(regeneration, status="running", data={"started_at": datetime.now(UTC).isoformat()})
                 native_audio = job.data.get("audio_mode") == "veo_native"
                 cascade_scenes = [scene]
-                if native_audio and job.data.get("visual_mode") == "ugc_creator":
+                if job.data.get("continue_scenes"):
                     cascade_scenes = sorted(
                         [
                             item
@@ -1250,6 +1260,11 @@ class WorkflowManager:
         if audio_mode not in {"google_tts", "veo_native"}:
             raise RuntimeError(f"Unsupported audio mode: {audio_mode}")
         native_audio = audio_mode == "veo_native"
+        continue_scenes = bool(
+            job.data.get("continue_scenes")
+            if job.data.get("continue_scenes") is not None
+            else native_audio and visual_mode == "ugc_creator"
+        )
         voice_preset, locked_voice_profile = native_voice_profile(
             job.data.get("native_voice_preset")
             or (input_resource.data.get("native_voice_preset") if input_resource else None)
@@ -1261,6 +1276,7 @@ class WorkflowManager:
             data={
                 "visual_mode": visual_mode,
                 "audio_mode": audio_mode,
+                "continue_scenes": continue_scenes,
                 "character_id": character.id if character else None,
                 "character_profile": character_profile or None,
                 "reference_image_uri": reference_image_uri or None,
@@ -1290,6 +1306,7 @@ class WorkflowManager:
                         "requested_hook": requested_hook,
                         "content_format": content_format,
                         "audio_mode": audio_mode,
+                        "continue_scenes": continue_scenes,
                         "native_voice_preset": voice_preset,
                         "native_voice_profile": locked_voice_profile if native_audio else None,
                         "veo_seed": veo_seed,
@@ -1415,6 +1432,7 @@ class WorkflowManager:
                 duration_seconds=int(job.data.get("target_duration_seconds", 30)),
                 visual_mode=visual_mode,
                 native_audio=native_audio,
+                continue_scenes=continue_scenes,
                 native_voice_profile=locked_voice_profile,
                 aspect_ratios=aspect_ratios,
                 requested_hook=requested_hook,
@@ -2118,7 +2136,7 @@ class WorkflowManager:
             matching_attempts = [
                 item for item in scene_attempts if item.get("aspect_ratio") in {None, aspect_ratio}
             ]
-            if job.data.get("audio_mode") == "veo_native" and job.data.get("visual_mode") == "ugc_creator":
+            if job.data.get("continue_scenes"):
                 cumulative_paths = [
                     Path(str(item["continuation_output_uri"]))
                     for item in matching_attempts

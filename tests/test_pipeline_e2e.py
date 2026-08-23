@@ -613,20 +613,66 @@ def test_native_ugc_regeneration_cascades_through_following_extensions(client, a
     assert [item["attempt"] for item in refreshed_scenes] == [2, 2]
 
 
-def test_continuous_native_ugc_rejects_durations_beyond_the_veo_extension_limit(client, auth_headers) -> None:
+def test_continuous_native_ugc_uses_a_rolling_window_beyond_36_seconds(client, auth_headers) -> None:
     response = client.post(
         "/v1/projects/prj_subschool/generation-jobs",
         json={
             "title": "Native UGC too long",
-            "target_duration_seconds": 37,
+            "target_duration_seconds": 40,
             "visual_mode": "ugc_creator",
             "audio_mode": "veo_native",
         },
         headers=auth_headers,
     )
 
-    assert response.status_code == 422
-    assert "limited to 36 seconds" in response.text
+    assert response.status_code == 202, response.text
+    job = wait_for_job(client, response.json()["generation_job_id"], auth_headers)
+    assert job["status"] == "ready", job.get("last_error")
+    video = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    scenes = sorted(video["scenes"], key=lambda item: item["position"])
+    assert len(scenes) == 6
+    assert all(scene["continuation_track"] == "creator" for scene in scenes)
+    assert scenes[-1]["attempts"][0]["continuity_input_kind"] == "continuation_track:creator"
+
+
+def test_storytelling_continuation_uses_the_previous_scene_for_each_role(client, auth_headers) -> None:
+    response = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "Two colleagues stop rebuilding one course",
+            "target_duration_seconds": 30,
+            "scene_count_min": 5,
+            "scene_count_max": 6,
+            "scene_count_flex": 0,
+            "visual_mode": "storytelling",
+            "audio_mode": "veo_native",
+            "continue_scenes": True,
+            "max_cost_usd": 20,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-story-role-tracks-1"},
+    )
+
+    assert response.status_code == 202, response.text
+    job = wait_for_job(client, response.json()["generation_job_id"], auth_headers)
+    assert job["status"] == "ready", job.get("last_error")
+    video = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    scenes = sorted(video["scenes"], key=lambda item: item["position"])
+    maya_one, leo_one, maya_two, leo_two = scenes[:4]
+    assert [item["continuation_track"] for item in scenes[:4]] == ["maya", "leo", "maya", "leo"]
+    assert maya_one["attempts"][0]["continuity_input_kind"] == "continuation_track_root:maya"
+    assert leo_one["attempts"][0]["continuity_input_kind"] == "continuation_track_root:leo"
+    assert maya_two["attempts"][0]["continuity_input_uri"] == maya_one["attempts"][0]["continuation_storage_uri"]
+    assert leo_two["attempts"][0]["continuity_input_uri"] == leo_one["attempts"][0]["continuation_storage_uri"]
+
+    queued = client.post(
+        f"/v1/scenes/{maya_one['id']}/regenerate",
+        json={"reason": "Change Maya's opening while preserving Leo's branch."},
+        headers=auth_headers,
+    )
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["cascade_scene_count"] == len([item for item in scenes if item["continuation_track"] == "maya"])
+    regeneration = wait_for_scene_regeneration(client, queued.json()["regeneration_id"], auth_headers)
+    assert regeneration["status"] == "completed", regeneration.get("error")
 
 
 def test_interrupted_job_resumes_from_scene_checkpoint_without_duplicate_provider_work(

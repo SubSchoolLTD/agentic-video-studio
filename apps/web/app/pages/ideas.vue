@@ -62,11 +62,11 @@ const columns = computed(() => [
   { key: 'planned', label: 'Planned / production', items: filteredIdeas.value.filter((item: any) => item.status === 'planned') },
 ])
 const parsedSceneRange = computed(() => {
-  const match = sceneRange.value.trim().match(/^(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?$/)
+  const match = sceneRange.value.trim().match(/^(\d{1,4})(?:\s*[-–]\s*(\d{1,4}))?$/)
   if (!match) return null
   const min = Number(match[1])
   const max = Number(match[2] || match[1])
-  return min >= 2 && max <= 20 && min <= max ? { min, max } : null
+  return min >= 2 && max <= 2000 && min <= max ? { min, max } : null
 })
 const averageSceneDuration = computed(() => {
   if (!parsedSceneRange.value) return null
@@ -75,21 +75,53 @@ const averageSceneDuration = computed(() => {
 const generationFeature = computed(() => generation.audio_mode === 'veo_native' ? 'video.generate_native_audio' : 'video.generate')
 const generationUnitCents = computed(() => Number((billingSummary.value?.prices || []).find((item: any) => item.feature_key === generationFeature.value)?.charge_cents || 0))
 const veoDuration = (seconds: number) => seconds <= 4 ? 4 : seconds <= 6 ? 6 : 8
+const continuationLayout = (targetSeconds: number, preferredMin: number, preferredMax: number) => {
+  const target = Math.max(8, Math.round(targetSeconds))
+  const minimum = Math.max(2, preferredMin)
+  const maximum = Math.max(preferredMax, Math.ceil(Math.max(0, target - 4) / 7) + 1)
+  const candidates: { trim: number, finalDistance: number, layout: number[] }[] = []
+  for (let count = minimum; count <= maximum; count += 1) {
+    for (const opening of [4, 6, 8]) {
+      const finalVisible = target - opening - 7 * Math.max(0, count - 2)
+      if (finalVisible < 2.5 || finalVisible > 7) continue
+      const layout = [opening, ...Array(Math.max(0, count - 2)).fill(7), finalVisible]
+      candidates.push({ trim: Math.max(0, opening + 7 * (count - 1) - target), finalDistance: Math.abs(finalVisible - 5), layout })
+    }
+  }
+  if (candidates.length) return candidates.sort((a, b) => a.trim - b.trim || a.finalDistance - b.finalDistance || a.layout.length - b.layout.length)[0]!.layout
+  const count = Math.min(maximum, Math.max(2, Math.round((target - 6) / 7) + 1))
+  const opening = [4, 6, 8].sort((a, b) => Math.abs(a + 7 * (count - 1) - target) - Math.abs(b + 7 * (count - 1) - target))[0] ?? 6
+  const layout = [opening, ...Array(Math.max(0, count - 1)).fill(7)]
+  const overhead = layout.reduce((sum, value) => sum + value, 0) - target
+  if (overhead > 0) layout[layout.length - 1] = Math.max(2.5, layout[layout.length - 1] - overhead)
+  return layout
+}
+const plannedFragmentCount = computed(() => {
+  if (!parsedSceneRange.value) return 0
+  if (sceneContinuation.value) {
+    const flex = allowSceneFlex.value ? 2 : 0
+    return continuationLayout(
+      generation.target_duration_seconds,
+      Math.max(2, parsedSceneRange.value.min - flex),
+      Math.min(2000, parsedSceneRange.value.max + flex),
+    ).length
+  }
+  return Math.max(parsedSceneRange.value.min, Math.ceil(generation.target_duration_seconds / 8))
+})
 const generationBillableSeconds = computed(() => {
   if (!parsedSceneRange.value) return 0
   if (sceneContinuation.value) {
-    const candidates: number[] = []
-    for (let count = 2; count <= 5; count += 1) {
-      for (const opening of [4, 6, 8]) {
-        const finalVisible = generation.target_duration_seconds - opening - 7 * Math.max(0, count - 2)
-        if (finalVisible >= 2.5 && finalVisible <= 7) candidates.push(opening + 7 * (count - 1))
-      }
-    }
-    return candidates.length ? Math.min(...candidates) : 0
+    const flex = allowSceneFlex.value ? 2 : 0
+    return continuationLayout(
+      generation.target_duration_seconds,
+      Math.max(2, parsedSceneRange.value.min - flex),
+      Math.min(2000, parsedSceneRange.value.max + flex),
+    ).reduce((sum, seconds) => sum + veoDuration(seconds), 0)
   }
   const flex = allowSceneFlex.value ? 2 : 0
-  const min = Math.max(2, parsedSceneRange.value.min - flex)
-  const max = Math.min(20, parsedSceneRange.value.max + flex)
+  const requiredForDuration = Math.max(2, Math.ceil(generation.target_duration_seconds / 8))
+  const min = Math.max(2, parsedSceneRange.value.min - flex, requiredForDuration)
+  const max = Math.min(2000, Math.max(parsedSceneRange.value.max + flex, requiredForDuration))
   return Math.max(...Array.from({ length: max - min + 1 }, (_, index) => {
     const sceneCount = min + index
     return sceneCount * veoDuration(generation.target_duration_seconds / sceneCount)
@@ -144,6 +176,7 @@ async function openGeneration(idea: any) {
   allowSceneFlex.value = true
   generationError.value = ''
   await refreshBilling()
+  generation.max_cost_usd = Math.max(30, generationRequiredCents.value / 100)
   generationModalOpen.value = true
 }
 
@@ -154,9 +187,7 @@ function toggleRatio(ratio: string) {
 }
 
 async function startGeneration() {
-  if (!selectedIdea.value || !parsedSceneRange.value) return show('Check the scene range', 'Use one number such as 4 or a range such as 12-18 (2 to 20).', 'error')
-  if (sceneContinuation.value && generation.target_duration_seconds > 36) return show('Shorten the continuous video', 'A continued Veo scene chain is limited to 36 seconds. Disable scene continuation for a longer video.', 'error')
-  if (sceneContinuation.value && parsedSceneRange.value.min > 5) return show('Reduce the scene count', 'Scene continuation supports one opening clip plus up to four Veo extensions.', 'error')
+  if (!selectedIdea.value || !parsedSceneRange.value) return show('Check the scene range', 'Use one number such as 4 or a range such as 12-18 (2 to 2000).', 'error')
   if (!hasGenerationBalance.value) {
     generationError.value = `This production needs up to ${money(generationRequiredCents.value)}; the workspace has ${money(generationAvailableCents.value)}.`
     return show('Not enough balance', generationError.value, 'error')
@@ -284,7 +315,7 @@ function productionLabel(idea: any) {
     <div v-if="generationModalOpen && selectedIdea" class="modal-backdrop" data-testid="generation-config" @click.self="generationModalOpen = false">
       <form class="modal generation-modal" @submit.prevent="startGeneration">
         <div class="modal__header"><div><span class="eyebrow">Production setup</span><h2>{{ selectedIdea.title }}</h2><p>Choose how this idea should become a video before provider spend begins.</p></div><button type="button" class="icon-button icon-button--plain" @click="generationModalOpen = false"><X :size="18" /></button></div>
-        <div class="modal__body"><div class="form-grid"><div class="field field--full"><label>Video type</label><div class="video-type-grid" role="radiogroup" aria-label="Video type"><label v-for="type in videoTypes" :key="type.value" :class="{ active: generation.visual_mode === type.value }"><input v-model="generation.visual_mode" type="radio" :value="type.value" :aria-label="type.label"><span><strong>{{ type.label }}</strong><UiSettingHelp :text="type.description" /></span><small>{{ type.description }}</small></label></div></div><div class="field field--full"><label>Voice generation</label><div class="audio-mode-switch" role="radiogroup" aria-label="Voice generation"><label v-for="mode in audioModes" :key="mode.value" :class="{ active: generation.audio_mode === mode.value }"><input v-model="generation.audio_mode" type="radio" :value="mode.value" :aria-label="mode.label"><span>{{ mode.label }} <UiSettingHelp :text="mode.description" /></span></label></div></div><div v-if="generation.audio_mode === 'veo_native'" class="field field--full"><label for="generation-native-voice">Native voice profile <UiSettingHelp text="The selected vocal profile is repeated in every native-audio prompt. When scene continuation is enabled for UGC, later clips extend the first performance and are checked against its voice." /></label><select id="generation-native-voice" v-model="generation.native_voice_preset"><option v-for="voice in nativeVoicePresets" :key="voice.value" :value="voice.value">{{ voice.label }} · {{ voice.description }}</option></select></div><div v-if="generationUsesCharacter" class="field field--full"><label for="generation-character">Character</label><select id="generation-character" v-model="generation.character_id"><option value="">Let the director cast a creator</option><option v-for="character in characters" :key="character.id" :value="character.id">{{ character.name }}</option></select><small v-if="!characters.length">Create a reusable identity in <NuxtLink to="/characters">Characters</NuxtLink>.</small></div><label class="checkbox-row field--full"><input v-model="generation.continue_scenes" type="checkbox"> Continue each scene from the previous Veo video <UiSettingHelp text="Keeps one cumulative performance, location and action chain by extending the previous clip. It is enabled by default for UGC and optional for storytelling, cinematic and motion formats. Disable it for deliberately independent vignettes." /></label><div class="field"><label for="generation-duration">Target duration</label><div class="input-with-unit"><input id="generation-duration" v-model.number="generation.target_duration_seconds" type="number" min="8" :max="sceneContinuation ? 36 : 60" required><span>seconds</span></div></div><div class="field"><label for="scene-range">Preferred scene count</label><input id="scene-range" v-model="sceneRange" :class="{ invalid: !parsedSceneRange }" required placeholder="4 or 12-18"><small>{{ parsedSceneRange ? `Director target ${parsedSceneRange.min}–${parsedSceneRange.max}` : 'Enter 2–20, for example 4 or 12-18' }}</small></div><div class="field field--full"><label>Aspect ratios</label><div class="choice-row"><button v-for="ratio in ['9:16','16:9']" :key="ratio" type="button" :class="['choice-button',{active:generation.aspect_ratios.includes(ratio)}]" @click="toggleRatio(ratio)"><Check v-if="generation.aspect_ratios.includes(ratio)" :size="13" /> {{ ratio }} · {{ ratio === '9:16' ? 'vertical' : 'landscape' }}</button></div></div><div class="field"><label for="approval-mode">Approval</label><select id="approval-mode" v-model="generation.approval_mode"><option value="final_only">Review final video</option><option value="manual_all">Review every stage</option><option value="draft_only">Draft only</option><option value="auto_low_risk">Auto only when low risk</option></select></div><div class="field"><label for="max-cost">Cost guard</label><div class="input-with-unit"><span>$</span><input id="max-cost" v-model.number="generation.max_cost_usd" type="number" min="0.1" max="1000" step="0.1"></div></div><label class="checkbox-row field--full"><input v-model="allowSceneFlex" type="checkbox"> Allow the director up to ±2 scenes when dialogue would be rushed or the idea finishes earlier.</label><label class="checkbox-row field--full"><input v-model="generation.burn_in_captions" type="checkbox"> Burn captions into the video. Captions use clean outlined text without a background panel.</label></div><div :class="['token-quote',{ 'token-quote--insufficient': !hasGenerationBalance }]"><span><small>Maximum production charge</small><strong>{{ money(generationRequiredCents) }}</strong></span><span><small>Workspace balance</small><strong>{{ money(generationAvailableCents) }}</strong></span><NuxtLink v-if="!hasGenerationBalance" to="/billing">Top up balance or apply a promo →</NuxtLink></div><div v-if="generationError" class="generation-error">{{ generationError }}</div><div class="generation-note"><Sparkles :size="16" /><span>The quote includes Veo's 4/6/8-second billing increments for up to {{ generationBillableSeconds }} generated seconds per aspect ratio and the configured 20% service margin. Separate SRT and VTT subtitle files are always generated for download. Estimated {{ averageSceneDuration ? averageSceneDuration.toFixed(1) : '—' }} seconds per scene. Native speech is transcribed after every clip; late hooks, clipped lines and UGC voice drift trigger automatic retry. {{ sceneContinuation ? 'Every fragment extends one cumulative Veo video.' : 'Scenes are generated as self-contained authored vignettes.' }}</span></div></div>
+        <div class="modal__body"><div class="form-grid"><div class="field field--full"><label>Video type</label><div class="video-type-grid" role="radiogroup" aria-label="Video type"><label v-for="type in videoTypes" :key="type.value" :class="{ active: generation.visual_mode === type.value }"><input v-model="generation.visual_mode" type="radio" :value="type.value" :aria-label="type.label"><span><strong>{{ type.label }}</strong><UiSettingHelp :text="type.description" /></span><small>{{ type.description }}</small></label></div></div><div class="field field--full"><label>Voice generation</label><div class="audio-mode-switch" role="radiogroup" aria-label="Voice generation"><label v-for="mode in audioModes" :key="mode.value" :class="{ active: generation.audio_mode === mode.value }"><input v-model="generation.audio_mode" type="radio" :value="mode.value" :aria-label="mode.label"><span>{{ mode.label }} <UiSettingHelp :text="mode.description" /></span></label></div></div><div v-if="generation.audio_mode === 'veo_native'" class="field field--full"><label for="generation-native-voice">Native voice profile <UiSettingHelp text="The selected vocal profile is repeated in every native-audio prompt. When scene continuation is enabled for UGC, later clips extend the first performance and are checked against its voice." /></label><select id="generation-native-voice" v-model="generation.native_voice_preset"><option v-for="voice in nativeVoicePresets" :key="voice.value" :value="voice.value">{{ voice.label }} · {{ voice.description }}</option></select></div><div v-if="generationUsesCharacter" class="field field--full"><label for="generation-character">Character</label><select id="generation-character" v-model="generation.character_id"><option value="">Let the director cast a creator</option><option v-for="character in characters" :key="character.id" :value="character.id">{{ character.name }}</option></select><small v-if="!characters.length">Create a reusable identity in <NuxtLink to="/characters">Characters</NuxtLink>.</small></div><label class="checkbox-row field--full"><input v-model="generation.continue_scenes" type="checkbox"> Continue recurring roles from their own previous Veo scenes <UiSettingHelp text="Keeps a separate rolling Veo context for every recurring character, voice-over narrator or visual world. A later scene extends that role’s own latest clip, even when other roles appear between them. Enabled by default for UGC and optional for other formats." /></label><div class="field"><label for="generation-duration">Target duration</label><div class="input-with-unit"><input id="generation-duration" v-model.number="generation.target_duration_seconds" type="number" min="8" required><span>seconds</span></div></div><div class="field"><label for="scene-range">Preferred scene count</label><input id="scene-range" v-model="sceneRange" :class="{ invalid: !parsedSceneRange }" required placeholder="4 or 12-18"><small>{{ parsedSceneRange ? `Director preference ${parsedSceneRange.min}–${parsedSceneRange.max}; duration requires about ${plannedFragmentCount} generated fragments` : 'Enter 2–2000, for example 4 or 12-18' }}</small></div><div class="field field--full"><label>Aspect ratios</label><div class="choice-row"><button v-for="ratio in ['9:16','16:9']" :key="ratio" type="button" :class="['choice-button',{active:generation.aspect_ratios.includes(ratio)}]" @click="toggleRatio(ratio)"><Check v-if="generation.aspect_ratios.includes(ratio)" :size="13" /> {{ ratio }} · {{ ratio === '9:16' ? 'vertical' : 'landscape' }}</button></div></div><div class="field"><label for="approval-mode">Approval</label><select id="approval-mode" v-model="generation.approval_mode"><option value="final_only">Review final video</option><option value="manual_all">Review every stage</option><option value="draft_only">Draft only</option><option value="auto_low_risk">Auto only when low risk</option></select></div><div class="field"><label for="max-cost">Cost guard</label><div class="input-with-unit"><span>$</span><input id="max-cost" v-model.number="generation.max_cost_usd" type="number" min="0.1" step="0.1"></div></div><label class="checkbox-row field--full"><input v-model="allowSceneFlex" type="checkbox"> Allow the director up to ±2 scenes when dialogue would be rushed or the idea finishes earlier.</label><label class="checkbox-row field--full"><input v-model="generation.burn_in_captions" type="checkbox"> Burn captions into the video. Captions use clean outlined text without a background panel.</label></div><div :class="['token-quote',{ 'token-quote--insufficient': !hasGenerationBalance }]"><span><small>Maximum production charge</small><strong>{{ money(generationRequiredCents) }}</strong></span><span><small>Workspace balance</small><strong>{{ money(generationAvailableCents) }}</strong></span><NuxtLink v-if="!hasGenerationBalance" to="/billing">Top up balance or apply a promo →</NuxtLink></div><div v-if="generationError" class="generation-error">{{ generationError }}</div><div class="generation-note"><Sparkles :size="16" /><span>The quote includes Veo's 4/6/8-second billing increments for up to {{ generationBillableSeconds }} generated seconds per aspect ratio and the configured 20% service margin. Separate SRT and VTT subtitle files are always generated for download. Estimated {{ averageSceneDuration ? averageSceneDuration.toFixed(1) : '—' }} seconds per scene. Native speech is transcribed after every clip; late hooks, clipped lines and UGC voice drift trigger automatic retry. {{ sceneContinuation ? 'Each role extends only its own rolling Veo context; the final timeline uses film-style hard cuts.' : 'Scenes are generated as self-contained authored vignettes and joined with film-style hard cuts.' }}</span></div></div>
         <div class="modal__footer"><button type="button" class="button" @click="generationModalOpen = false">Cancel</button><button class="button button--primary" data-testid="start-generation" :disabled="starting || !parsedSceneRange || !hasGenerationBalance"><WandSparkles :size="14" /> {{ starting ? 'Starting…' : 'Start production' }}</button></div>
       </form>
     </div>

@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from shutil import which
 
-from apps.api.app.renderer import render_motion_video, technical_qa
+from apps.api.app.renderer import prepare_veo_extension_input, probe_video, render_motion_video, technical_qa
 
 
 def run_ffmpeg(arguments: list[str]) -> None:
@@ -93,6 +93,7 @@ def test_composes_generated_scene_clips_with_voice_audio(tmp_path: Path) -> None
     assert manifest["scene_video_paths"] == [str(path) for path in clips]
     assert manifest["audio_path"] == str(audio)
     assert manifest["composition_mode"] == "generated_scenes"
+    assert manifest["edit_style"] == "film_hard_cuts_only"
     assert manifest["overlay_style"] == "none"
     assert manifest["logo_applied"] is False
     assert manifest["captions_burned_in"] is False
@@ -189,3 +190,26 @@ def test_composes_native_audio_from_each_generated_scene(tmp_path: Path) -> None
     assert manifest["audio_path"] is None
     assert qa["passed"] is True
     assert qa["actual"]["audio_codec"] == "aac"
+
+
+def test_prepares_a_rolling_extension_window_without_requiring_audio(tmp_path: Path) -> None:
+    source = tmp_path / "cumulative_veo.mp4"
+    run_ffmpeg(
+        [
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x205c8a:s=96x96:r=24:d=31",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ]
+    )
+    conditioning = tmp_path / "conditioning.mp4"
+
+    prepare_veo_extension_input(source, conditioning)
+
+    duration = float(probe_video(conditioning)["format"]["duration"])
+    assert 29.0 <= duration <= 29.6

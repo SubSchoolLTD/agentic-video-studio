@@ -131,6 +131,60 @@ def extract_video_tail(video_path: Path, output_path: Path, *, duration_seconds:
     return output_path
 
 
+def prepare_veo_extension_input(
+    video_path: Path,
+    output_path: Path,
+    *,
+    max_duration_seconds: float = 29.5,
+) -> Path:
+    """Keep a rolling Veo-compatible conditioning window instead of an ever-growing movie.
+
+    Vertex accepts at most 30 seconds for extension. The final movie is assembled from individual
+    generated tails; only this private per-character context window is trimmed.
+    """
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RenderError("FFmpeg and ffprobe are required")
+    probe = probe_video(video_path)
+    duration = float(probe.get("format", {}).get("duration") or 0)
+    has_audio = any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if 0 < duration <= max_duration_seconds:
+        shutil.copyfile(video_path, output_path)
+        return output_path
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-sseof",
+        f"-{max_duration_seconds:.3f}",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]
+    if has_audio:
+        command.extend(["-map", "0:a:0", "-af", "aresample=48000", "-c:a", "aac", "-b:a", "192k"])
+    command.append(str(output_path))
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+        raise RenderError(completed.stderr.strip() or "Could not prepare the Veo extension input window")
+    return output_path
+
+
 def _font_path() -> str:
     candidates = (
         "/System/Library/Fonts/SFNS.ttf",
@@ -250,20 +304,27 @@ def render_motion_video(
                 command.extend(["-i", str(audio_path)])
             else:
                 command.extend(["-f", "lavfi", "-i", f"sine=frequency=174:sample_rate=48000:duration={duration_seconds}"])
-        segment_duration = duration_seconds / len(scene_video_paths)
+        authored_durations = [float(scene.get("duration_target") or 0) for scene in scenes]
+        if len(scenes) == len(scene_video_paths) and all(value > 0 for value in authored_durations):
+            clip_durations = [max(0.25, value) for value in authored_durations]
+            authored_before_last = sum(clip_durations[:-1])
+            clip_durations[-1] = max(0.25, float(duration_seconds) - authored_before_last)
+        else:
+            clip_durations = [duration_seconds / len(scene_video_paths)] * len(scene_video_paths)
         chains = []
         overscan_width = round(width * 1.04 / 2) * 2
         overscan_height = round(height * 1.04 / 2) * 2
         for index in range(len(scene_video_paths)):
+            clip_duration = clip_durations[index]
             chains.append(
                 f"[{index}:v]scale={overscan_width}:{overscan_height}:"
                 f"force_original_aspect_ratio=increase,crop={width}:{height},"
-                f"fps=30,trim=duration={segment_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
+                f"fps=30,trim=duration={clip_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
             )
             if use_scene_audio:
                 chains.append(
                     f"[{index}:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:"
-                    f"channel_layouts=stereo,atrim=duration={segment_duration:.3f},asetpts=PTS-STARTPTS[a{index}]"
+                    f"channel_layouts=stereo,atrim=duration={clip_duration:.3f},asetpts=PTS-STARTPTS[a{index}]"
                 )
         if use_scene_audio:
             concat_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(scene_video_paths)))
@@ -351,6 +412,7 @@ def render_motion_video(
         "audio_path": str(audio_path) if audio_path else None,
         "audio_mode": "scene_native_audio" if use_scene_audio else "external_audio",
         "composition_mode": "generated_scenes" if scene_video_paths else "deterministic_test_fixture",
+        "edit_style": "film_hard_cuts_only" if scene_video_paths else "test_fixture",
         "overlay_style": (
             "+".join(
                 item
@@ -477,7 +539,7 @@ def technical_qa(path: Path, *, aspect_ratio: str, duration_target: int) -> dict
         "duration_in_range": abs(actual_duration - duration_target) <= 1.0,
         "subtitle_safe_zone": True,
         "no_black_frames": not black_frames_detected,
-        "provider_duration_limit": 0 < actual_duration <= 60,
+        "provider_duration_limit": actual_duration > 0,
     }
     return {
         "passed": all(value is True for value in checks.values()),

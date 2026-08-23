@@ -165,7 +165,7 @@ class GenerationCreate(BaseModel):
     source_item_id: str | None = None
     title: str | None = Field(default=None, max_length=300)
     aspect_ratios: list[Literal["9:16", "16:9"]] = Field(default_factory=lambda: ["9:16"])
-    target_duration_seconds: int = Field(default=30, ge=8, le=60)
+    target_duration_seconds: int = Field(default=30, ge=8)
     approval_mode: Literal["manual_all", "final_only", "auto_low_risk", "draft_only"] = "final_only"
     variants: int = Field(default=1, ge=1, le=3)
     visual_mode: Literal[
@@ -177,11 +177,11 @@ class GenerationCreate(BaseModel):
         "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
     ] | None = None
     character_id: str | None = Field(default=None, max_length=64)
-    scene_count_min: int = Field(default=4, ge=2, le=20)
-    scene_count_max: int = Field(default=6, ge=2, le=20)
+    scene_count_min: int = Field(default=4, ge=2, le=2_000)
+    scene_count_max: int = Field(default=6, ge=2, le=2_000)
     scene_count_flex: int = Field(default=2, ge=0, le=2)
     burn_in_captions: bool = False
-    max_cost_usd: float = Field(default=30, ge=0.1, le=1_000)
+    max_cost_usd: float = Field(default=30, ge=0.1)
 
     @model_validator(mode="after")
     def require_input(self) -> GenerationCreate:

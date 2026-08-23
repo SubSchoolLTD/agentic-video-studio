@@ -124,6 +124,25 @@ class ResearchPacket:
     raw: dict[str, Any]
 
 
+def normalize_speaker_kind(value: Any) -> str:
+    """Map harmless Gemini role-label variations onto the stored speaker contract."""
+    normalized = re.sub(r"[^a-z]+", "_", str(value or "on_camera").lower()).strip("_")
+    if normalized in {"voice_over", "voiceover", "narrator", "off_camera", "off_screen"}:
+        return "voice_over"
+    if normalized in {"silent", "none", "no_speech", "non_speaking"}:
+        return "silent"
+    return "on_camera"
+
+
+def default_visual_bible() -> list[str]:
+    """Provide durable continuity constraints when Gemini omits an optional restatement."""
+    return [
+        "Keep every named character's face, age, wardrobe and voice identity unchanged.",
+        "Keep location geography, light direction and color palette coherent within each recurring track.",
+        "Use one consistent realistic camera texture and film language across the final timeline.",
+    ]
+
+
 class EditorialScene(BaseModel):
     id: str
     position: int
@@ -159,6 +178,11 @@ class EditorialScene(BaseModel):
     def normalize_optional_on_screen_text(cls, value: Any) -> str:
         """Gemini uses null to mean that a scene intentionally has no overlay copy."""
         return "" if value is None else str(value)
+
+    @field_validator("speaker_kind", mode="before")
+    @classmethod
+    def normalize_scene_speaker_kind(cls, value: Any) -> str:
+        return normalize_speaker_kind(value)
 
 
 class EditorialConcept(BaseModel):
@@ -229,12 +253,17 @@ class EditorialCharacter(BaseModel):
     voice_identity: str = ""
     speaker_kind: Literal["on_camera", "voice_over", "silent"] = "on_camera"
 
+    @field_validator("speaker_kind", mode="before")
+    @classmethod
+    def normalize_character_speaker_kind(cls, value: Any) -> str:
+        return normalize_speaker_kind(value)
+
 
 class EditorialStoryboard(BaseModel):
     scenes: list[EditorialScene] = Field(min_length=2, max_length=2_000)
     visual_mode: VisualMode
     creator_profile: str
-    visual_bible: list[str] = Field(min_length=3, max_length=8)
+    visual_bible: list[str] = Field(default_factory=default_visual_bible, min_length=3, max_length=8)
     character_map: list[EditorialCharacter] = Field(default_factory=list, max_length=24)
 
     @field_validator("creator_profile", mode="before")
@@ -251,6 +280,16 @@ class EditorialStoryboard(BaseModel):
             return "; ".join(parts)
         if isinstance(value, list):
             return "; ".join(str(item).strip() for item in value if str(item).strip())
+        return value
+
+    @field_validator("visual_bible", mode="before")
+    @classmethod
+    def normalize_visual_bible(cls, value: Any) -> list[str]:
+        if value is None or value == [] or value == "":
+            return default_visual_bible()
+        if isinstance(value, str):
+            items = [item.strip() for item in re.split(r"[\n;]+", value) if item.strip()]
+            return items if len(items) >= 3 else [*items, *default_visual_bible()][:3]
         return value
 
 

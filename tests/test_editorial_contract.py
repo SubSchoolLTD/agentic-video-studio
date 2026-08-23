@@ -110,6 +110,35 @@ def test_editorial_package_defaults_budget_class_when_gemini_omits_it() -> None:
     assert package["production_brief"]["budget_class"] == "standard"
 
 
+def test_editorial_package_normalizes_missing_visual_bible_and_speaker_aliases() -> None:
+    payload = editorial_payload()
+    payload["storyboard"].pop("visual_bible")
+    payload["storyboard"]["character_map"] = [
+        {
+            "key": "maya",
+            "name": "Maya",
+            "role": "teacher",
+            "speaker_kind": "on-screen_actor",
+        },
+        {
+            "key": "narrator",
+            "name": "Narrator",
+            "role": "voice over",
+            "speaker_kind": "off-screen",
+        },
+    ]
+    payload["storyboard"]["scenes"][0]["speaker_kind"] = "on-screen_actor"
+
+    package = EditorialPackage.model_validate(payload).model_dump()
+
+    assert len(package["storyboard"]["visual_bible"]) == 3
+    assert package["storyboard"]["scenes"][0]["speaker_kind"] == "on_camera"
+    assert [item["speaker_kind"] for item in package["storyboard"]["character_map"]] == [
+        "on_camera",
+        "voice_over",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_dialogue_fit_uses_local_fallback_when_vertex_is_throttled(monkeypatch) -> None:
     provider = EditorialProvider(Settings(provider_mode="live"))

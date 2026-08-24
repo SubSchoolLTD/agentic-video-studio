@@ -234,6 +234,88 @@ def test_editorial_quality_gate_rejects_screen_dependent_and_static_storytelling
     assert any("too visually static" in error for error in errors)
 
 
+def test_editorial_quality_gate_rejects_dangling_dialogue_and_unearned_payoff() -> None:
+    payload = editorial_payload()
+    payload["script"].update(
+        {
+            "logline": "A creator decides whether a pilot lesson is worth testing.",
+            "synopsis": "Maya worries, Ben suggests a pilot, and Maya immediately claims success.",
+            "dramatic_structure": ["setup", "turn", "payoff"],
+        }
+    )
+    payload["storyboard"]["visual_mode"] = "storytelling"
+    payload["storyboard"]["character_map"] = [
+        {
+            "key": "maya",
+            "name": "Maya",
+            "role": "creator",
+            "appearance": "dark-haired creator in her thirties",
+            "wardrobe": "oatmeal sweater",
+            "voice_identity": "bright medium voice",
+            "speaker_kind": "on_camera",
+            "personality": "ambitious",
+            "motivation": "avoid wasting six months",
+            "relationship_to_story": "protagonist",
+            "speaking_style": "specific and candid",
+        },
+        {
+            "key": "ben",
+            "name": "Ben",
+            "role": "friend",
+            "appearance": "bearded friend in his thirties",
+            "wardrobe": "blue overshirt",
+            "voice_identity": "calm lower voice",
+            "speaker_kind": "on_camera",
+            "personality": "practical",
+            "motivation": "suggest a smaller test",
+            "relationship_to_story": "catalyst",
+            "speaking_style": "brief and direct",
+        },
+    ]
+    first, second = payload["storyboard"]["scenes"]
+    first.update(
+        {
+            "narration": "I'll create one lesson to see if people will.",
+            "speaker": "Maya",
+            "speaker_kind": "on_camera",
+            "character_key": "maya",
+            "story_beat": "Maya considers the idea.",
+            "environment_detail": "A worktable covered in blank lesson cards.",
+            "blocking": "Maya looks from the cards to Ben.",
+            "fragment_intent": "Show uncertainty before the decision.",
+            "audience_value": "Name the validation fear.",
+            "camera_direction": "A slow push toward Maya.",
+        }
+    )
+    second.update(
+        {
+            "narration": "It worked. Now I have proof of market and testimonials.",
+            "speaker": "Ben",
+            "speaker_kind": "on_camera",
+            "character_key": "ben",
+            "story_beat": "An unsupported result appears.",
+            "environment_detail": "The same worktable is suddenly tidy.",
+            "blocking": "Ben smiles beside Maya.",
+            "fragment_intent": "Claim success.",
+            "audience_value": "Promise proof.",
+            "camera_direction": "Cut from Maya to Ben.",
+            "sound_direction": "A celebratory sting.",
+        }
+    )
+    package = EditorialPackage.model_validate(payload).model_dump()
+
+    errors = editorial_quality_errors(
+        package,
+        visual_mode="storytelling",
+        native_audio=True,
+        duration_seconds=30,
+    )
+
+    assert any("unresolved subordinate clause" in error for error in errors)
+    assert any("without first showing the test" in error for error in errors)
+    assert any("internal cut" in error for error in errors)
+
+
 def test_canonical_character_track_reuses_cast_bible_keys() -> None:
     character_by_key = {
         "maya": {"key": "maya", "name": "Maya"},

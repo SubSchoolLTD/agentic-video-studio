@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .config import Settings
 from .renderer import extract_video_tail
@@ -143,6 +143,18 @@ def default_visual_bible() -> list[str]:
     ]
 
 
+def normalize_string_list(value: Any) -> Any:
+    """Keep stored array contracts strict while accepting lossless Gemini shorthand."""
+    if value is None or value is False:
+        return []
+    if isinstance(value, str):
+        normalized = value.strip()
+        return [normalized] if normalized and normalized.lower() not in {"none", "none."} else []
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return value
+
+
 class EditorialScene(BaseModel):
     id: str
     position: int
@@ -183,6 +195,11 @@ class EditorialScene(BaseModel):
         """Gemini uses null to mean that a scene intentionally has no overlay copy."""
         return "" if value is None else str(value)
 
+    @field_validator("props", mode="before")
+    @classmethod
+    def normalize_props(cls, value: Any) -> Any:
+        return normalize_string_list(value)
+
     @field_validator("speaker_kind", mode="before")
     @classmethod
     def normalize_scene_speaker_kind(cls, value: Any) -> str:
@@ -214,14 +231,11 @@ class ProductionBrief(BaseModel):
     emotional_arc: str = ""
     creative_thesis: str = ""
 
-    @field_validator("mandatory_points", mode="before")
+    @field_validator("mandatory_points", "forbidden_claims", "aspect_ratios", mode="before")
     @classmethod
-    def normalize_mandatory_points(cls, value: Any) -> Any:
+    def normalize_brief_lists(cls, value: Any) -> Any:
         """Accept Gemini's lossless shorthand while preserving the strict stored shape."""
-        if isinstance(value, str):
-            normalized = value.strip()
-            return [normalized] if normalized else []
-        return value
+        return normalize_string_list(value)
 
 
 class EditorialScript(BaseModel):
@@ -241,9 +255,16 @@ class EditorialScript(BaseModel):
     @classmethod
     def normalize_voiceover_beats(cls, value: Any) -> Any:
         """Gemini sometimes returns the voiceover as ordered beats instead of one string."""
+        if value is None:
+            return ""
         if isinstance(value, list):
             return " ".join(str(item).strip() for item in value if str(item).strip())
         return value
+
+    @field_validator("caption_candidates", "hashtags", "dramatic_structure", mode="before")
+    @classmethod
+    def normalize_script_lists(cls, value: Any) -> Any:
+        return normalize_string_list(value)
 
 
 class EditorialPolicy(BaseModel):
@@ -279,11 +300,7 @@ class EditorialPolicy(BaseModel):
     @field_validator("unsupported_claims", mode="before")
     @classmethod
     def normalize_unsupported_claims(cls, value: Any) -> Any:
-        if value is None or value is False:
-            return []
-        if isinstance(value, str):
-            return [value.strip()] if value.strip() else []
-        return value
+        return normalize_string_list(value)
 
 
 class EditorialCharacter(BaseModel):
@@ -345,6 +362,17 @@ class EditorialPackage(BaseModel):
     script: EditorialScript
     policy: EditorialPolicy
     storyboard: EditorialStoryboard
+
+    @model_validator(mode="after")
+    def derive_script_rollup_from_scenes(self) -> EditorialPackage:
+        """Scene dialogue is authoritative when Gemini omits the redundant roll-up string."""
+        if not self.script.voiceover.strip():
+            self.script.voiceover = " ".join(
+                scene.narration.strip() for scene in self.storyboard.scenes if scene.narration.strip()
+            )
+        if not self.script.hook.strip() and self.storyboard.scenes:
+            self.script.hook = self.storyboard.scenes[0].narration.strip()
+        return self
 
 
 def editorial_quality_errors(
@@ -1697,7 +1725,13 @@ class EditorialProvider:
                         "caption_candidates", "hashtags", "logline", "synopsis",
                         "dramatic_structure", "audience_takeaway",
                     ],
-                    "voiceover": "one JSON string, not an array of scene beats",
+                    "voiceover": (
+                        "one JSON string, not an array of scene beats; repeat the ordered scene dialogue as a "
+                        "convenience roll-up and never return null"
+                    ),
+                    "caption_candidates": "JSON array of strings; use an empty array when none",
+                    "hashtags": "JSON array of strings; use an empty array when none",
+                    "dramatic_structure": "JSON array with at least setup, escalation/turn and payoff beats",
                 },
                 "policy": {
                     "decision": "exactly one of pass, revise or block",
@@ -1708,6 +1742,7 @@ class EditorialProvider:
                     "fields": ["scenes", "visual_mode", "creator_profile", "visual_bible", "character_map"],
                     "scene_fields": list(EditorialScene.model_fields),
                     "on_screen_text": "JSON string; use an empty string when no overlay copy is wanted, never null",
+                    "props": "JSON array of concrete prop strings; use an empty array when no prop is needed",
                     "creator_profile": "one concise JSON string, not an object or array",
                     "character_map": (
                         "JSON array of stable role objects with key, name, role, appearance, wardrobe, voice_identity "
@@ -1728,7 +1763,8 @@ class EditorialProvider:
                     "not a patch. Preserve supported facts but materially improve weak dialogue, character agency, "
                     "specificity, physical action and dramatic progression. "
                     "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
-                    "Keep voiceover and creator_profile as strings, never arrays or objects. "
+                    "Keep voiceover and creator_profile as strings, never null, arrays or objects. "
+                    "Keep scene props, caption_candidates, hashtags and dramatic_structure as JSON arrays of strings. "
                     "Keep character_map as an array and assign every scene a stable continuation_track. "
                     "Policy decision must be pass, revise or block; high_risk must be a JSON boolean. "
                     "Always include budget_class as a short string such as standard. "

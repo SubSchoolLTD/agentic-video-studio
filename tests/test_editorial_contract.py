@@ -92,7 +92,13 @@ def editorial_payload() -> dict:
 
 
 def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None:
-    package = EditorialPackage.model_validate_json(json.dumps(editorial_payload())).model_dump()
+    payload = editorial_payload()
+    payload["policy"] = {
+        "decision": "approved",
+        "high_risk": [],
+        "unsupported_claims": None,
+    }
+    package = EditorialPackage.model_validate_json(json.dumps(payload)).model_dump()
 
     assert package["production_brief"]["mandatory_points"] == [
         "Explain the value of reusable learning experiences."
@@ -102,6 +108,7 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
         "name: Alex; age range: 30-40; delivery: warm and conversational"
     )
     assert [scene["on_screen_text"] for scene in package["storyboard"]["scenes"]] == ["", ""]
+    assert package["policy"] == {"decision": "pass", "high_risk": False, "unsupported_claims": []}
 
 
 def test_editorial_quality_gate_rejects_generic_voiceover_only_storytelling() -> None:

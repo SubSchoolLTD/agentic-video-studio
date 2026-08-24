@@ -52,6 +52,7 @@ from .providers import (
     BrandProfileProvider,
     ParallelSearchProvider,
     TopicCandidateProvider,
+    apply_narration_to_scene,
 )
 from .publishing import (
     PROVIDER_CAPABILITIES,
@@ -82,6 +83,8 @@ from .schemas import (
     IdeaCreate,
     IdeaPatch,
     OrganizationCreate,
+    ProductionScenePatch,
+    ProductionScriptRegenerate,
     ProjectCreate,
     ProjectPatch,
     PublicationConfirm,
@@ -2695,6 +2698,8 @@ async def create_generation(
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
     principal.require("generations:write")
+    if payload.test_mode:
+        principal.require_platform_admin()
     repo = ResourceRepository(session)
     project = require_project(repo, project_id, principal)
     idea = None
@@ -2836,30 +2841,40 @@ async def create_generation(
             "idempotency_key": idempotency_key,
         },
     )
-    try:
-        usage_entry = charge_feature(
-            session,
-            organization_id=principal.organization_id,
-            user_id=principal.actor_id,
-            feature_key=pricing_feature,
-            quantity=billable_units,
-            reference_id=job.id,
+    if payload.generation_start_mode == "immediate" and not payload.test_mode:
+        try:
+            usage_entry = charge_feature(
+                session,
+                organization_id=principal.organization_id,
+                user_id=principal.actor_id,
+                feature_key=pricing_feature,
+                quantity=billable_units,
+                reference_id=job.id,
+            )
+        except HTTPException:
+            session.delete(job)
+            session.commit()
+            raise
+        repo.update(
+            job,
+            data={
+                "provider_cost_estimate_usd": (
+                    float(usage_entry.monetary_amount_usd)
+                    if usage_entry.monetary_amount_usd is not None
+                    else None
+                ),
+                "provider_cost_basis": "admin_price_rule",
+            },
         )
-    except HTTPException:
-        session.delete(job)
-        session.commit()
-        raise
-    repo.update(
-        job,
-        data={
-            "provider_cost_estimate_usd": (
-                float(usage_entry.monetary_amount_usd)
-                if usage_entry.monetary_amount_usd is not None
-                else None
-            ),
-            "provider_cost_basis": "admin_price_rule",
-        },
-    )
+    elif payload.test_mode:
+        repo.update(
+            job,
+            data={
+                "provider_cost_estimate_usd": 0.0,
+                "provider_cost_basis": "admin_test_mode_no_veo",
+                "test_mode_enabled_by": principal.actor_id,
+            },
+        )
     if idea:
         repo.update(
             idea,
@@ -2913,6 +2928,176 @@ def get_generation(
     )
 
 
+@router.post("/generation-jobs/{job_id}/start-scenes", status_code=202, tags=["generations"])
+async def start_generation_scenes(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.status != "awaiting_script_review":
+        raise HTTPException(409, f"Scenes cannot be started from {job.status}")
+    if job.data.get("test_mode"):
+        principal.require_platform_admin()
+    elif outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
+        estimated = dict(job.data.get("estimated_cost") or {})
+        feature_key = str(
+            estimated.get("basis")
+            or ("video.generate_native_audio" if job.data.get("audio_mode") == "veo_native" else "video.generate")
+        )
+        quantity = int(estimated.get("billable_seconds_per_aspect_ratio") or 1) * len(
+            job.data.get("aspect_ratios") or ["9:16"]
+        )
+        usage = charge_feature(
+            session,
+            organization_id=principal.organization_id,
+            user_id=principal.actor_id,
+            feature_key=feature_key,
+            quantity=quantity,
+            reference_id=job.id,
+        )
+        repo.update(
+            job,
+            data={
+                "provider_cost_estimate_usd": float(usage.monetary_amount_usd or 0),
+                "provider_cost_basis": "admin_price_rule",
+            },
+        )
+    updated = repo.update(
+        job,
+        status="queued",
+        data={
+            "script_approved_at": datetime.now(UTC).isoformat(),
+            "script_approved_by": principal.actor_id,
+            "current_stage": "scene_generation",
+            "last_error": None,
+        },
+    )
+    request.app.state.workflow.schedule(job.id)
+    return {"generation_job_id": updated.id, "status": updated.status, "resume_from_stage": "scene_generation"}
+
+
+@router.patch("/generation-jobs/{job_id}/scenes/{scene_id}", tags=["generations"])
+def edit_generation_scene(
+    job_id: str,
+    scene_id: str,
+    payload: ProductionScenePatch,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.status != "awaiting_script_review":
+        raise HTTPException(409, "Scene copy can only be edited during script review")
+    scene = require_resource(repo, scene_id, principal, kind="scene", project_id=str(job.project_id))
+    if str(scene.data.get("storyboard_id") or "") != str(job.data.get("storyboard_id") or ""):
+        raise HTTPException(409, "Scene does not belong to the active script checkpoint")
+    edits = payload.model_dump()
+    base = (
+        f"Story beat: {edits['story_beat']}. Setting: {edits['setting']}; {edits['environment_detail']}. "
+        f"Subject: {edits['subject']}. Visible action: {edits['action']}. Blocking: {edits['blocking']}. "
+        f"Camera: {edits['camera_direction']}. Performance: {edits['performance_direction']}. "
+        f"Sound: {edits['sound_direction']}. Dialogue intent: {edits['dialogue_intent']}. "
+        f"Conflict: {edits['dramatic_conflict']}. Audience value: {edits['audience_value']}. "
+        "No text, UI, logo or transition effect. End on a clean hard-cut edit point."
+    )
+    updated_scene = {**dict(scene.data), **edits, "visual_prompt_base": base}
+    updated_scene.update(
+        apply_narration_to_scene(
+            updated_scene,
+            edits["narration"].strip(),
+            native_audio=job.data.get("audio_mode") == "veo_native",
+            voice_profile=str(job.data.get("native_voice_profile") or ""),
+        )
+    )
+    repo.update(scene, data=updated_scene)
+    storyboard = repo.get_any(str(job.data.get("storyboard_id") or ""), kind="storyboard")
+    if storyboard:
+        storyboard_scenes = [
+            updated_scene if str(item.get("id")) == str(scene.data.get("id")) else item
+            for item in storyboard.data.get("scenes") or []
+        ]
+        repo.update(storyboard, data={"scenes": storyboard_scenes})
+    script = repo.get_any(str(job.data.get("script_id") or ""), kind="script")
+    if script:
+        script_data = dict(script.data.get("script") or {})
+        beats = [
+            updated_scene if str(item.get("id")) == str(scene.data.get("id")) else item
+            for item in script_data.get("beats") or []
+        ]
+        script_data.update(
+            {
+                "beats": beats,
+                "voiceover": " ".join(str(item.get("narration") or "").strip() for item in beats).strip(),
+            }
+        )
+        repo.update(script, data={"script": script_data})
+    stages = [dict(item) for item in job.data.get("stages") or []]
+    for stage in stages:
+        if stage.get("name") != "editorial_strategy" or not isinstance(stage.get("output"), dict):
+            continue
+        stage_output = dict(stage["output"])
+        package = dict(stage_output.get("package") or {})
+        storyboard_package = dict(package.get("storyboard") or {})
+        storyboard_package["scenes"] = [
+            updated_scene if str(item.get("id")) == str(scene.data.get("id")) else item
+            for item in storyboard_package.get("scenes") or []
+        ]
+        package["storyboard"] = storyboard_package
+        package_script = dict(package.get("script") or {})
+        package_script["beats"] = storyboard_package["scenes"]
+        package_script["voiceover"] = " ".join(
+            str(item.get("narration") or "").strip() for item in storyboard_package["scenes"]
+        ).strip()
+        package["script"] = package_script
+        stage_output["package"] = package
+        stage["output"] = stage_output
+    repo.update(job, data={"stages": stages, "script_last_edited_at": datetime.now(UTC).isoformat()})
+    return ResourceRepository.serialize(scene)
+
+
+@router.post("/generation-jobs/{job_id}/script/regenerate", status_code=202, tags=["generations"])
+async def regenerate_generation_script(
+    job_id: str,
+    payload: ProductionScriptRegenerate,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.status != "awaiting_script_review":
+        raise HTTPException(409, "The script can only be regenerated during script review")
+    stages = [dict(item) for item in job.data.get("stages") or []]
+    regenerate = False
+    for stage in stages:
+        if stage.get("name") == "editorial_strategy":
+            regenerate = True
+        if regenerate:
+            stage.update({"status": "pending", "started_at": None, "completed_at": None})
+            stage.pop("output", None)
+            stage.pop("error", None)
+    repo.update(
+        job,
+        status="queued",
+        data={
+            "stages": stages,
+            "current_stage": "editorial_strategy",
+            "script_revision_feedback": payload.feedback.strip(),
+            "script_revision_requested_at": datetime.now(UTC).isoformat(),
+            "script_approved_at": None,
+            "last_error": None,
+        },
+    )
+    request.app.state.workflow.schedule(job.id)
+    return {"generation_job_id": job.id, "status": "queued", "resume_from_stage": "editorial_strategy"}
+
+
 @router.post("/generation-jobs/{job_id}/cancel", tags=["generations"])
 def cancel_generation(
     job_id: str,
@@ -2923,7 +3108,7 @@ def cancel_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
-    if job.status not in {"queued", "running"}:
+    if job.status not in {"queued", "running", "awaiting_script_review"}:
         raise HTTPException(409, f"Job cannot be cancelled from {job.status}")
     task = request.app.state.workflow.tasks.get(job_id)
     if task and not task.done():
@@ -2950,7 +3135,7 @@ async def retry_generation(
     job = require_resource(repo, job_id, principal, kind="generation_job")
     if job.status not in {"failed", "blocked", "cancelled"}:
         raise HTTPException(409, f"Job cannot be retried from {job.status}")
-    if outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
+    if not job.data.get("test_mode") and outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
         pricing_feature = str(
             (job.data.get("estimated_cost") or {}).get("basis")
             or ("video.generate_native_audio" if job.data.get("audio_mode") == "veo_native" else "video.generate")
@@ -3021,7 +3206,7 @@ async def retry_generation_stage(
         downstream["completed_at"] = None
         downstream.pop("error", None)
         downstream.pop("output", None)
-    if outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
+    if not job.data.get("test_mode") and outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
         pricing_feature = str(
             (job.data.get("estimated_cost") or {}).get("basis")
             or ("video.generate_native_audio" if job.data.get("audio_mode") == "veo_native" else "video.generate")

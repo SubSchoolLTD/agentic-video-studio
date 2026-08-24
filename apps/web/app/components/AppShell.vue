@@ -27,6 +27,7 @@ import {
 const route = useRoute()
 const { api, projectId } = useApi()
 const auth = useAuth()
+const { enabled: testMode } = useTestMode()
 const mobileOpen = ref(false)
 const collapsed = useState('sidebar-collapsed', () => false)
 const hydrated = ref(false)
@@ -150,6 +151,10 @@ function switchProject(event: Event) {
         <button class="icon-button topbar__menu" aria-label="Open menu" @click="mobileOpen = true"><Menu :size="20" /></button>
         <div class="topbar__search"><Search :size="17" /><span>Search productions, ideas, sources…</span><kbd>⌘ K</kbd></div>
         <div class="topbar__actions">
+          <label v-if="auth.user.value?.is_platform_admin" class="test-mode-toggle" :class="{ active: testMode }" title="Mock Veo scene generation while keeping research and Gemini editorial live">
+            <input v-model="testMode" type="checkbox" />
+            <span>Test mode</span>
+          </label>
           <NuxtLink to="/billing" class="button button--ghost button--small" aria-label="Open billing balance">
             <BadgeDollarSign :size="15" /> ${{ Number(billingSummary?.balance_usd || 0).toFixed(2) }}
           </NuxtLink>

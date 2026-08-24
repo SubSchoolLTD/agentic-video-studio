@@ -24,6 +24,105 @@ def wait_for_job(client, job_id: str, headers: dict[str, str], timeout: float = 
     raise AssertionError(f"Job {job_id} did not complete before timeout")
 
 
+def wait_for_job_status(client, job_id: str, headers: dict[str, str], status: str, timeout: float = 35) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/v1/generation-jobs/{job_id}", headers=headers)
+        assert response.status_code == 200
+        job = response.json()
+        if job["status"] == status:
+            return job
+        if job["status"] in {"failed", "blocked"}:
+            raise AssertionError(job.get("last_error") or job)
+        time.sleep(0.15)
+    raise AssertionError(f"Job {job_id} did not reach {status} before timeout")
+
+
+def test_script_review_edit_and_admin_test_mode_skip_veo(client, auth_headers) -> None:
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "A teacher turns one live lesson into reusable practice",
+            "visual_mode": "storytelling",
+            "audio_mode": "veo_native",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "scene_count_min": 2,
+            "scene_count_max": 2,
+            "scene_count_flex": 0,
+            "generation_start_mode": "review_script",
+            "test_mode": True,
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "pipeline-script-review-test-mode-1"},
+    )
+    assert created.status_code == 202, created.text
+    job_id = created.json()["generation_job_id"]
+    review = wait_for_job_status(client, job_id, auth_headers, "awaiting_script_review")
+    assert review["current_stage"] == "script_review"
+    assert review["test_mode"] is True
+    assert review.get("video_id") is None
+    original_scene_ids = list(review["scene_ids"])
+    rewritten = client.post(
+        f"/v1/generation-jobs/{job_id}/script/regenerate",
+        json={"feedback": "Make both teachers speak and ground the conflict in repeated lesson preparation."},
+        headers=auth_headers,
+    )
+    assert rewritten.status_code == 202, rewritten.text
+    review = wait_for_job_status(client, job_id, auth_headers, "awaiting_script_review")
+    assert review["scene_ids"] != original_scene_ids
+    package = next(
+        item["output"]["package"]
+        for item in review["stages"]
+        if item["name"] == "editorial_strategy"
+    )
+    first = package["storyboard"]["scenes"][0]
+    scene_id = review["scene_ids"][0]
+    edited = client.patch(
+        f"/v1/generation-jobs/{job_id}/scenes/{scene_id}",
+        json={
+            "narration": "I taught this once; why am I rebuilding it tonight?",
+            "speaker": first.get("speaker") or "Teacher",
+            "speaker_kind": "on_camera",
+            "purpose": "Open on a concrete teacher frustration.",
+            "story_beat": "Setup and hook",
+            "subject": first.get("subject") or "An adult teacher",
+            "setting": first.get("setting") or "A lived-in home office after class",
+            "action": "The teacher drops a marked-up lesson plan beside a laptop and looks directly at camera.",
+            "environment_detail": "Evening light, used notebooks and a cooling mug make the workload tangible.",
+            "blocking": "She enters frame, sits, drops the papers and holds eye contact.",
+            "camera_direction": "Immediate medium close-up with a restrained push-in.",
+            "performance_direction": "Tired but dryly amused, never theatrical.",
+            "sound_direction": "Paper lands first; dialogue begins at time zero; no transition sound.",
+            "fragment_intent": "Make repeated course-building labor instantly recognizable.",
+            "dialogue_intent": "Name the waste in the teacher's own words.",
+            "dramatic_conflict": "Her useful live lesson disappears into one-off preparation.",
+            "audience_value": "Promise a concrete path from one lesson to reusable practice.",
+            "emotional_change": "Resignation turns into curiosity.",
+        },
+        headers=auth_headers,
+    )
+    assert edited.status_code == 200, edited.text
+    refreshed = client.get(f"/v1/generation-jobs/{job_id}", headers=auth_headers).json()
+    refreshed_package = next(
+        item["output"]["package"]
+        for item in refreshed["stages"]
+        if item["name"] == "editorial_strategy"
+    )
+    assert refreshed_package["storyboard"]["scenes"][0]["narration"].startswith("I taught this once")
+    started = client.post(f"/v1/generation-jobs/{job_id}/start-scenes", headers=auth_headers)
+    assert started.status_code == 202, started.text
+    ready = wait_for_job(client, job_id, auth_headers)
+    assert ready["status"] == "ready", ready.get("last_error")
+    assert ready["actual_cost_usd"] == 0
+    video = client.get(f"/v1/videos/{ready['video_id']}", headers=auth_headers).json()
+    assert all(
+        attempt["model_id"] == "deterministic-test-fixture"
+        for scene in video["scenes"]
+        for attempt in scene["attempts"]
+    )
+
+
 def wait_for_scene_regeneration(client, regeneration_id: str, headers: dict[str, str], timeout: float = 35) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

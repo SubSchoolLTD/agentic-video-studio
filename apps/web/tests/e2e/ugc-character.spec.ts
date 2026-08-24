@@ -67,6 +67,7 @@ test('uploads a reusable character and starts native-audio UGC from an idea', as
   await page.getByLabel('Target duration').fill('8')
   await page.getByLabel('Preferred scene count').fill('2')
   await page.getByLabel(/Allow the director/).uncheck()
+  await page.locator('.production-start-choice label').filter({ hasText: 'Generate immediately' }).click()
   await page.getByTestId('start-generation').click()
   await generationResponse
   const productionLink = card.getByRole('link', { name: 'Open production' })

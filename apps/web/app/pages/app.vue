@@ -3,6 +3,7 @@ import { Activity, ArrowRight, CircleDollarSign, Clapperboard, FlaskConical, Pau
 
 const { api, projectId } = useApi()
 const { user } = useAuth()
+const { enabled: testMode } = useTestMode()
 const { show } = useToast()
 const router = useRouter()
 const generating = ref(false)
@@ -51,6 +52,8 @@ async function quickGenerate() {
         aspect_ratios: ['9:16', '16:9'],
         target_duration_seconds: 30,
         approval_mode: 'final_only',
+        generation_start_mode: 'review_script',
+        test_mode: Boolean(user.value?.is_platform_admin && testMode.value),
       },
     })
     show('Production started', 'Research, script, scenes, render and QA are now running.', 'success')

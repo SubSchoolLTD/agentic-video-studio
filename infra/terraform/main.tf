@@ -85,6 +85,7 @@ locals {
     GOOGLE_RUNTIME_SERVICE_ACCOUNT = google_service_account.runtime.email
     GOOGLE_PUBSUB_TOPIC            = google_pubsub_topic.domain_events.name
     GEMINI_MODEL                   = "gemini-2.5-flash"
+    GEMINI_EDITORIAL_MODEL         = "gemini-2.5-pro"
     VEO_MODEL                      = "veo-3.1-generate-001"
     GOOGLE_TTS_VOICE               = "en-US-Chirp3-HD-Achernar"
     GOOGLE_GENAI_USE_VERTEXAI      = "true"

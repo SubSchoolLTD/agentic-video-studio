@@ -18,6 +18,7 @@ from apps.api.app.providers import (
     _strip_prompt_tokens,
     apply_narration_to_scene,
     continuous_ugc_scene_layout,
+    editorial_quality_errors,
     vertex_text_locations,
 )
 from apps.api.app.repository import ResourceRepository
@@ -101,6 +102,48 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
         "name: Alex; age range: 30-40; delivery: warm and conversational"
     )
     assert [scene["on_screen_text"] for scene in package["storyboard"]["scenes"]] == ["", ""]
+
+
+def test_editorial_quality_gate_rejects_generic_voiceover_only_storytelling() -> None:
+    payload = editorial_payload()
+    payload["script"].update(
+        {
+            "logline": "A teacher discovers a reusable course workflow.",
+            "synopsis": "The teacher moves from repeat work to a reusable lesson.",
+            "dramatic_structure": ["setup", "turn", "payoff"],
+        }
+    )
+    payload["storyboard"]["visual_mode"] = "storytelling"
+    payload["storyboard"]["character_map"] = [
+        {"key": "teacher", "name": "Maya", "role": "teacher", "speaker_kind": "on_camera"},
+        {"key": "narrator", "name": "Narrator", "role": "narrator", "speaker_kind": "voice_over"},
+    ]
+    for scene in payload["storyboard"]["scenes"]:
+        scene.update(
+            {
+                "narration": "SubSchool transforms your knowledge into dynamic, interactive lessons.",
+                "speaker": "Narrator",
+                "speaker_kind": "voice_over",
+                "character_key": "narrator",
+                "story_beat": "generic explanation",
+                "environment_detail": "home office",
+                "blocking": "teacher sits still",
+                "fragment_intent": "explain the product",
+                "audience_value": "general awareness",
+            }
+        )
+    package = EditorialPackage.model_validate(payload).model_dump()
+
+    errors = editorial_quality_errors(
+        package,
+        visual_mode="storytelling",
+        native_audio=True,
+        duration_seconds=30,
+    )
+
+    assert any("generic promotional copy" in error for error in errors)
+    assert any("primarily by on-camera" in error for error in errors)
+    assert any("At least two named" in error for error in errors)
 
 
 def test_editorial_package_defaults_budget_class_when_gemini_omits_it() -> None:

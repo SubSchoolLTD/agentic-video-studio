@@ -172,6 +172,10 @@ class EditorialScene(BaseModel):
     transition_logic: str = ""
     fragment_intent: str = ""
     voice_direction: str = ""
+    dialogue_intent: str = ""
+    dramatic_conflict: str = ""
+    audience_value: str = ""
+    emotional_change: str = ""
 
     @field_validator("on_screen_text", mode="before")
     @classmethod
@@ -228,6 +232,10 @@ class EditorialScript(BaseModel):
     cta: str
     caption_candidates: list[str]
     hashtags: list[str]
+    logline: str = ""
+    synopsis: str = ""
+    dramatic_structure: list[str] = Field(default_factory=list)
+    audience_takeaway: str = ""
 
     @field_validator("voiceover", mode="before")
     @classmethod
@@ -252,6 +260,10 @@ class EditorialCharacter(BaseModel):
     wardrobe: str = ""
     voice_identity: str = ""
     speaker_kind: Literal["on_camera", "voice_over", "silent"] = "on_camera"
+    personality: str = ""
+    motivation: str = ""
+    relationship_to_story: str = ""
+    speaking_style: str = ""
 
     @field_validator("speaker_kind", mode="before")
     @classmethod
@@ -299,6 +311,68 @@ class EditorialPackage(BaseModel):
     script: EditorialScript
     policy: EditorialPolicy
     storyboard: EditorialStoryboard
+
+
+def editorial_quality_errors(
+    package: dict[str, Any], *, visual_mode: VisualMode, native_audio: bool, duration_seconds: int
+) -> list[str]:
+    """Reject structurally valid but unusable scripts before expensive media generation."""
+    errors: list[str] = []
+    script = dict(package.get("script") or {})
+    storyboard = dict(package.get("storyboard") or {})
+    scenes = [dict(item) for item in storyboard.get("scenes") or []]
+    if duration_seconds < 15 and visual_mode != "storytelling":
+        return []
+    characters = [dict(item) for item in storyboard.get("character_map") or []]
+    spoken = [scene for scene in scenes if str(scene.get("narration") or "").strip()]
+    total_words = sum(len(str(scene.get("narration") or "").split()) for scene in spoken)
+    incomplete_endings = (" and", " or", " but", " because", " to", " with", " into", " for")
+    generic_copy_patterns = (
+        r"\bhelps? .{0,30} create\b",
+        r"\btransform(?:s|ing)? your (?:knowledge|expertise)\b",
+        r"\bturn (?:your )?expertise into\b",
+        r"\bimpactful learning\b",
+        r"\bunlock your (?:potential|creativity)\b",
+        r"\bdynamic,? interactive\b",
+    )
+    for scene in spoken:
+        narration = str(scene.get("narration") or "").strip()
+        word_count = len(narration.split())
+        if word_count < 5:
+            errors.append(f"{scene.get('id')}: spoken line is too thin ({word_count} words)")
+        if narration.lower().rstrip(".!?\"'").endswith(incomplete_endings):
+            errors.append(f"{scene.get('id')}: spoken line ends as an incomplete thought")
+        if any(re.search(pattern, narration, flags=re.IGNORECASE) for pattern in generic_copy_patterns):
+            errors.append(f"{scene.get('id')}: generic promotional copy must be replaced with a concrete mechanism or example")
+        for field in ("story_beat", "environment_detail", "blocking", "fragment_intent", "audience_value"):
+            if not str(scene.get(field) or "").strip():
+                errors.append(f"{scene.get('id')}: missing {field}")
+    if spoken and total_words < max(24, len(spoken) * 7):
+        errors.append("Spoken script is too shallow for the requested duration")
+    if not str(script.get("logline") or "").strip():
+        errors.append("Script is missing a logline")
+    if not str(script.get("synopsis") or "").strip():
+        errors.append("Script is missing a concrete synopsis")
+    if len(script.get("dramatic_structure") or []) < 3:
+        errors.append("Script needs at least three explicit dramatic structure beats")
+    if visual_mode == "storytelling":
+        on_camera = [scene for scene in spoken if scene.get("speaker_kind") == "on_camera"]
+        voice_over = [scene for scene in spoken if scene.get("speaker_kind") == "voice_over"]
+        speaking_keys = {str(scene.get("character_key") or "") for scene in on_camera if scene.get("character_key")}
+        if len(characters) < 2:
+            errors.append("Storytelling requires at least two fully defined characters")
+        if native_audio and len(on_camera) < max(2, math.ceil(len(spoken) * 0.6)):
+            errors.append("Native-audio storytelling must be driven primarily by on-camera character dialogue")
+        if native_audio and len(voice_over) > max(1, math.floor(len(spoken) / 3)):
+            errors.append("Voice-over is overused; reserve it for a motivated narrative beat")
+        if native_audio and len(speaking_keys) < 2:
+            errors.append("At least two named on-camera characters must speak in native-audio storytelling")
+        for character in characters:
+            if character.get("speaker_kind") == "on_camera":
+                for field in ("appearance", "voice_identity", "personality", "motivation", "speaking_style"):
+                    if not str(character.get(field) or "").strip():
+                        errors.append(f"Character {character.get('key') or character.get('name')} is missing {field}")
+    return list(dict.fromkeys(errors))
 
 
 class MultimodalSceneIssue(BaseModel):
@@ -1392,7 +1466,7 @@ class EditorialProvider:
             ],
         }
         response = client.models.generate_content(
-            model=self.settings.gemini_model,
+            model=self.settings.gemini_editorial_model,
             contents=json.dumps(prompt, ensure_ascii=False),
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -1458,14 +1532,18 @@ class EditorialProvider:
             "duration_seconds": duration_seconds,
             "visual_mode": visual_mode,
             "aspect_ratios": aspect_ratios,
-            "requested_hook": requested_hook or None,
+            "requested_hook_idea": requested_hook or None,
             "content_format": content_format,
             "candidate_strategy": creative_context,
             "brand": brand,
             "evidence": {"sources": evidence.sources, "claims": evidence.claims},
             "requirements": {
                 "hook_first_two_seconds": True,
-                "human_hook": "Use the requested hook as the opening constraint when supplied; tighten wording only when needed for timing or policy",
+                "human_hook": (
+                    "Treat requested_hook_idea as intent, not approved copy. Rewrite it into a complete, concrete spoken "
+                    "line that starts at time zero, creates curiosity or tension, and pays off later. Never copy an "
+                    "unfinished or generic hook verbatim."
+                ),
                 "one_core_idea": True,
                 "cite_source_ids": True,
                 "scenes": {
@@ -1497,6 +1575,15 @@ class EditorialProvider:
                     "meaningful props, location detail, camera movement, sound and edit logic. Never delegate story, "
                     "casting, dialogue or staging decisions to the video model."
                 ),
+                "script_quality": (
+                    "Write a complete mini-production, not an advertising outline. Every spoken line must advance a "
+                    "specific thought, reveal character, create or resolve tension, or deliver a concrete audience value. "
+                    "Ban generic filler such as 'we help you create', 'transform your knowledge', 'make an impact' or "
+                    "'unlock your potential' unless the line immediately names a mechanism or observable example. The "
+                    "opening must be a complete hook; setup, escalation, turn, payoff and CTA must be understandable from "
+                    "the dialogue alone. Silently critique the draft for specificity, natural speech and dramatic logic "
+                    "before returning JSON."
+                ),
                 "scene_prompt_contract": (
                     "Every scene must populate story_beat, environment_detail, blocking, props, sound_direction, "
                     "transition_logic, fragment_intent, voice_direction, speaker, speaker_kind, character_key and "
@@ -1520,7 +1607,12 @@ class EditorialProvider:
                     "key, appearance, wardrobe and distinct voice identity for every role, including a voice-over "
                     "narrator when used. Set speaker and speaker_kind for the one role delivering each scene's exact "
                     "line. Allow only one speaking role per scene. Give every role its own continuation_track equal to "
-                    "its character_map key; never put an on-camera role and a voice-over narrator on the same track."
+                    "its character_map key; never put an on-camera role and a voice-over narrator on the same track. "
+                    "When native audio is requested, at least 60% of spoken scenes must be on-camera dialogue, at least "
+                    "two named on-camera characters must speak, and voice-over may appear in at most one third of spoken "
+                    "scenes. Do not use narration to explain what characters could naturally say or demonstrate. Every "
+                    "character must have a personality, immediate motivation, relationship to the story and distinct "
+                    "speaking style."
                     if visual_mode == "storytelling"
                     else None
                 ),
@@ -1568,7 +1660,8 @@ class EditorialProvider:
                 "script": {
                     "fields": [
                         "title", "hook", "voiceover", "duration_target", "cta",
-                        "caption_candidates", "hashtags",
+                        "caption_candidates", "hashtags", "logline", "synopsis",
+                        "dramatic_structure", "audience_takeaway",
                     ],
                     "voiceover": "one JSON string, not an array of scene beats",
                 },
@@ -1580,23 +1673,27 @@ class EditorialProvider:
                     "creator_profile": "one concise JSON string, not an object or array",
                     "character_map": (
                         "JSON array of stable role objects with key, name, role, appearance, wardrobe, voice_identity "
-                        "and speaker_kind; use creator as the single UGC key"
+                        "speaker_kind, personality, motivation, relationship_to_story and speaking_style; use creator "
+                        "as the single UGC key"
                     ),
                 },
             },
         }
         package: dict[str, Any] | None = None
         validation_error = ""
-        for attempt in range(2):
+        quality_errors: list[str] = []
+        for attempt in range(3):
             request_prompt = dict(prompt)
             if attempt:
                 request_prompt["repair_instruction"] = (
-                    "The previous JSON did not match the output contract. Return a complete corrected object. "
+                    "The previous package failed schema or editorial quality review. Return a complete rewritten object, "
+                    "not a patch. Preserve supported facts but materially improve weak dialogue, character agency, "
+                    "specificity, physical action and dramatic progression. "
                     "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
                     "Keep voiceover and creator_profile as strings, never arrays or objects. "
                     "Keep character_map as an array and assign every scene a stable continuation_track. "
                     "Always include budget_class as a short string such as standard. "
-                    f"Validation summary: {validation_error[:1200]}"
+                    f"Validation summary: {(validation_error or '; '.join(quality_errors))[:2400]}"
                 )
             response = self._generate_editorial_content(
                 contents=json.dumps(request_prompt, ensure_ascii=False),
@@ -1607,12 +1704,23 @@ class EditorialProvider:
                 ),
             )
             try:
-                package = EditorialPackage.model_validate_json(response.text or "{}").model_dump()
+                candidate_package = EditorialPackage.model_validate_json(response.text or "{}").model_dump()
+                quality_errors = editorial_quality_errors(
+                    candidate_package,
+                    visual_mode=visual_mode,
+                    native_audio=native_audio,
+                    duration_seconds=duration_seconds,
+                )
+                if quality_errors:
+                    package = None
+                    validation_error = "Editorial quality gate: " + "; ".join(quality_errors)
+                    continue
+                package = candidate_package
                 break
             except (ValidationError, ValueError, json.JSONDecodeError) as exc:
                 validation_error = str(exc)
         if package is None:
-            raise RuntimeError(f"Editorial provider returned invalid JSON twice: {validation_error}")
+            raise RuntimeError(f"Editorial provider failed schema or quality review three times: {validation_error}")
         scenes = package["storyboard"]["scenes"]
         expected_min = len(continuation_layout) if continuation_layout else allowed_min
         expected_max = len(continuation_layout) if continuation_layout else allowed_max
@@ -1665,11 +1773,7 @@ class EditorialProvider:
         scene_durations = continuation_layout or [duration_seconds / len(scenes)] * len(scenes)
         cursor = 0.0
         if requested_hook:
-            package["script"]["hook"] = requested_hook
-            scenes[0]["narration"] = requested_hook
-            scenes[0]["on_screen_text"] = ""
-            if package.get("concepts"):
-                package["concepts"][0]["hook"] = requested_hook
+            package["requested_hook_idea"] = requested_hook
         for index, scene in enumerate(scenes):
             end = (
                 float(duration_seconds)
@@ -1755,9 +1859,10 @@ class EditorialProvider:
         package["policy"]["checks"] = evidence.claims
         package["provider_trace"] = {
             "provider": "google",
-            "model": self.settings.gemini_model,
-            "prompt_version": "editorial-director-v6-character-tracks",
+            "model": self.settings.gemini_editorial_model,
+            "prompt_version": "editorial-director-v7-pro-quality-gate",
             "response_id": getattr(response, "response_id", None),
+            "quality_gate": "passed",
         }
         return package
 
@@ -1769,7 +1874,7 @@ class EditorialProvider:
             try:
                 client = google_genai_client(self.settings, location=location)
                 return client.models.generate_content(
-                    model=self.settings.gemini_model,
+                    model=self.settings.gemini_editorial_model,
                     contents=contents,
                     config=config,
                 )

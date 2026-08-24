@@ -181,6 +181,8 @@ class GenerationCreate(BaseModel):
     scene_count_max: int = Field(default=6, ge=2, le=2_000)
     scene_count_flex: int = Field(default=2, ge=0, le=2)
     burn_in_captions: bool = False
+    generation_start_mode: Literal["immediate", "review_script"] = "immediate"
+    test_mode: bool = False
     max_cost_usd: float = Field(default=30, ge=0.1)
 
     @model_validator(mode="after")
@@ -210,6 +212,31 @@ class ScriptPatch(BaseModel):
     caption_candidates: list[str] | None = None
     hashtags: list[str] | None = None
     reason: str = Field(min_length=8, max_length=2_000)
+
+
+class ProductionScenePatch(BaseModel):
+    narration: str = Field(min_length=1, max_length=2_000)
+    speaker: str = Field(default="", max_length=160)
+    speaker_kind: Literal["on_camera", "voice_over", "silent"] = "on_camera"
+    purpose: str = Field(min_length=3, max_length=1_000)
+    story_beat: str = Field(min_length=3, max_length=1_000)
+    subject: str = Field(min_length=3, max_length=2_000)
+    setting: str = Field(min_length=3, max_length=2_000)
+    action: str = Field(min_length=3, max_length=2_000)
+    environment_detail: str = Field(default="", max_length=2_000)
+    blocking: str = Field(default="", max_length=2_000)
+    camera_direction: str = Field(default="", max_length=2_000)
+    performance_direction: str = Field(default="", max_length=2_000)
+    sound_direction: str = Field(default="", max_length=2_000)
+    fragment_intent: str = Field(default="", max_length=2_000)
+    dialogue_intent: str = Field(default="", max_length=2_000)
+    dramatic_conflict: str = Field(default="", max_length=2_000)
+    audience_value: str = Field(default="", max_length=2_000)
+    emotional_change: str = Field(default="", max_length=2_000)
+
+
+class ProductionScriptRegenerate(BaseModel):
+    feedback: str = Field(min_length=8, max_length=4_000)
 
 
 class ReviewAction(BaseModel):

@@ -125,6 +125,11 @@ def test_script_review_edit_and_admin_test_mode_skip_veo(client, auth_headers) -
     assert video["qa_report"]["visual"]["passed"] is True
     assert all(output["skipped"] is True for output in video["qa_report"]["visual"]["outputs"])
     assert video["qa_report"]["brand"]["evaluated_by"] == "deterministic_test_fixture"
+    assert video["qa_report"]["duplicate"] == {
+        "passed": True,
+        "skipped": True,
+        "skip_reason": "Creative duplicate detection is not applicable to a shared Test mode fixture.",
+    }
     assert video["score_report"]["blocked_by_hard_gate"] is False
 
 

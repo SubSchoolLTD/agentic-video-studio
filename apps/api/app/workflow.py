@@ -2312,7 +2312,9 @@ class WorkflowManager:
                     scenes=scenes,
                     technical=qa,
                 )
-            duplicate_passed = manifest["checksum"] not in existing_checksums
+            # Every Test mode render intentionally uses the same deterministic fixture. It is
+            # useful for exercising storage/rendering, but meaningless for creative deduplication.
+            duplicate_passed = True if job.data.get("test_mode") else manifest["checksum"] not in existing_checksums
             await self._emit(
                 session,
                 job,
@@ -2473,7 +2475,15 @@ class WorkflowManager:
                 "passed": rights_pass,
                 "provider_provenance": provider_provenance_pass,
             },
-            "duplicate": {"passed": duplicate_pass},
+            "duplicate": {
+                "passed": duplicate_pass,
+                "skipped": bool(job.data.get("test_mode")),
+                "skip_reason": (
+                    "Creative duplicate detection is not applicable to a shared Test mode fixture."
+                    if job.data.get("test_mode")
+                    else None
+                ),
+            },
         }
         qa_report = repo.add(
             kind="qa_report",

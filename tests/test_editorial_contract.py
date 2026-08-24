@@ -98,16 +98,29 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
         "high_risk": [],
         "unsupported_claims": None,
     }
+    payload["production_brief"]["forbidden_claims"] = "No guaranteed outcomes."
+    payload["script"]["voiceover"] = None
+    payload["script"]["caption_candidates"] = "One lesson, reused well."
+    payload["script"]["dramatic_structure"] = "setup → turn → payoff"
+    payload["storyboard"]["scenes"][0]["props"] = "A marked-up lesson plan."
+    payload["storyboard"]["scenes"][1]["props"] = "None."
     package = EditorialPackage.model_validate_json(json.dumps(payload)).model_dump()
 
     assert package["production_brief"]["mandatory_points"] == [
         "Explain the value of reusable learning experiences."
     ]
-    assert package["script"]["voiceover"] == "A short spoken line. A second concise beat."
+    assert package["script"]["voiceover"] == "A short spoken line. A short spoken line."
+    assert package["script"]["caption_candidates"] == ["One lesson, reused well."]
+    assert package["script"]["dramatic_structure"] == ["setup → turn → payoff"]
+    assert package["production_brief"]["forbidden_claims"] == ["No guaranteed outcomes."]
     assert package["storyboard"]["creator_profile"] == (
         "name: Alex; age range: 30-40; delivery: warm and conversational"
     )
     assert [scene["on_screen_text"] for scene in package["storyboard"]["scenes"]] == ["", ""]
+    assert [scene["props"] for scene in package["storyboard"]["scenes"]] == [
+        ["A marked-up lesson plan."],
+        [],
+    ]
     assert package["policy"] == {"decision": "pass", "high_risk": False, "unsupported_claims": []}
 
 

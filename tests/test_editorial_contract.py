@@ -275,7 +275,7 @@ def test_editorial_quality_gate_rejects_dangling_dialogue_and_unearned_payoff() 
     first, second = payload["storyboard"]["scenes"]
     first.update(
         {
-            "narration": "I'll create one lesson to see if people will.",
+            "narration": "Chloe said the preview worked great, but I still need to see if people will.",
             "speaker": "Maya",
             "speaker_kind": "on_camera",
             "character_key": "maya",
@@ -289,12 +289,12 @@ def test_editorial_quality_gate_rejects_dangling_dialogue_and_unearned_payoff() 
     )
     second.update(
         {
-            "narration": "It worked. Now I have proof of market and testimonials.",
+            "narration": "The validation failed, even though Chloe said it worked great.",
             "speaker": "Ben",
             "speaker_kind": "on_camera",
             "character_key": "ben",
             "story_beat": "An unsupported result appears.",
-            "environment_detail": "The same worktable is suddenly tidy.",
+            "environment_detail": "A whiteboard has the written phrase 'It worked' behind them.",
             "blocking": "Ben smiles beside Maya.",
             "fragment_intent": "Claim success.",
             "audience_value": "Promise proof.",
@@ -314,6 +314,8 @@ def test_editorial_quality_gate_rejects_dangling_dialogue_and_unearned_payoff() 
     assert any("unresolved subordinate clause" in error for error in errors)
     assert any("without first showing the test" in error for error in errors)
     assert any("internal cut" in error for error in errors)
+    assert any("display text" in error for error in errors)
+    assert any("contradicts the positive evidence" in error for error in errors)
 
 
 def test_canonical_character_track_reuses_cast_bible_keys() -> None:

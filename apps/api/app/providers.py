@@ -497,7 +497,15 @@ def editorial_quality_errors(
             scene_id = scene.get("id")
             direction = " ".join(
                 str(scene.get(field) or "")
-                for field in ("action", "camera_direction", "sound_direction", "transition_logic")
+                for field in (
+                    "environment_detail",
+                    "action",
+                    "blocking",
+                    "props",
+                    "camera_direction",
+                    "sound_direction",
+                    "transition_logic",
+                )
             )
             if re.search(
                 r"\b(?:fade|dissolve|wipe|whip[- ]?pan|morph|flash|whoosh|swish|riser|sting)\b|"
@@ -509,7 +517,9 @@ def editorial_quality_errors(
                     f"{scene_id}: contains an internal cut, transition or transition sound; author one continuous shot"
                 )
             if re.search(
-                r"\b(?:cta|caption|title|text)\b.{0,30}\b(?:appear|display|show|overlay)\w*\b",
+                r"\b(?:cta|caption|title|text)\b.{0,30}\b(?:appear|display|show|overlay)\w*\b|"
+                r"\b(?:written|printed|readable|visible)\s+(?:phrase|words?|text|comments?|labels?|notes?)\b|"
+                r"\b(?:whiteboard|notebook|paper|sign)\b.{0,80}\b(?:says|reads|written|spells)\b",
                 direction,
                 re.IGNORECASE,
             ):
@@ -536,15 +546,25 @@ def editorial_quality_errors(
                 for scene in scenes[:payoff_index]
             )
             if not re.search(
-                r"\b(?:pilot|test(?:ed|ing)?|teach(?:es|ing|taught)?|invite(?:d|s|ing)?|"
-                r"share(?:d|s|ing)?|publish(?:ed|es|ing)?|student|learner|audience|customer|"
-                r"feedback|response|sign[- ]?up|pre[- ]?order|sale|purchase)\w*\b",
+                r"\b(?:test(?:ed|ing)?|deliver(?:ed|s|ing)?|teach(?:es|ing|taught)?|"
+                r"share(?:d|s|ing)?|publish(?:ed|es|ing)?|present(?:ed|s|ing)?|"
+                r"complete(?:d|s|ing)?|practice(?:d|s|ing)?|demonstrat(?:e|ed|es|ing)|"
+                r"work(?:ed|s|ing)? through|student feedback|learner response|customer response)\b",
                 causal_action,
                 re.IGNORECASE,
             ):
                 errors.append(
                     "Storytelling claims a validation payoff without first showing the test and an observable response"
                 )
+        evidence_language = " ".join(
+            " ".join(str(scene.get(field) or "") for field in ("narration", "story_beat", "action"))
+            for scene in scenes[:-1]
+        )
+        final_line = str(scenes[-1].get("narration") or "") if scenes else ""
+        if re.search(r"\b(?:positive|worked|successful|great|enthusiastic)\b", evidence_language, re.I) and re.search(
+            r"\b(?:failed validation|validation failed|the test failed)\b", final_line, re.I
+        ):
+            errors.append("Storytelling payoff contradicts the positive evidence shown in earlier scenes")
         for character in characters:
             if character.get("speaker_kind") == "on_camera":
                 for field in ("appearance", "voice_identity", "personality", "motivation", "speaking_style"):
@@ -1763,6 +1783,9 @@ class EditorialProvider:
                     "as will, would, can or should, and never leave an if/whether clause unresolved. Give every scene a "
                     "distinct dramatic job; do not restate the same plan in adjacent beats. Never jump from deciding to try "
                     "something straight to claiming success: visibly dramatize the attempt and an observable response first. "
+                    "An invitation or offer to try a lesson is not the test itself; show the lesson being delivered, tried "
+                    "or completed before showing feedback. The concluding line must accurately match whether the displayed "
+                    "evidence was positive, negative or inconclusive. "
                     "Silently critique the draft for specificity, natural speech and causal dramatic logic before returning JSON."
                 ),
                 "scene_prompt_contract": (
@@ -1775,7 +1798,8 @@ class EditorialProvider:
                     "of scenes may use a static or locked camera: motivate follows, reframes, over-shoulders and "
                     "action details through character movement. Author each generated scene as one continuous shot—never "
                     "write 'cut from ... to ...' inside a scene—and never ask the video model to make CTA text, captions "
-                    "or titles appear."
+                    "or titles appear. This prohibition includes readable phrases or comments written on whiteboards, "
+                    "notebooks, paper, signs and other props."
                 ),
                 "audio_boundary": (
                     "Plan short direct-to-camera dialogue for native Veo speech; each narration must fit its scene duration"

@@ -17,6 +17,7 @@ from apps.api.app.providers import (
     _rebalance_candidate_mix,
     _strip_prompt_tokens,
     apply_narration_to_scene,
+    canonical_character_track,
     continuous_ugc_scene_layout,
     editorial_quality_errors,
     vertex_text_locations,
@@ -164,6 +165,85 @@ def test_editorial_quality_gate_rejects_generic_voiceover_only_storytelling() ->
     assert any("generic promotional copy" in error for error in errors)
     assert any("primarily by on-camera" in error for error in errors)
     assert any("At least two named" in error for error in errors)
+
+
+def test_editorial_quality_gate_rejects_screen_dependent_and_static_storytelling() -> None:
+    payload = editorial_payload()
+    payload["script"].update(
+        {
+            "logline": "Two teachers turn research into a concrete classroom routine.",
+            "synopsis": "Maya struggles, Ben demonstrates a method, and Maya applies it.",
+            "dramatic_structure": ["setup", "turn", "payoff"],
+        }
+    )
+    payload["storyboard"]["visual_mode"] = "storytelling"
+    payload["storyboard"]["character_map"] = [
+        {
+            "key": "maya",
+            "name": "Maya",
+            "role": "teacher",
+            "appearance": "dark-haired teacher in her thirties",
+            "wardrobe": "oatmeal sweater",
+            "voice_identity": "thoughtful lower-mid voice",
+            "speaker_kind": "on_camera",
+            "personality": "careful",
+            "motivation": "help her students remember",
+            "relationship_to_story": "protagonist",
+            "speaking_style": "direct and reflective",
+        },
+        {
+            "key": "ben",
+            "name": "Ben",
+            "role": "colleague",
+            "appearance": "teacher in his thirties",
+            "wardrobe": "blue overshirt",
+            "voice_identity": "calm medium voice",
+            "speaker_kind": "on_camera",
+            "personality": "practical",
+            "motivation": "show a repeatable method",
+            "relationship_to_story": "mentor",
+            "speaking_style": "concise and concrete",
+        },
+    ]
+    for index, scene in enumerate(payload["storyboard"]["scenes"]):
+        scene.update(
+            {
+                "narration": "Try one idea today, then return to it after a short gap.",
+                "speaker": "Maya" if index == 0 else "Ben",
+                "speaker_kind": "on_camera",
+                "character_key": "maya" if index == 0 else "ben",
+                "story_beat": "setup" if index == 0 else "payoff",
+                "environment_detail": "shared workroom with lesson cards",
+                "blocking": "the teacher sorts physical cards",
+                "fragment_intent": "show the method through a visible action",
+                "audience_value": "a repeatable classroom technique",
+                "subject": "laptop screen with a course dashboard" if index == 0 else "Ben",
+                "camera_direction": "static locked framing",
+            }
+        )
+    package = EditorialPackage.model_validate(payload).model_dump()
+
+    errors = editorial_quality_errors(
+        package,
+        visual_mode="storytelling",
+        native_audio=True,
+        duration_seconds=30,
+    )
+
+    assert any("screen or interface" in error for error in errors)
+    assert any("too visually static" in error for error in errors)
+
+
+def test_canonical_character_track_reuses_cast_bible_keys() -> None:
+    character_by_key = {
+        "maya": {"key": "maya", "name": "Maya"},
+        "ben": {"key": "ben", "name": "Ben"},
+        "narrator": {"key": "narrator", "name": "Narrator"},
+    }
+
+    assert canonical_character_track("maya_track", speaker="Maya", character_by_key=character_by_key) == "maya"
+    assert canonical_character_track("voice_one", speaker="Ben", character_by_key=character_by_key) == "ben"
+    assert canonical_character_track("narrator_track", speaker="Narrator", character_by_key=character_by_key) == "narrator"
 
 
 def test_editorial_package_defaults_budget_class_when_gemini_omits_it() -> None:

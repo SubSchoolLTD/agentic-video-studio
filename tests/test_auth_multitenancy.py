@@ -142,6 +142,17 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
         session.add(customer_project)
         session.commit()
 
+    forbidden_test_mode = jwt_client.post(
+        f"/v1/projects/{customer['default_project_id']}/generation-jobs",
+        headers=headers(customer),
+        json={
+            "title": "A customer must not bypass billing",
+            "aspect_ratios": ["9:16"],
+            "test_mode": True,
+        },
+    )
+    assert forbidden_test_mode.status_code == 403
+
     overview = jwt_client.get("/v1/platform-admin/overview", headers=headers(admin))
     assert overview.status_code == 200
     assert overview.json()["retention"]["day_7"]["definition"] == "Any authenticated activity on or after day 7"

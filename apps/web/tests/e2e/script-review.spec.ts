@@ -1,0 +1,40 @@
+import { expect, test } from '@playwright/test'
+import { creditTestBalance, registerThroughUi } from './helpers'
+
+test('pauses before Veo for character and scene-level script review', async ({ page }) => {
+  const account = await registerThroughUi(page, 'Script Review')
+  await creditTestBalance(page.request, account.email, 10_000)
+  await page.goto('/ideas')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
+  await page.getByTestId('new-idea').click()
+  const title = `Review-first storytelling ${Date.now()}`
+  await page.getByTestId('idea-title').fill(title)
+  await page.getByLabel('Opening hook').fill('Why rebuild the same lesson after every class?')
+  await page.getByLabel('Primary audience').fill('Independent teachers')
+  await page.getByLabel('Default visual style').selectOption('storytelling')
+  await page.getByLabel('Veo 3 native voice').check({ force: true })
+  await page.getByTestId('save-idea').click()
+
+  const card = page.locator('.idea-card').filter({ hasText: title })
+  await card.getByRole('button', { name: 'Configure video' }).click()
+  await page.getByLabel('Target duration').fill('8')
+  await page.getByLabel('Preferred scene count').fill('2')
+  await page.getByLabel(/Allow the director/).uncheck()
+  await expect(page.locator('.production-start-choice label').filter({ hasText: 'Review script first' })).toHaveClass(/active/)
+  await page.getByTestId('start-generation').click()
+  const productionLink = card.getByRole('link', { name: 'Open production' })
+  await expect(productionLink).toBeVisible({ timeout: 15_000 })
+  await productionLink.click()
+
+  await expect(page.getByTestId('start-scenes')).toBeVisible({ timeout: 45_000 })
+  await expect(page.getByText('Script ready for review')).toBeVisible()
+  await page.getByRole('button', { name: 'characters', exact: true }).click()
+  await expect(page.locator('.character-map')).toBeVisible()
+  await page.getByRole('button', { name: 'script', exact: true }).click()
+  await page.locator('.script-beats > button').first().click()
+  await expect(page.getByRole('heading', { name: /director prompt/ })).toBeVisible()
+  await page.locator('.scene-editor textarea').first().fill('I taught this once—why am I rebuilding it tonight?')
+  await page.getByRole('button', { name: 'Save scene' }).click()
+  await expect(page.getByText('Scene updated')).toBeVisible()
+  await expect(page.getByText(/I taught this once/)).toBeVisible()
+})

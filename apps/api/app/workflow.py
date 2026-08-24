@@ -523,6 +523,7 @@ class WorkflowManager:
         default_reference_mime_type: str | None,
         regeneration_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str | None]]:
+        use_live_video = self.settings.uses_live_video and not bool(job.data.get("test_mode"))
         max_automatic_retries = 2 if native_audio else 0
         attempt_number = initial_attempt_number
         voice_preset, locked_voice_profile = native_voice_profile(job.data.get("native_voice_preset"))
@@ -598,7 +599,7 @@ class WorkflowManager:
                     else None
                 )
                 scene_started = time.perf_counter()
-                if self.settings.uses_live_video:
+                if use_live_video:
                     generated = await self.veo.generate_scene(
                         prompt,
                         aspect_ratio=aspect_ratio,
@@ -647,7 +648,7 @@ class WorkflowManager:
                     last_frame_path,
                     content_type="image/jpeg",
                 )
-                if native_audio:
+                if native_audio and not job.data.get("test_mode"):
                     try:
                         speech_qa = await self.speech_qa.analyze(
                             video_uri=persisted["storage_uri"],
@@ -705,7 +706,7 @@ class WorkflowManager:
                         "coverage": None,
                         "issues": [],
                         "provider": "internal",
-                        "demo_data": not self.settings.uses_live_video,
+                        "demo_data": not use_live_video,
                     }
                     voice_reference_uri = None
                     voice_qa = {
@@ -715,7 +716,7 @@ class WorkflowManager:
                         "issues": [],
                         "mode": "not_applicable",
                         "provider": "internal",
-                        "demo_data": not self.settings.uses_live_video,
+                        "demo_data": not use_live_video,
                     }
                 speech_passed = speech_passed and bool(speech_qa.get("passed"))
                 voice_passed = voice_passed and bool(voice_qa.get("passed"))
@@ -742,7 +743,7 @@ class WorkflowManager:
                         speech_qa.get("last_phrase_complete"),
                         speech_qa.get("issues"),
                     )
-                if self.settings.uses_live_video:
+                if use_live_video:
                     await self._emit(
                         session,
                         job,
@@ -777,8 +778,8 @@ class WorkflowManager:
                         "attempt": attempt_number,
                         "automatic_retry": automatic_retry,
                         "aspect_ratio": aspect_ratio,
-                        "model_id": self.settings.veo_model if self.settings.uses_live_video else "deterministic-test-fixture",
-                        "prompt_version": "editorial-director-v6-character-tracks",
+                        "model_id": self.settings.veo_model if use_live_video else "deterministic-test-fixture",
+                        "prompt_version": "editorial-director-v7-pro-quality-gate",
                         "visual_prompt": prompt,
                         "narration": scene.data.get("narration"),
                         "output_uri": str(generated),
@@ -813,13 +814,13 @@ class WorkflowManager:
                         "continuation_track": continuation_track,
                         "veo_seed": veo_seed,
                         "qa_status": "passed" if attempt_passed else "failed",
-                        "demo_data": not self.settings.uses_live_video,
+                        "demo_data": not use_live_video,
                         "audio_mode": "veo_native" if native_audio else "google_tts",
                         "character_id": job.data.get("character_id"),
                         "regeneration_id": regeneration_id,
                         "billable_seconds": (
                             (7 if extension_video_uri else veo_request_duration(float(scene.data.get("duration_target") or 8)))
-                            if self.settings.uses_live_video
+                            if use_live_video
                             else 0
                         ),
                         "cost_usd": None,
@@ -1264,7 +1265,7 @@ class WorkflowManager:
             return
         if (
             storyboard_stage.get("output")
-            and scene_stage.get("status") in {"running", "failed", "completed"}
+            and scene_stage.get("status") in {"pending", "running", "failed", "completed"}
             and job.data.get("current_stage") in {"storyboard", "scene_generation", "voice_audio"}
         ):
             await self._resume_from_scene_generation(session, repo, job)
@@ -1517,6 +1518,7 @@ class WorkflowManager:
                 creative_context={
                     **dict(candidate.data),
                     **(dict(input_resource.data) if input_resource else {}),
+                    "script_revision_feedback": job.data.get("script_revision_feedback") or None,
                 },
                 character_profile=character_profile,
                 scene_count_min=int(job.data.get("scene_count_min", 4)),
@@ -1543,7 +1545,7 @@ class WorkflowManager:
                 {
                     "stage": "editorial_strategy",
                     "provider": "google",
-                    "model": self.settings.gemini_model if self.settings.uses_live_research else "mock-gemini",
+                    "model": self.settings.gemini_editorial_model if self.settings.uses_live_research else "mock-gemini",
                     "latency_ms": round((time.perf_counter() - editorial_started) * 1000),
                     "cost_usd": None,
                 },
@@ -1654,7 +1656,7 @@ class WorkflowManager:
             scene_data = {**scene_data, "storyboard_id": storyboard.id, "attempt": 0, "locked": bool(scene_data.get("locked"))}
             scene_resources.append(
                 repo.add(
-                    resource_id=f"{job.id}_scene_{index + 1}",
+                    resource_id=f"{job.id}_{storyboard.id}_scene_{index + 1}",
                     kind="scene",
                     organization_id=job.organization_id,
                     project_id=job.project_id,
@@ -1663,6 +1665,30 @@ class WorkflowManager:
                 )
             )
         self._set_stage(repo, job, "storyboard", "completed", output={"storyboard_id": storyboard.id, "scene_ids": [item.id for item in scene_resources]})
+
+        if (
+            job.data.get("generation_start_mode") == "review_script"
+            and not job.data.get("script_approved_at")
+        ):
+            repo.update(
+                job,
+                status="awaiting_script_review",
+                data={
+                    "current_stage": "script_review",
+                    "progress": 6 / len(STAGES),
+                    "script_id": script.id,
+                    "storyboard_id": storyboard.id,
+                    "scene_ids": [item.id for item in scene_resources],
+                    "script_review_requested_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            await self._emit(
+                session,
+                job,
+                "script.review_requested",
+                {"script_id": script.id, "storyboard_id": storyboard.id},
+            )
+            return
 
         self._set_stage(repo, job, "scene_generation", "running")
         scene_attempts: list[dict[str, Any]] = []
@@ -2168,6 +2194,7 @@ class WorkflowManager:
         caption_srt_asset_id: str | None,
         research_run_id: str,
     ) -> None:
+        use_live_video = self.settings.uses_live_video and not bool(job.data.get("test_mode"))
         attempt_resources = repo.list(
             organization_id=job.organization_id,
             project_id=job.project_id,
@@ -2180,7 +2207,7 @@ class WorkflowManager:
                 for item in attempt_resources
                 if item.data.get("generation_job_id") == job.id
             )
-            if self.settings.uses_live_video
+            if use_live_video
             else 0
         )
         settlement = settle_feature_charge(
@@ -2300,7 +2327,7 @@ class WorkflowManager:
                     "logo_applied": manifest["logo_applied"],
                     "captions_burned_in": manifest["captions_burned_in"],
                     "overlay_style": manifest["overlay_style"],
-                    "provenance": "generated" if self.settings.uses_live_video else "deterministic_mock",
+                    "provenance": "generated" if use_live_video else "deterministic_mock",
                     "rights_status": "owned",
                 },
             )
@@ -2332,7 +2359,7 @@ class WorkflowManager:
                 and not item.get("demo_data")
                 for item in scene_attempts
             )
-            if self.settings.uses_live_video
+            if use_live_video
             else all(item.get("model_id") == "deterministic-test-fixture" for item in scene_attempts)
         )
         rights_pass = provider_provenance_pass and all(
@@ -2543,7 +2570,7 @@ class WorkflowManager:
                 "research_run_id": research_run_id,
                 "score_report_id": score_report.id,
                 "qa_report_id": qa_report.id,
-                "actual_cost_usd": 0.0 if not self.settings.uses_live_video else job.data.get("actual_cost_usd"),
+                "actual_cost_usd": 0.0 if not use_live_video else job.data.get("actual_cost_usd"),
                 "completed_at": datetime.now(UTC).isoformat(),
             },
         )

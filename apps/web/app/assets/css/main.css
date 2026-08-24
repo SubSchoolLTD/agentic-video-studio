@@ -97,6 +97,9 @@ svg { flex: none; }
 .topbar__search span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .topbar__search kbd { margin-left: auto; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: white; color: #938c97; font-size: 10px; box-shadow: var(--shadow-sm); }
 .topbar__actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.test-mode-toggle { display:flex;align-items:center;gap:7px;padding:7px 9px;border:1px solid var(--border);border-radius:9px;background:white;color:var(--muted);font-size:9px;font-weight:800;cursor:pointer; }
+.test-mode-toggle input { width:13px;height:13px;accent-color:var(--primary-600); }
+.test-mode-toggle.active { border-color:var(--primary-400);background:var(--primary-50);color:var(--primary-700); }
 .avatar-button { display: grid; width: 34px; height: 34px; place-items: center; border: 2px solid white; border-radius: 50%; background: linear-gradient(145deg, #dcb1e5, #76208a); color: white; font-size: 10px; font-weight: 800; box-shadow: 0 0 0 1px var(--border); }
 .avatar-button svg { display: none; }
 .avatar-button:hover span { display: none; }

@@ -251,6 +251,40 @@ class EditorialPolicy(BaseModel):
     high_risk: bool
     unsupported_claims: list[str]
 
+    @field_validator("decision", mode="before")
+    @classmethod
+    def normalize_decision_aliases(cls, value: Any) -> Any:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"pass", "passed", "approve", "approved", "allow", "allowed", "safe", "compliant"}:
+            return "pass"
+        if normalized in {"revise", "revision", "needs_revision", "rewrite", "edit"}:
+            return "revise"
+        if normalized in {"block", "blocked", "reject", "rejected", "deny", "denied", "disallowed"}:
+            return "block"
+        return value
+
+    @field_validator("high_risk", mode="before")
+    @classmethod
+    def normalize_high_risk_shape(cls, value: Any) -> Any:
+        if isinstance(value, (list, dict, tuple, set)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "false", "no", "none", "low", "safe"}:
+                return False
+            if normalized in {"true", "yes", "high", "risky"}:
+                return True
+        return value
+
+    @field_validator("unsupported_claims", mode="before")
+    @classmethod
+    def normalize_unsupported_claims(cls, value: Any) -> Any:
+        if value is None or value is False:
+            return []
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        return value
+
 
 class EditorialCharacter(BaseModel):
     key: str
@@ -1665,7 +1699,11 @@ class EditorialProvider:
                     ],
                     "voiceover": "one JSON string, not an array of scene beats",
                 },
-                "policy": ["decision", "high_risk", "unsupported_claims"],
+                "policy": {
+                    "decision": "exactly one of pass, revise or block",
+                    "high_risk": "JSON boolean, never a list",
+                    "unsupported_claims": "JSON array of strings; use an empty array when none",
+                },
                 "storyboard": {
                     "fields": ["scenes", "visual_mode", "creator_profile", "visual_bible", "character_map"],
                     "scene_fields": list(EditorialScene.model_fields),
@@ -1692,6 +1730,7 @@ class EditorialProvider:
                     "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
                     "Keep voiceover and creator_profile as strings, never arrays or objects. "
                     "Keep character_map as an array and assign every scene a stable continuation_track. "
+                    "Policy decision must be pass, revise or block; high_risk must be a JSON boolean. "
                     "Always include budget_class as a short string such as standard. "
                     f"Validation summary: {(validation_error or '; '.join(quality_errors))[:2400]}"
                 )

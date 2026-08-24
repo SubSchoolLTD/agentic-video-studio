@@ -417,6 +417,11 @@ def editorial_quality_errors(
     spoken = [scene for scene in scenes if str(scene.get("narration") or "").strip()]
     total_words = sum(len(str(scene.get("narration") or "").split()) for scene in spoken)
     incomplete_endings = (" and", " or", " but", " because", " to", " with", " into", " for")
+    dangling_subordinate_clause = re.compile(
+        r"\b(?:if|whether|when|where|how|why|what|who)\b[^.!?]{0,100}"
+        r"\b(?:will|would|can|could|should|may|might|must|do|does|did|is|are|was|were|have|has|had)\b$",
+        re.IGNORECASE,
+    )
     generic_copy_patterns = (
         r"\bhelps? .{0,30} create\b",
         r"\btransform(?:s|ing)? your (?:knowledge|expertise)\b",
@@ -432,6 +437,9 @@ def editorial_quality_errors(
             errors.append(f"{scene.get('id')}: spoken line is too thin ({word_count} words)")
         if narration.lower().rstrip(".!?\"'").endswith(incomplete_endings):
             errors.append(f"{scene.get('id')}: spoken line ends as an incomplete thought")
+        normalized_narration = narration.rstrip(".!?\"' ")
+        if dangling_subordinate_clause.search(normalized_narration):
+            errors.append(f"{scene.get('id')}: spoken line ends on an unresolved subordinate clause")
         if any(re.search(pattern, narration, flags=re.IGNORECASE) for pattern in generic_copy_patterns):
             errors.append(f"{scene.get('id')}: generic promotional copy must be replaced with a concrete mechanism or example")
         for field in ("story_beat", "environment_detail", "blocking", "fragment_intent", "audience_value"):
@@ -485,6 +493,58 @@ def editorial_quality_errors(
             errors.append(
                 "Storytelling is too visually static; use motivated follows, reframes, over-shoulders and action details"
             )
+        for scene in scenes:
+            scene_id = scene.get("id")
+            direction = " ".join(
+                str(scene.get(field) or "")
+                for field in ("action", "camera_direction", "sound_direction", "transition_logic")
+            )
+            if re.search(
+                r"\b(?:fade|dissolve|wipe|whip[- ]?pan|morph|flash|whoosh|swish|riser|sting)\b|"
+                r"\bcut\s+from\b.+\bto\b",
+                direction,
+                re.IGNORECASE,
+            ):
+                errors.append(
+                    f"{scene_id}: contains an internal cut, transition or transition sound; author one continuous shot"
+                )
+            if re.search(
+                r"\b(?:cta|caption|title|text)\b.{0,30}\b(?:appear|display|show|overlay)\w*\b",
+                direction,
+                re.IGNORECASE,
+            ):
+                errors.append(f"{scene_id}: asks generative video to display text or a title")
+
+        payoff_index = next(
+            (
+                index
+                for index, scene in enumerate(scenes)
+                if re.search(
+                    r"\b(?:it worked|proof of (?:market|demand)|testimonials?|validated demand)\b",
+                    str(scene.get("narration") or ""),
+                    re.IGNORECASE,
+                )
+            ),
+            None,
+        )
+        if payoff_index is not None:
+            causal_action = " ".join(
+                " ".join(
+                    str(scene.get(field) or "")
+                    for field in ("action", "blocking", "environment_detail", "props")
+                )
+                for scene in scenes[:payoff_index]
+            )
+            if not re.search(
+                r"\b(?:pilot|test(?:ed|ing)?|teach(?:es|ing|taught)?|invite(?:d|s|ing)?|"
+                r"share(?:d|s|ing)?|publish(?:ed|es|ing)?|student|learner|audience|customer|"
+                r"feedback|response|sign[- ]?up|pre[- ]?order|sale|purchase)\w*\b",
+                causal_action,
+                re.IGNORECASE,
+            ):
+                errors.append(
+                    "Storytelling claims a validation payoff without first showing the test and an observable response"
+                )
         for character in characters:
             if character.get("speaker_kind") == "on_camera":
                 for field in ("appearance", "voice_identity", "personality", "motivation", "speaking_style"):
@@ -1699,8 +1759,11 @@ class EditorialProvider:
                     "Ban generic filler such as 'we help you create', 'transform your knowledge', 'make an impact' or "
                     "'unlock your potential' unless the line immediately names a mechanism or observable example. The "
                     "opening must be a complete hook; setup, escalation, turn, payoff and CTA must be understandable from "
-                    "the dialogue alone. Silently critique the draft for specificity, natural speech and dramatic logic "
-                    "before returning JSON."
+                    "the dialogue alone. End every spoken line as a complete thought: never stop after an auxiliary such "
+                    "as will, would, can or should, and never leave an if/whether clause unresolved. Give every scene a "
+                    "distinct dramatic job; do not restate the same plan in adjacent beats. Never jump from deciding to try "
+                    "something straight to claiming success: visibly dramatize the attempt and an observable response first. "
+                    "Silently critique the draft for specificity, natural speech and causal dramatic logic before returning JSON."
                 ),
                 "scene_prompt_contract": (
                     "Every scene must populate story_beat, environment_detail, blocking, props, sound_direction, "
@@ -1710,7 +1773,9 @@ class EditorialProvider:
                     "observable human situations over interfaces, phones, floating graphics or abstract metaphors. "
                     "Do not focus on a laptop, phone, tablet or computer screen. In storytelling, no more than 60% "
                     "of scenes may use a static or locked camera: motivate follows, reframes, over-shoulders and "
-                    "action details through character movement."
+                    "action details through character movement. Author each generated scene as one continuous shot—never "
+                    "write 'cut from ... to ...' inside a scene—and never ask the video model to make CTA text, captions "
+                    "or titles appear."
                 ),
                 "audio_boundary": (
                     "Plan short direct-to-camera dialogue for native Veo speech; each narration must fit its scene duration"

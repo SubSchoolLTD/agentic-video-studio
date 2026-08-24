@@ -2285,11 +2285,33 @@ class WorkflowManager:
                 output_path,
                 content_type="video/mp4",
             )
-            visual_qa = await self.multimodal_qa.analyze(
-                video_uri=persisted_render["storage_uri"],
-                scenes=scenes,
-                technical=qa,
-            )
+            if job.data.get("test_mode"):
+                # A deterministic fixture deliberately does not resemble the authored scene. Running
+                # Gemini multimodal against it only produces a predictable false failure and spends a
+                # model call on a capability that Test mode explicitly excludes.
+                visual_qa = {
+                    "passed": True,
+                    "issues": [],
+                    "scene_issues": [],
+                    "unverified_scene_issues": [],
+                    "continuity": 1.0,
+                    "provider": "internal",
+                    "model_id": "deterministic-test-fixture",
+                    "skipped": True,
+                    "skip_reason": "Video-dependent multimodal QA is not applicable to a Test mode fixture.",
+                    "gates": {
+                        "content": True,
+                        "brand": True,
+                        "platform": True,
+                        "rights": True,
+                    },
+                }
+            else:
+                visual_qa = await self.multimodal_qa.analyze(
+                    video_uri=persisted_render["storage_uri"],
+                    scenes=scenes,
+                    technical=qa,
+                )
             duplicate_passed = manifest["checksum"] not in existing_checksums
             await self._emit(
                 session,
@@ -2440,7 +2462,7 @@ class WorkflowManager:
             },
             "brand": {
                 "passed": brand_pass,
-                "evaluated_by": "gemini_multimodal" if self.settings.uses_live_video else "deterministic_test_fixture",
+                "evaluated_by": "gemini_multimodal" if use_live_video else "deterministic_test_fixture",
             },
             "platform": {
                 "passed": platform_pass,

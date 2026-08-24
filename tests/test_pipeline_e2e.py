@@ -121,6 +121,11 @@ def test_script_review_edit_and_admin_test_mode_skip_veo(client, auth_headers) -
         for scene in video["scenes"]
         for attempt in scene["attempts"]
     )
+    assert video["qa_report"]["hard_gate_passed"] is True
+    assert video["qa_report"]["visual"]["passed"] is True
+    assert all(output["skipped"] is True for output in video["qa_report"]["visual"]["outputs"])
+    assert video["qa_report"]["brand"]["evaluated_by"] == "deterministic_test_fixture"
+    assert video["score_report"]["blocked_by_hard_gate"] is False
 
 
 def wait_for_scene_regeneration(client, regeneration_id: str, headers: dict[str, str], timeout: float = 35) -> dict:

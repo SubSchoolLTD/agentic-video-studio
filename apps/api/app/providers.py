@@ -155,6 +155,34 @@ def normalize_string_list(value: Any) -> Any:
     return value
 
 
+def canonical_character_track(
+    raw_track: str,
+    *,
+    speaker: str,
+    character_by_key: dict[str, dict[str, Any]],
+) -> str:
+    """Resolve Gemini's harmless ``*_track`` aliases onto the locked cast-bible key."""
+    normalized_track = re.sub(r"[^a-z0-9]+", "_", str(raw_track or "").lower()).strip("_")
+    if normalized_track in character_by_key:
+        return normalized_track
+    speaker_slug = re.sub(r"[^a-z0-9]+", "_", str(speaker or "").lower()).strip("_")
+    aliases = [
+        speaker_slug,
+        normalized_track.removesuffix("_track"),
+        normalized_track.removeprefix("track_"),
+    ]
+    for alias in aliases:
+        if not alias:
+            continue
+        if alias in character_by_key:
+            return alias
+        for key, character in character_by_key.items():
+            name_slug = re.sub(r"[^a-z0-9]+", "_", str(character.get("name") or "").lower()).strip("_")
+            if alias == name_slug:
+                return key
+    return normalized_track
+
+
 class EditorialScene(BaseModel):
     id: str
     position: int
@@ -409,6 +437,26 @@ def editorial_quality_errors(
         for field in ("story_beat", "environment_detail", "blocking", "fragment_intent", "audience_value"):
             if not str(scene.get(field) or "").strip():
                 errors.append(f"{scene.get('id')}: missing {field}")
+        physical_direction = " ".join(
+            str(scene.get(field) or "")
+            for field in (
+                "subject",
+                "setting",
+                "environment_detail",
+                "action",
+                "blocking",
+                "camera_direction",
+                "fragment_intent",
+            )
+        )
+        if re.search(
+            r"\b(?:laptop|computer|phone|tablet)\s+screen\b|\b(?:dashboard|user interface|app interface|UI)\b",
+            physical_direction,
+            flags=re.IGNORECASE,
+        ):
+            errors.append(
+                f"{scene.get('id')}: depends on a generated screen or interface; stage the idea as physical human action"
+            )
     if spoken and total_words < max(24, len(spoken) * 7):
         errors.append("Spoken script is too shallow for the requested duration")
     if not str(script.get("logline") or "").strip():
@@ -429,6 +477,14 @@ def editorial_quality_errors(
             errors.append("Voice-over is overused; reserve it for a motivated narrative beat")
         if native_audio and len(speaking_keys) < 2:
             errors.append("At least two named on-camera characters must speak in native-audio storytelling")
+        static_scenes = sum(
+            bool(re.search(r"\b(?:static|locked[- ]?off|locked framing)\b", str(scene.get("camera_direction") or ""), re.I))
+            for scene in scenes
+        )
+        if scenes and static_scenes > math.floor(len(scenes) * 0.6):
+            errors.append(
+                "Storytelling is too visually static; use motivated follows, reframes, over-shoulders and action details"
+            )
         for character in characters:
             if character.get("speaker_kind") == "on_camera":
                 for field in ("appearance", "voice_identity", "personality", "motivation", "speaking_style"):
@@ -1651,7 +1707,10 @@ class EditorialProvider:
                     "transition_logic, fragment_intent, voice_direction, speaker, speaker_kind, character_key and "
                     "continuation_track with specific production-ready instructions. transition_logic must always say "
                     "film-style hard cut only; it must never propose a visual transition or transition sound. Prefer "
-                    "observable human situations over interfaces, phones, floating graphics or abstract metaphors."
+                    "observable human situations over interfaces, phones, floating graphics or abstract metaphors. "
+                    "Do not focus on a laptop, phone, tablet or computer screen. In storytelling, no more than 60% "
+                    "of scenes may use a static or locked camera: motivate follows, reframes, over-shoulders and "
+                    "action details through character movement."
                 ),
                 "audio_boundary": (
                     "Plan short direct-to-camera dialogue for native Veo speech; each narration must fit its scene duration"
@@ -1824,7 +1883,11 @@ class EditorialProvider:
                 character_by_key[normalized_key] = item
         track_positions: dict[str, int] = {}
         for scene in scenes:
-            track = _continuation_track_key(scene, visual_mode)
+            track = canonical_character_track(
+                _continuation_track_key(scene, visual_mode),
+                speaker=str(scene.get("speaker") or ""),
+                character_by_key=character_by_key,
+            )
             scene["continuation_track"] = track
             scene["character_key"] = track
             scene["speaker_kind"] = str(scene.get("speaker_kind") or "on_camera")

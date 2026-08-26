@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 import respx
 from fastapi import BackgroundTasks
@@ -136,6 +138,53 @@ def test_backlog_limit_counts_only_unresolved_research_candidates() -> None:
     assert run is not None
     assert run.data["backlog_before"] == 0
     assert run.data["backlog_metric"] == "unresolved_candidates"
+
+
+def test_due_profile_respects_total_unresolved_limit_and_owns_the_cadence() -> None:
+    with SessionLocal() as session:
+        repo = ResourceRepository(session)
+        project = repo.add(
+            kind="project",
+            organization_id="org_demo",
+            project_id=None,
+            status="active",
+            data={
+                "name": "Cadenced research fixture",
+                "automation_mode": "research_only",
+                "settings": {"research": {"backlog_target": 3, "max_candidates": 50}},
+            },
+        )
+        project.project_id = project.id
+        session.add(project)
+        session.commit()
+        for index in range(2):
+            repo.add(
+                kind="topic_candidate",
+                organization_id="org_demo",
+                project_id=project.id,
+                status="candidate",
+                data={"title": f"Unresolved {index}"},
+            )
+        repo.add(
+            kind="research_profile",
+            organization_id="org_demo",
+            project_id=project.id,
+            status="active",
+            data={
+                "objective": "Find up to fifty candidates without exceeding the unresolved limit",
+                "interval_hours": 24,
+                "max_candidates": 50,
+                "next_run_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+            },
+        )
+
+        queued = enqueue_due_research_profiles(session, BackgroundTasks(), get_settings())
+        run = repo.get_any(queued[0], kind="research_run")
+        legacy_backlog = enqueue_backlog_replenishment(session, BackgroundTasks(), get_settings())
+
+    assert run is not None
+    assert run.data["max_candidates"] == 1
+    assert legacy_backlog == []
 
 
 def test_project_activation_requires_brief_policy_and_input(client, auth_headers) -> None:

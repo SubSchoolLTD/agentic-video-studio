@@ -20,6 +20,7 @@ from apps.api.app.providers import (
     canonical_character_track,
     continuous_ugc_scene_layout,
     editorial_quality_errors,
+    editorial_repair_prompt,
     vertex_text_locations,
 )
 from apps.api.app.repository import ResourceRepository
@@ -425,6 +426,115 @@ def test_invalid_editorial_payload_failure_is_recovered_once_after_deployment() 
     job_data["editorial_payload_normalization_retry_at"] = "2026-08-23T00:00:00+00:00"
     assert editorial_deployment_repair_field(job_data) == repair_field
     job_data[repair_field] = "2026-08-23T00:00:00+00:00"
+    assert editorial_deployment_repair_field(job_data) is None
+
+
+def test_editorial_quality_retry_repairs_the_previous_package_against_exact_errors() -> None:
+    previous_package = editorial_payload()
+    errors = [
+        "scene_2: depends on a generated screen or interface; stage the idea as physical human action",
+        "scene_7: spoken line ends as an incomplete thought",
+    ]
+
+    prompt = editorial_repair_prompt(
+        {"task": "Create a production package", "candidate_strategy": {"core_message": "Keep the lesson reusable"}},
+        previous_package=previous_package,
+        validation_error="Editorial quality gate: " + "; ".join(errors),
+        quality_errors=errors,
+    )
+
+    assert prompt["repair"]["previous_package"] == previous_package
+    assert prompt["repair"]["acceptance_criteria"] == errors
+    assert "observable physical human action" in prompt["repair"]["targeted_rules"][0]
+    assert "complete natural sentence" in prompt["repair"]["targeted_rules"][1]
+
+
+@pytest.mark.asyncio
+async def test_live_editorial_retry_edits_the_failed_package_instead_of_resampling_blindly(monkeypatch) -> None:
+    broken = editorial_payload()
+    repaired = editorial_payload()
+    for payload in (broken, repaired):
+        payload["production_brief"]["duration_target"] = 15
+        payload["script"].update(
+            {
+                "logline": "A teacher turns a repeated explanation into a lesson learners can revisit.",
+                "synopsis": "A concrete worktable demonstration shows how one explanation becomes reusable.",
+                "dramatic_structure": ["Repeated work", "Physical reorganization", "Reusable result"],
+            }
+        )
+        for index, scene in enumerate(payload["storyboard"]["scenes"]):
+            scene.update(
+                {
+                    "narration": (
+                        "I repeated this explanation every week until the same questions filled my evenings."
+                        if index == 0
+                        else "Now one structured lesson answers those questions before my next live session begins."
+                    ),
+                    "story_beat": "The repeated workload becomes visible." if index == 0 else "The new routine pays off.",
+                    "environment_detail": "A real worktable covered with lesson cards and learner questions.",
+                    "blocking": "The teacher sorts the physical cards into one teachable sequence.",
+                    "fragment_intent": "Make the repeated workload concrete." if index == 0 else "Show the reusable mechanism.",
+                    "audience_value": "A specific way to reduce repeated explanation work.",
+                }
+            )
+    broken["storyboard"]["scenes"][0]["subject"] = "A laptop screen showing the course dashboard"
+    repaired["storyboard"]["scenes"][0]["subject"] = "A teacher sorting handwritten learner questions"
+    responses = [broken, repaired]
+    requests: list[dict] = []
+
+    def generate(*, contents, config):
+        requests.append(json.loads(contents))
+        return SimpleNamespace(text=json.dumps(responses[len(requests) - 1]))
+
+    provider = EditorialProvider(Settings(provider_mode="live", google_cloud_project="test-project"))
+    monkeypatch.setattr(provider, "_generate_editorial_content", generate)
+    packet = ResearchPacket(
+        request_id="research_editorial_repair",
+        objective="Show teachers a reusable lesson workflow",
+        sources=[{"id": "source_1", "title": "Teacher workload evidence"}],
+        claims=[{"id": "claim_1", "status": "supported", "claim": "Repeated explanations consume teacher time"}],
+        raw={},
+    )
+
+    package = await provider.create_package(
+        title="Stop repeating the same explanation",
+        audience="Independent teachers",
+        objective="awareness",
+        brand={"identity": {"name": "SubSchool"}},
+        evidence=packet,
+        duration_seconds=15,
+        visual_mode="ugc_creator",
+        native_audio=True,
+        continue_scenes=False,
+        aspect_ratios=["9:16"],
+        scene_count_min=2,
+        scene_count_max=2,
+        scene_count_flex=0,
+    )
+
+    assert len(requests) == 2
+    assert requests[1]["repair"]["previous_package"]["storyboard"]["scenes"][0]["subject"].startswith(
+        "A laptop screen"
+    )
+    assert any("screen or interface" in error for error in requests[1]["repair"]["acceptance_criteria"])
+    assert package["storyboard"]["scenes"][0]["subject"].startswith("A teacher sorting")
+
+
+def test_failed_editorial_quality_gate_is_recovered_once_after_deployment() -> None:
+    job_data = {
+        "current_stage": "editorial_strategy",
+        "last_error": {
+            "message": (
+                "Editorial provider failed schema or quality review three times: Editorial quality gate: "
+                "scene_2: depends on a generated screen or interface"
+            )
+        },
+    }
+
+    repair_field = editorial_deployment_repair_field(job_data)
+
+    assert repair_field == "editorial_targeted_quality_v1_retry_at"
+    job_data[repair_field] = "2026-08-26T20:30:00+00:00"
     assert editorial_deployment_repair_field(job_data) is None
 
 

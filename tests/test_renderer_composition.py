@@ -192,6 +192,58 @@ def test_composes_native_audio_from_each_generated_scene(tmp_path: Path) -> None
     assert qa["actual"]["audio_codec"] == "aac"
 
 
+def test_normalizes_mixed_scene_sample_aspect_ratios_before_concat(tmp_path: Path) -> None:
+    clips = []
+    # The exact near-square ratio observed in production can be rounded away by some
+    # local encoders. A deliberately non-square second input exercises the same concat
+    # contract: heterogeneous scene SARs must be normalized before concatenation.
+    for index, sample_aspect_ratio in enumerate(("1/1", "2/1"), start=1):
+        path = tmp_path / f"sar_scene_{index}.mp4"
+        run_ffmpeg(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=0x205c8a:s=360x640:r=30:d=1,setsar={sample_aspect_ratio}",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=330:sample_rate=48000:duration=1",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(path),
+            ]
+        )
+        clips.append(path)
+
+    output = tmp_path / "normalized_sar.mp4"
+    manifest = render_motion_video(
+        title="Mixed Veo sample aspect ratios",
+        brand_name="SubSchool",
+        scenes=[
+            {"narration": "First scene.", "duration_target": 1},
+            {"narration": "Second scene.", "duration_target": 1},
+        ],
+        aspect_ratio="9:16",
+        duration_seconds=2,
+        output_path=output,
+        scene_video_paths=clips,
+        use_scene_audio=True,
+    )
+
+    video_stream = next(
+        stream for stream in probe_video(output)["streams"] if stream.get("codec_type") == "video"
+    )
+    assert manifest["generated_clip_sample_aspect_ratio"] == "1:1"
+    assert video_stream["sample_aspect_ratio"] == "1:1"
+    assert technical_qa(output, aspect_ratio="9:16", duration_target=2)["passed"] is True
+
+
 def test_prepares_a_rolling_extension_window_without_requiring_audio(tmp_path: Path) -> None:
     source = tmp_path / "cumulative_veo.mp4"
     run_ffmpeg(

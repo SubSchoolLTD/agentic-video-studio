@@ -573,6 +573,25 @@ def test_structured_editorial_beats_failure_is_recovered_once_after_deployment()
     assert editorial_deployment_repair_field(job_data) is None
 
 
+def test_mixed_sample_aspect_ratio_render_failure_is_recovered_once_after_deployment() -> None:
+    job_data = {
+        "current_stage": "render",
+        "last_error": {
+            "message": (
+                "Input link in0:v0 parameters (size 720x1280, SAR 0:1) do not match "
+                "the corresponding output link in0:v0 parameters (720x1280, SAR 2997:2996). "
+                "Failed to configure output pad on Parsed_concat_63"
+            )
+        },
+    }
+
+    repair_field = generation_deployment_repair_field(job_data)
+
+    assert repair_field == "render_sample_aspect_ratio_v1_retry_at"
+    job_data[repair_field] = "2026-08-27T00:10:00+03:00"
+    assert generation_deployment_repair_field(job_data) is None
+
+
 def test_generation_job_can_only_be_claimed_once_across_workers(client) -> None:
     with SessionLocal() as session:
         job = ResourceRepository(session).add(

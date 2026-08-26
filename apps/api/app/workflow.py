@@ -62,6 +62,7 @@ LEGACY_EDITORIAL_SCHEMA_ERROR = "specified schema produces a constraint that has
 EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
 EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD = "editorial_global_capacity_v1_retry_at"
+EDITORIAL_TARGETED_QUALITY_REPAIR_FIELD = "editorial_targeted_quality_v1_retry_at"
 LEGACY_VEO_EMPTY_RESPONSE_ERROR = "'nonetype' object is not subscriptable"
 VEO_EMPTY_RESPONSE_REPAIR_FIELD = "veo_empty_response_v1_retry_at"
 VEO_HIGH_LOAD_REPAIR_FIELD = "veo_high_load_v1_retry_at"
@@ -124,6 +125,11 @@ def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         and not job_data.get(EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD)
     ):
         return EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD
+    if (
+        "editorial provider failed schema or quality review three times: editorial quality gate" in error_message
+        and not job_data.get(EDITORIAL_TARGETED_QUALITY_REPAIR_FIELD)
+    ):
+        return EDITORIAL_TARGETED_QUALITY_REPAIR_FIELD
     return None
 
 

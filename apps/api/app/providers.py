@@ -917,6 +917,48 @@ def _candidate_mix_errors(candidates: list[TopicCandidateDraft], requested_count
     return errors
 
 
+def editorial_repair_prompt(
+    original_prompt: dict[str, Any],
+    *,
+    previous_package: dict[str, Any] | None,
+    validation_error: str,
+    quality_errors: list[str],
+) -> dict[str, Any]:
+    """Build a stateful repair request instead of sampling the same brief again."""
+    request_prompt = dict(original_prompt)
+    repair_errors = quality_errors or ([validation_error] if validation_error else [])
+    request_prompt["repair"] = {
+        "task": (
+            "Return the complete corrected editorial package, not a patch. Treat every listed validation error as an "
+            "acceptance criterion. Preserve scene ids, order, durations, supported facts, cast identities and all valid "
+            "material from previous_package; rewrite only what is needed to make every acceptance criterion pass."
+        ),
+        "acceptance_criteria": repair_errors,
+        "targeted_rules": [
+            (
+                "For any scene that depends on a screen, dashboard, interface, phone, tablet or computer display, "
+                "remove that dependency from every scene field and replace it with observable physical human action, "
+                "conversation, props and consequences that communicate the same idea without readable generated UI."
+            ),
+            (
+                "For any incomplete or unresolved spoken line, write one complete natural sentence that fits the same "
+                "scene duration and finishes before the cut."
+            ),
+            (
+                "Keep mandatory_points, scene props, caption_candidates, hashtags, dramatic_structure and character_map "
+                "as JSON arrays. Keep voiceover, creator_profile and on_screen_text as strings; on_screen_text must be "
+                "an empty string when unused. Policy decision must be pass, revise or block; high_risk must be a boolean."
+            ),
+            (
+                "Do not reintroduce a defect named in acceptance_criteria anywhere else in the package. Silently run the "
+                "acceptance criteria against the complete result before returning JSON."
+            ),
+        ],
+        "previous_package": previous_package,
+    }
+    return request_prompt
+
+
 def _rebalance_candidate_mix(candidates: list[dict[str, Any]], requested_count: int) -> list[dict[str, Any]]:
     """Keep a content plan diverse even when the provider collapses onto one familiar format."""
     items = [{**item} for item in candidates[:requested_count]]
@@ -1929,33 +1971,31 @@ class EditorialProvider:
             },
         }
         package: dict[str, Any] | None = None
+        previous_package: dict[str, Any] | None = None
         validation_error = ""
         quality_errors: list[str] = []
         for attempt in range(3):
-            request_prompt = dict(prompt)
-            if attempt:
-                request_prompt["repair_instruction"] = (
-                    "The previous package failed schema or editorial quality review. Return a complete rewritten object, "
-                    "not a patch. Preserve supported facts but materially improve weak dialogue, character agency, "
-                    "specificity, physical action and dramatic progression. "
-                    "Keep mandatory_points as an array and use an empty string, never null, for on_screen_text. "
-                    "Keep voiceover and creator_profile as strings, never null, arrays or objects. "
-                    "Keep scene props, caption_candidates, hashtags and dramatic_structure as JSON arrays of strings. "
-                    "Keep character_map as an array and assign every scene a stable continuation_track. "
-                    "Policy decision must be pass, revise or block; high_risk must be a JSON boolean. "
-                    "Always include budget_class as a short string such as standard. "
-                    f"Validation summary: {(validation_error or '; '.join(quality_errors))[:2400]}"
+            request_prompt = (
+                editorial_repair_prompt(
+                    prompt,
+                    previous_package=previous_package,
+                    validation_error=validation_error,
+                    quality_errors=quality_errors,
                 )
+                if attempt
+                else dict(prompt)
+            )
             response = self._generate_editorial_content(
                 contents=json.dumps(request_prompt, ensure_ascii=False),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    temperature=0.35,
+                    temperature=0.2 if attempt else 0.35,
                     system_instruction=EDITORIAL_SYSTEM_INSTRUCTION,
                 ),
             )
             try:
                 candidate_package = EditorialPackage.model_validate_json(response.text or "{}").model_dump()
+                previous_package = candidate_package
                 quality_errors = editorial_quality_errors(
                     candidate_package,
                     visual_mode=visual_mode,

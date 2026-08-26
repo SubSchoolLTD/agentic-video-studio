@@ -7,6 +7,7 @@ interface SessionUser {
   organization_id: string
   default_project_id?: string | null
   is_platform_admin: boolean
+  onboarding_complete: boolean
 }
 
 interface SessionPayload {
@@ -67,6 +68,16 @@ export function useAuth() {
     return payload
   }
 
+  async function loginWithGoogle(credential: string) {
+    const payload = await $fetch<SessionPayload>('/v1/auth/google', {
+      baseURL: config.public.apiBase,
+      method: 'POST',
+      body: { credential },
+    })
+    setSession(payload)
+    return payload
+  }
+
   async function refresh(): Promise<boolean> {
     if (!refreshToken.value) return false
     const rotate = () => $fetch<SessionPayload>('/v1/auth/refresh', {
@@ -109,6 +120,7 @@ export function useAuth() {
         organization_id: payload.organization_id,
         default_project_id: projectId.value,
         is_platform_admin: Boolean(payload.is_platform_admin),
+        onboarding_complete: payload.onboarding_complete !== false,
       }
       return user.value
     }
@@ -131,5 +143,5 @@ export function useAuth() {
     await navigateTo('/login')
   }
 
-  return { accessToken, refreshToken, organizationId, projectId, user, setSession, clearSession, login, refresh, loadMe, logout }
+  return { accessToken, refreshToken, organizationId, projectId, user, setSession, clearSession, login, loginWithGoogle, refresh, loadMe, logout }
 }

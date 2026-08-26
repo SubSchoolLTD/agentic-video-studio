@@ -19,8 +19,8 @@ const objectiveFilter = ref('')
 const selectedIdea = ref<any>(null)
 const draggingId = ref('')
 const dragTarget = ref('')
-const form = reactive({ title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', audio_mode: 'google_tts', native_voice_preset: 'warm_conversational', character_id: '' })
-const generation = reactive({ visual_mode: 'ugc_creator', audio_mode: 'google_tts', continue_scenes: true, native_voice_preset: 'warm_conversational', character_id: '', aspect_ratios: ['9:16'] as string[], target_duration_seconds: 30, approval_mode: 'final_only', variants: 1, burn_in_captions: false, generation_start_mode: 'review_script', max_cost_usd: 30 })
+const form = reactive({ title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', audio_mode: 'veo_native', native_voice_preset: 'warm_conversational', character_id: '' })
+const generation = reactive({ visual_mode: 'ugc_creator', audio_mode: 'veo_native', continue_scenes: true, native_voice_preset: 'warm_conversational', character_id: '', aspect_ratios: ['9:16'] as string[], target_duration_seconds: 30, approval_mode: 'final_only', variants: 1, burn_in_captions: false, generation_start_mode: 'review_script', max_cost_usd: 30 })
 const sceneRange = ref('4-6')
 const allowSceneFlex = ref(true)
 const videoTypes = [
@@ -41,9 +41,8 @@ const nativeVoicePresets = [
 ]
 
 watch(() => route.query.create, value => { if (value === '1') ideaModalOpen.value = true })
-watch(() => generation.visual_mode, value => { generation.continue_scenes = value === 'ugc_creator' })
-
 const { data, refresh } = await useAsyncData('ideas-list', () => api<any>(`/v1/projects/${projectId.value}/ideas`), { default: () => ({ items: [] }) })
+const { data: projectData } = await useAsyncData('idea-project-defaults', () => api<any>(`/v1/projects/${projectId.value}`), { default: () => ({ settings: {} }) })
 const { data: characterData } = await useAsyncData('idea-characters', () => api<any>(`/v1/projects/${projectId.value}/characters`), { default: () => ({ items: [] }) })
 const { data: billingSummary, refresh: refreshBilling } = await useAsyncData('ideas-billing-summary', () => api<any>('/v1/billing/summary'), { default: () => ({ balance_cents: 0, balance_usd: 0, prices: [] }) })
 const ideas = computed(() => data.value.items || [])
@@ -133,6 +132,15 @@ const generationRequiredCents = computed(() => testMode.value ? 0 : generationUn
 const generationAvailableCents = computed(() => Number(billingSummary.value?.balance_cents || 0))
 const hasGenerationBalance = computed(() => generationRequiredCents.value <= generationAvailableCents.value)
 const money = (cents: number) => `$${(Number(cents || 0) / 100).toFixed(2)}`
+function defaultsFor(mode: string) {
+  return projectData.value?.settings?.video_defaults?.[mode] || { audio_mode: 'veo_native', native_voice_preset: 'warm_conversational', continue_scenes: mode === 'ugc_creator' }
+}
+watch(() => generation.visual_mode, value => {
+  const defaults = defaultsFor(value)
+  generation.audio_mode = defaults.audio_mode || 'veo_native'
+  generation.native_voice_preset = defaults.native_voice_preset || 'warm_conversational'
+  generation.continue_scenes = Boolean(defaults.continue_scenes)
+})
 
 let poller: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
@@ -149,7 +157,7 @@ async function saveIdea() {
     await api(`/v1/projects/${projectId.value}/ideas`, { method: 'POST', body: form })
     show('Idea added', 'Move it across the board or configure a production when it is ready.', 'success')
     ideaModalOpen.value = false
-    Object.assign(form, { title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', audio_mode: 'google_tts', native_voice_preset: 'warm_conversational', character_id: '' })
+    Object.assign(form, { title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', audio_mode: 'veo_native', native_voice_preset: 'warm_conversational', character_id: '' })
     await router.replace({ query: {} })
     await refresh()
   }
@@ -159,11 +167,13 @@ async function saveIdea() {
 
 async function openGeneration(idea: any) {
   selectedIdea.value = idea
+  const visualMode = idea.visual_mode || 'ugc_creator'
+  const defaults = defaultsFor(visualMode)
   Object.assign(generation, {
-    visual_mode: idea.visual_mode || 'ugc_creator',
-    audio_mode: idea.audio_mode || 'google_tts',
-    continue_scenes: (idea.visual_mode || 'ugc_creator') === 'ugc_creator',
-    native_voice_preset: idea.native_voice_preset || 'warm_conversational',
+    visual_mode: visualMode,
+    audio_mode: idea.audio_mode || defaults.audio_mode || 'veo_native',
+    continue_scenes: defaults.continue_scenes ?? visualMode === 'ugc_creator',
+    native_voice_preset: idea.native_voice_preset || defaults.native_voice_preset || 'warm_conversational',
     character_id: idea.character_id || '',
     aspect_ratios: ['9:16'],
     target_duration_seconds: Number(idea.target_duration_seconds || 30),

@@ -1522,43 +1522,81 @@ class WorkflowManager:
         else:
             self._set_stage(repo, job, "editorial_strategy", "running")
             editorial_started = time.perf_counter()
-            package = await self.editorial.create_package(
-                title=title,
-                audience=audience,
-                objective=objective,
-                brand=brand,
-                evidence=packet,
-                duration_seconds=int(job.data.get("target_duration_seconds", 30)),
-                visual_mode=visual_mode,
-                native_audio=native_audio,
-                continue_scenes=continue_scenes,
-                native_voice_profile=locked_voice_profile,
-                aspect_ratios=aspect_ratios,
-                requested_hook=requested_hook,
-                content_format=content_format,
-                creative_context={
-                    **dict(candidate.data),
-                    **(dict(input_resource.data) if input_resource else {}),
-                    "script_revision_feedback": job.data.get("script_revision_feedback") or None,
-                },
-                character_profile=character_profile,
-                scene_count_min=int(job.data.get("scene_count_min", 4)),
-                scene_count_max=int(job.data.get("scene_count_max", 6)),
-                scene_count_flex=int(job.data.get("scene_count_flex", 2)),
-            )
-            package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
-            await self.editorial.fit_dialogue(
-                package_scenes,
-                native_audio=native_audio,
-                native_voice_profile=locked_voice_profile,
-            )
-            if package.get("storyboard") is not None:
-                package["storyboard"]["scenes"] = package_scenes
-            if package.get("script") is not None:
-                package["script"]["beats"] = package_scenes
-                package["script"]["voiceover"] = " ".join(
-                    str(scene.get("narration") or "").strip() for scene in package_scenes
+            review_history: list[dict[str, Any]] = []
+            revision_feedback = str(job.data.get("script_revision_feedback") or "").strip()
+            assessment: dict[str, Any] = {"approved": False, "issues": ["Review did not run"]}
+            package = {}
+            package_scenes = []
+            for quality_attempt in range(1, 4):
+                package = await self.editorial.create_package(
+                    title=title,
+                    audience=audience,
+                    objective=objective,
+                    brand=brand,
+                    evidence=packet,
+                    duration_seconds=int(job.data.get("target_duration_seconds", 30)),
+                    visual_mode=visual_mode,
+                    native_audio=native_audio,
+                    continue_scenes=continue_scenes,
+                    native_voice_profile=locked_voice_profile,
+                    aspect_ratios=aspect_ratios,
+                    requested_hook=requested_hook,
+                    content_format=content_format,
+                    creative_context={
+                        **dict(candidate.data),
+                        **(dict(input_resource.data) if input_resource else {}),
+                        "script_revision_feedback": revision_feedback or None,
+                        "whole_script_review_attempt": quality_attempt,
+                    },
+                    character_profile=character_profile,
+                    scene_count_min=int(job.data.get("scene_count_min", 4)),
+                    scene_count_max=int(job.data.get("scene_count_max", 6)),
+                    scene_count_flex=int(job.data.get("scene_count_flex", 2)),
+                )
+                package_scenes = list((package.get("storyboard") or {}).get("scenes") or [])
+                await self.editorial.fit_dialogue(
+                    package_scenes,
+                    native_audio=native_audio,
+                    native_voice_profile=locked_voice_profile,
+                )
+                if package.get("storyboard") is not None:
+                    package["storyboard"]["scenes"] = package_scenes
+                if package.get("script") is not None:
+                    package["script"]["beats"] = package_scenes
+                    package["script"]["voiceover"] = " ".join(
+                        str(scene.get("narration") or "").strip() for scene in package_scenes
+                    ).strip()
+                assessment = await self.editorial.review_package(
+                    package,
+                    brand=brand,
+                    title=title,
+                    audience=audience,
+                    objective=objective,
+                )
+                review_history.append({"attempt": quality_attempt, **assessment})
+                if assessment.get("approved"):
+                    break
+                revision_feedback = str(
+                    assessment.get("regeneration_feedback")
+                    or "; ".join(str(item) for item in assessment.get("issues") or [])
                 ).strip()
+            package["script_quality_review"] = {
+                "approved": bool(assessment.get("approved")),
+                "attempts": review_history,
+                "final_feedback": revision_feedback or None,
+                "reviewed_with": self.settings.gemini_editorial_model if self.settings.uses_live_research else "mock-gemini",
+            }
+            if not assessment.get("approved"):
+                # Never spend on Veo after three rejected scripts. The authored package remains
+                # available in the existing review UI and can use the same comment retry flow.
+                repo.update(
+                    job,
+                    data={
+                        "generation_start_mode": "review_script",
+                        "script_quality_review_required": True,
+                        "script_revision_feedback": revision_feedback,
+                    },
+                )
             await self._emit(
                 session,
                 job,
@@ -1584,6 +1622,7 @@ class WorkflowManager:
                     "visual_bible": (package.get("storyboard") or {}).get("visual_bible", []),
                     "prompt_version": (package.get("provider_trace") or {}).get("prompt_version"),
                     "scene_count": len(package_scenes),
+                    "script_quality_review": package.get("script_quality_review"),
                     "requested_scene_range": {
                         "min": int(job.data.get("scene_count_min", 4)),
                         "max": int(job.data.get("scene_count_max", 6)),

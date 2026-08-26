@@ -27,7 +27,10 @@ class ProjectCreate(BaseModel):
 
 class ProjectPatch(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=120)
-    automation_mode: Literal["manual", "assisted", "auto_safe", "draft_only"] | None = None
+    automation_mode: Literal[
+        "off", "research_only", "scripts", "videos", "publish",
+        "manual", "assisted", "auto_safe", "draft_only",
+    ] | None = None
     timezone: str | None = None
     settings: dict[str, Any] | None = None
     brief: dict[str, Any] | None = None
@@ -42,6 +45,7 @@ class BrandProfilePatch(BaseModel):
     visual: dict[str, Any] | None = None
     cta: dict[str, Any] | None = None
     compliance: dict[str, Any] | None = None
+    project_context: dict[str, Any] | None = None
     confirmed: bool = True
 
 
@@ -101,7 +105,7 @@ class ResearchRunCreate(BaseModel):
     objective: str = Field(min_length=8, max_length=2_000)
     source_item_id: str | None = None
     recency_days: int = Field(default=30, ge=1, le=3650)
-    max_candidates: int = Field(default=5, ge=1, le=20)
+    max_candidates: int = Field(default=5, ge=1, le=50)
 
 
 class ResearchProfileCreate(BaseModel):
@@ -110,7 +114,7 @@ class ResearchProfileCreate(BaseModel):
     interval_hours: int = Field(default=24, ge=1, le=24 * 30)
     timezone: str = "UTC"
     recency_days: int = Field(default=30, ge=1, le=3650)
-    max_candidates: int = Field(default=5, ge=1, le=20)
+    max_candidates: int = Field(default=50, ge=1, le=50)
     next_run_at: datetime | None = None
 
 
@@ -120,7 +124,7 @@ class ResearchProfilePatch(BaseModel):
     interval_hours: int | None = Field(default=None, ge=1, le=24 * 30)
     timezone: str | None = None
     recency_days: int | None = Field(default=None, ge=1, le=3650)
-    max_candidates: int | None = Field(default=None, ge=1, le=20)
+    max_candidates: int | None = Field(default=None, ge=1, le=50)
     status: Literal["active", "paused"] | None = None
 
 
@@ -192,6 +196,36 @@ class GenerationCreate(BaseModel):
         if self.scene_count_min > self.scene_count_max:
             raise ValueError("scene_count_min cannot be greater than scene_count_max")
         return self
+
+
+class OnboardingWebsite(BaseModel):
+    website_url: HttpUrl
+
+
+class OnboardingPreferences(BaseModel):
+    selling_percent: int = Field(default=20, ge=0, le=100)
+    viral_percent: int = Field(default=30, ge=0, le=100)
+    informative_percent: int = Field(default=50, ge=0, le=100)
+    videos_per_week: int = Field(default=3, ge=1, le=100)
+    average_duration_seconds: int = Field(default=30, ge=8, le=3_600)
+    audio_quality: Literal["standard", "premium"] = "premium"
+    automation_mode: Literal["off", "research_only", "scripts", "videos", "publish"] = "research_only"
+
+    @model_validator(mode="after")
+    def percentages_total_one_hundred(self) -> OnboardingPreferences:
+        if self.selling_percent + self.viral_percent + self.informative_percent != 100:
+            raise ValueError("Content mix percentages must total 100")
+        return self
+
+
+class OnboardingContextPatch(BaseModel):
+    product_essence: str = Field(min_length=3, max_length=5_000)
+    target_audience: str = Field(min_length=3, max_length=5_000)
+    problem_statement: str = Field(min_length=3, max_length=5_000)
+    solution_summary: str = Field(min_length=3, max_length=5_000)
+    product_keywords: list[str] = Field(default_factory=list, max_length=100)
+    problem_keywords: list[str] = Field(default_factory=list, max_length=100)
+    audience_interest_keywords: list[str] = Field(default_factory=list, max_length=100)
 
 
 class CharacterGenerate(BaseModel):

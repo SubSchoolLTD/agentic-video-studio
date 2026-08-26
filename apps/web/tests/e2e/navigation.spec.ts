@@ -3,7 +3,7 @@ import { registerThroughApi, registerThroughUi } from './helpers'
 
 const pages = [
   ['/app', 'Good morning, Navigation'],
-  ['/sources', 'Sources'],
+  ['/sources', 'Context'],
   ['/research', 'Research radar'],
   ['/ideas', 'Ideas'],
   ['/characters', 'Characters'],
@@ -111,10 +111,7 @@ test('registration reports a transactional email failure honestly', async ({ pag
   await page.getByLabel('Your name').fill('Delivery Test')
   await page.getByLabel('Work email').fill('delivery-test@example.com')
   await page.getByLabel('Password').fill('correct horse battery staple')
-  await page.getByLabel('Organization').fill('Delivery Test Organization')
-  await page.getByLabel('Project name').fill('Delivery Test Project')
-  await page.getByLabel('Project website').fill('https://example.com')
-  await page.getByRole('button', { name: 'Create private workspace' }).click()
+  await page.getByRole('button', { name: 'Create account' }).click()
   await expect(page.getByRole('heading', { name: 'Workspace created' })).toBeVisible()
   await expect(page.getByText('the confirmation email could not be sent')).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Check your email' })).toHaveCount(0)

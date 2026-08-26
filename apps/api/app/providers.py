@@ -650,6 +650,18 @@ class DialogueFitSet(BaseModel):
     scenes: list[DialogueFitItem] = Field(min_length=1, max_length=20)
 
 
+class ScriptQualityAssessment(BaseModel):
+    approved: bool
+    score: int = Field(ge=0, le=100)
+    valuable: bool
+    interesting: bool
+    commercially_effective: bool
+    logically_coherent: bool
+    product_accurate: bool
+    issues: list[str] = Field(default_factory=list)
+    regeneration_feedback: str = ""
+
+
 def speech_word_budget(duration_seconds: float, *, safety_seconds: float = 0.65) -> int:
     """Conservative conversational budget that leaves a natural pause before the cut."""
     usable = max(1.0, float(duration_seconds) - safety_seconds)
@@ -903,6 +915,13 @@ class BrandAnalysis(BaseModel):
     high_risk_topics: list[str]
     mandatory_disclosures: list[str]
     trusted_domains: list[str]
+    product_essence: str = ""
+    target_audience_summary: str = ""
+    problem_statement: str = ""
+    solution_summary: str = ""
+    product_keywords: list[str] = Field(default_factory=list)
+    problem_keywords: list[str] = Field(default_factory=list)
+    audience_interest_keywords: list[str] = Field(default_factory=list)
 
 
 class TopicCandidateDraft(BaseModel):
@@ -934,7 +953,7 @@ class TopicCandidateDraft(BaseModel):
 
 
 class TopicCandidateSet(BaseModel):
-    candidates: list[TopicCandidateDraft] = Field(min_length=1, max_length=20)
+    candidates: list[TopicCandidateDraft] = Field(min_length=1, max_length=50)
 
 
 def _candidate_mix_errors(candidates: list[TopicCandidateDraft], requested_count: int) -> list[str]:
@@ -1290,6 +1309,13 @@ class BrandProfileProvider:
                     high_risk_topics=[],
                     mandatory_disclosures=["Synthetic media where required"],
                     trusted_domains=[],
+                    product_essence=f"{project_name} helps its audience act on the supplied project brief.",
+                    target_audience_summary=str(audience or "General audience"),
+                    problem_statement="The audience needs a clearer and more practical next step.",
+                    solution_summary=f"{project_name} provides the project-specific solution.",
+                    product_keywords=[project_name],
+                    problem_keywords=[],
+                    audience_interest_keywords=[],
                 ),
                 evidence=evidence,
             )
@@ -1330,6 +1356,8 @@ class BrandProfileProvider:
                 "Do not invent products, customers, performance numbers, brand colors, fonts, or legal claims.",
                 "Put uncertain performance/outcome claims in source_required_claims.",
                 "Leave lists empty when the evidence does not support them.",
+                "Extract a plain-language product essence, target audience, audience problem and concrete solution.",
+                "Return separate keyword lists for the product, the problem and the audience's adjacent interests.",
             ],
         }
         response = client.models.generate_content(
@@ -1415,6 +1443,15 @@ class BrandProfileProvider:
                 "blocked_domains": [],
                 "max_source_age_days": 90,
             },
+            "project_context": {
+                "product_essence": analysis.product_essence or analysis.description,
+                "target_audience": analysis.target_audience_summary or ", ".join(analysis.primary_audiences),
+                "problem_statement": analysis.problem_statement,
+                "solution_summary": analysis.solution_summary or "; ".join(analysis.value_propositions),
+                "product_keywords": analysis.product_keywords,
+                "problem_keywords": analysis.problem_keywords,
+                "audience_interest_keywords": analysis.audience_interest_keywords,
+            },
             "confirmed": False,
             "confidence": min(0.9, 0.35 + len(evidence.sources) * 0.08),
             "source_ids": [source["id"] for source in evidence.sources],
@@ -1434,7 +1471,7 @@ class TopicCandidateProvider:
         max_candidates: int,
         preference_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        count = min(max(1, max_candidates), 20)
+        count = min(max(1, max_candidates), 50)
         if not self.settings.uses_live_research:
             brand_name = brand.get("identity", {}).get("name", "Project")
             audience = (brand.get("audiences", {}).get("primary") or ["General audience"])[0]
@@ -1444,11 +1481,11 @@ class TopicCandidateProvider:
             return _rebalance_candidate_mix([
                 {
                     "title": f"{brand_name}: {objective[:72]}",
-                    "angle": f"A **{formats[index].replace('_', ' ')}** angle grounded in the attached evidence.",
+                    "angle": f"A **{formats[index % len(formats)].replace('_', ' ')}** angle grounded in the attached evidence.",
                     "audience": audience,
                     "why_now": "The attached sources make this angle relevant to the current research objective.",
                     "objective": "awareness",
-                    "format": formats[index],
+                    "format": formats[index % len(formats)],
                     "source_ids": [source["id"] for source in evidence.sources[:3]],
                     "candidate_type": candidate_types[index % len(candidate_types)],
                     "target_audience_insight": f"{audience} needs a concrete reason to care before committing time.",
@@ -1498,6 +1535,9 @@ class TopicCandidateProvider:
             "brand": brand,
             "evidence": {"sources": evidence.sources, "claims": evidence.claims},
             "project_feedback": preference_context,
+            "requested_content_mix_percent": (brand.get("project_context") or {}).get("content_mix")
+            or (brand.get("settings") or {}).get("content_mix")
+            or {"selling": 20, "viral": 30, "informative": 50},
             "available_video_formats": {
                 "ugc_creator": "One recurring creator performs a dynamic continuous mini-documentary in a coherent real location.",
                 "storytelling": "A fully authored sketch with named roles, exact dialogue, blocking, conflict, turn and payoff.",
@@ -1519,6 +1559,7 @@ class TopicCandidateProvider:
                 "Treat selected patterns as positive preference signals, not facts.",
                 "Avoid repeating hidden patterns; propose meaningfully different themes or angles.",
                 "Choose exactly one candidate_type. When three or more candidates are requested, cover problem_solution, educational_value and entertaining_viral before repeating a type.",
+                "Across the full batch approximate the requested content mix: selling maps to problem_solution, viral maps to entertaining_viral, and informative maps to educational_value.",
                 "For every candidate choose exactly one recommended_visual_mode from available_video_formats.",
                 "Also return suitable_visual_modes ranked from best to acceptable.",
                 "When four or more candidates are requested, cover all four available video formats once; shape the ideas so each assigned format is genuinely filmable and appropriate.",
@@ -1740,6 +1781,92 @@ class EditorialProvider:
                 "adjusted_before_generation": scene in needs_rewrite,
             }
         return scenes
+
+    async def review_package(
+        self,
+        package: dict[str, Any],
+        *,
+        brand: dict[str, Any],
+        title: str,
+        audience: str,
+        objective: str,
+    ) -> dict[str, Any]:
+        """Run a separate whole-script critic after timing has finalized every line."""
+        if not self.settings.uses_live_research:
+            return ScriptQualityAssessment(
+                approved=True,
+                score=92,
+                valuable=True,
+                interesting=True,
+                commercially_effective=True,
+                logically_coherent=True,
+                product_accurate=True,
+            ).model_dump()
+        return await asyncio.to_thread(
+            self._review_package_with_gemini,
+            package,
+            brand,
+            title,
+            audience,
+            objective,
+        )
+
+    def _review_package_with_gemini(
+        self,
+        package: dict[str, Any],
+        brand: dict[str, Any],
+        title: str,
+        audience: str,
+        objective: str,
+    ) -> dict[str, Any]:
+        from google.genai import types
+
+        prompt = {
+            "task": (
+                "Review the complete production script after dialogue timing. Decide whether the finished video is "
+                "genuinely useful or entertaining for the audience, logically coherent, product-accurate, and "
+                "commercially effective without inventing claims. Return actionable regeneration feedback when not approved."
+            ),
+            "project_context": {
+                "identity": brand.get("identity"),
+                "project_context": brand.get("project_context"),
+                "audiences": brand.get("audiences"),
+                "value_propositions": brand.get("value_propositions"),
+                "claims": brand.get("claims"),
+                "cta": brand.get("cta"),
+            },
+            "intent": {"title": title, "audience": audience, "objective": objective},
+            "complete_script": {
+                "production_brief": package.get("production_brief"),
+                "script": package.get("script"),
+                "character_map": (package.get("storyboard") or {}).get("character_map"),
+                "scenes": (package.get("storyboard") or {}).get("scenes"),
+            },
+            "approval_rules": [
+                "Reject vague filler, repeated thoughts, incomplete causal logic and weak or delayed hooks.",
+                "Reject any statement about the product that is unsupported by the supplied project context.",
+                "Approve only when the dialogue and visible actions together deliver a clear payoff for this audience.",
+                "Regeneration feedback must identify exact scenes and concrete changes; do not ask for generic improvement.",
+            ],
+        }
+        response = google_genai_client(self.settings).models.generate_content(
+            model=self.settings.gemini_editorial_model,
+            contents=json.dumps(prompt, ensure_ascii=False),
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ScriptQualityAssessment,
+                temperature=0.15,
+                system_instruction="You are a strict independent script editor and product-accuracy reviewer. Output JSON only.",
+            ),
+        )
+        assessment = (
+            response.parsed
+            if isinstance(response.parsed, ScriptQualityAssessment)
+            else ScriptQualityAssessment.model_validate_json(response.text or "{}")
+        )
+        if not assessment.approved and not assessment.regeneration_feedback.strip():
+            assessment.regeneration_feedback = "; ".join(assessment.issues) or "Rewrite the weak scenes with a clearer audience payoff."
+        return assessment.model_dump()
 
     def _fit_dialogue_with_gemini(
         self,

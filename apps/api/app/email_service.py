@@ -141,30 +141,29 @@ def send_account_email(
         action = "Reset password"
         intro = "Use this one-time link to choose a new password."
     safe_name = html.escape(user.display_name)
-    body = (
-        f"<h2>{html.escape(subject)}</h2><p>Hello {safe_name},</p><p>{html.escape(intro)}</p>"
-        f"<p><a href=\"{html.escape(link, quote=True)}\">{html.escape(action)}</a></p>"
-        "<p>If you did not request this, you can ignore the message.</p>"
-    )
+    safe_link = html.escape(link, quote=True)
+    body = f"""<!doctype html>
+<html><body style="margin:0;background:#f6f3f7;font-family:Inter,Arial,sans-serif;color:#17131f">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f3f7;padding:36px 16px"><tr><td align="center">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#fff;border:1px solid #e8e1eb;border-radius:20px;overflow:hidden">
+<tr><td style="padding:24px 30px;background:#21172b;color:#fff"><div style="font-size:23px;font-weight:800">Framewise</div><div style="margin-top:5px;color:#dcb9e6;font-size:13px">Agentic video studio</div></td></tr>
+<tr><td style="padding:34px 30px"><h1 style="margin:0 0 18px;font-size:27px;line-height:1.2">{html.escape(subject)}</h1>
+<p style="font-size:16px;line-height:1.6">Hello {safe_name},</p><p style="font-size:16px;line-height:1.6">{html.escape(intro)}</p>
+<p style="margin:28px 0"><a href="{safe_link}" style="display:inline-block;padding:14px 22px;border-radius:12px;background:#982eb3;color:#fff;text-decoration:none;font-weight:700">{html.escape(action)}</a></p>
+<p style="font-size:13px;line-height:1.6;color:#716979">This secure link expires soon. If the button does not work, copy this address:<br><a href="{safe_link}" style="color:#84269c;word-break:break-all">{safe_link}</a></p>
+<p style="margin-top:28px;font-size:13px;color:#716979">If you did not request this email, you can safely ignore it.</p></td></tr>
+<tr><td style="padding:18px 30px;background:#faf8fb;color:#837989;font-size:12px">Framewise · studio.subschool.us</td></tr>
+</table></td></tr></table></body></html>"""
     base_payload = {
         "subject": subject,
         "from": {"name": settings.email_from_name, "email": settings.email_from_email},
         "to": [{"email": user.email, "name": user.display_name}],
     }
-    template_ref: dict[str, object] | None = None
-    if settings.sendpulse_template_id:
-        template_ref = {"id": int(settings.sendpulse_template_id) if settings.sendpulse_template_id.isdigit() else settings.sendpulse_template_id}
-    elif settings.sendpulse_template_name:
-        template_ref = {"name": settings.sendpulse_template_name}
     email_payload = {
         **base_payload,
         "html": base64.b64encode(body.encode()).decode(),
         "text": f"{intro}\n\n{link}",
     }
-    if template_ref:
-        email_payload["template"] = {**template_ref, "variables": {"content": f"{intro}\n\n{link}"}}
-        email_payload.pop("html", None)
-        email_payload.pop("text", None)
     try:
         response = httpx.post(
             "https://api.sendpulse.com/smtp/emails",

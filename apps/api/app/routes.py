@@ -1806,6 +1806,32 @@ def enqueue_due_research_profiles(
         project = repo.get_any(profile.project_id or "", kind="project")
         if not project or project.status != "active" or project.data.get("autopilot_paused"):
             continue
+        interval_hours = int(profile.data.get("interval_hours", 24))
+        requested_candidates = min(50, max(1, int(profile.data.get("max_candidates", 5))))
+        backlog_target = int(
+            ((project.data.get("settings") or {}).get("research") or {}).get("backlog_target", 0)
+        )
+        if backlog_target > 0:
+            candidates = repo.list(
+                organization_id=project.organization_id,
+                project_id=project.id,
+                kind="topic_candidate",
+                limit=max(200, backlog_target + requested_candidates),
+            )
+            unresolved_count = sum(
+                item.status == "candidate" and not item.data.get("idea_id") for item in candidates
+            )
+            requested_candidates = min(requested_candidates, max(0, backlog_target - unresolved_count))
+            if requested_candidates <= 0:
+                repo.update(
+                    profile,
+                    data={
+                        "next_run_at": (current + timedelta(hours=interval_hours)).isoformat(),
+                        "last_skipped_at": current.isoformat(),
+                        "last_skip_reason": "unresolved_candidate_limit_reached",
+                    },
+                )
+                continue
         run = repo.add(
             kind="research_run",
             organization_id=profile.organization_id,
@@ -1814,14 +1840,13 @@ def enqueue_due_research_profiles(
             data={
                 "objective": profile.data["objective"],
                 "recency_days": int(profile.data.get("recency_days", 30)),
-                "max_candidates": int(profile.data.get("max_candidates", 5)),
+                "max_candidates": requested_candidates,
                 "trigger_type": "scheduled",
                 "research_profile_id": profile.id,
                 "timezone": profile.data.get("timezone", project.data.get("timezone", "UTC")),
                 "provider": "parallel",
             },
         )
-        interval_hours = int(profile.data.get("interval_hours", 24))
         repo.update(
             profile,
             data={
@@ -1935,6 +1960,17 @@ def enqueue_backlog_replenishment(
     for project in projects:
         if project.data.get("autopilot_paused") or project.data.get("automation_mode") == "off":
             continue
+        # New projects use a cadence profile as the sole scheduler. The legacy
+        # backlog worker remains only for older projects that do not have one.
+        active_profile = session.scalar(
+            select(Resource.id).where(
+                Resource.kind == "research_profile",
+                Resource.project_id == project.id,
+                Resource.status == "active",
+            )
+        )
+        if active_profile:
+            continue
         target = int(((project.data.get("settings") or {}).get("research") or {}).get("backlog_target", 0))
         if target <= 0:
             continue
@@ -1957,7 +1993,11 @@ def enqueue_backlog_replenishment(
         )
         if existing:
             continue
-        gap = min(3, target - unresolved_count)
+        per_run_limit = min(
+            50,
+            max(1, int(((project.data.get("settings") or {}).get("research") or {}).get("max_candidates", 50))),
+        )
+        gap = min(per_run_limit, target - unresolved_count)
         run = repo.add(
             kind="research_run",
             organization_id=project.organization_id,

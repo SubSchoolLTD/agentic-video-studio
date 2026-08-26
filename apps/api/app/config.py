@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     email_from_email: str = "maksim@subschool.us"
     sendpulse_id: str = ""
     sendpulse_secret: str = ""
-    sendpulse_template_id: str = "266399"
-    sendpulse_template_name: str = "subschool_main"
+    sendpulse_template_id: str = ""
+    sendpulse_template_name: str = ""
     bootstrap_admin_email: str = ""
     bootstrap_admin_name: str = "Maksim Mamchur"
     seed_demo_data: bool = False
@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     google_runtime_service_account: str = ""
     google_pubsub_topic: str = ""
     google_api_key: str = ""
+    google_oauth_client_id: str = ""
     gemini_model: str = "gemini-2.5-flash"
     gemini_editorial_model: str = "gemini-2.5-pro"
     google_image_model: str = "gemini-2.5-flash-image"

@@ -38,6 +38,54 @@ def wait_for_job_status(client, job_id: str, headers: dict[str, str], status: st
     raise AssertionError(f"Job {job_id} did not reach {status} before timeout")
 
 
+def test_whole_script_review_regenerates_up_to_approval(client, auth_headers, monkeypatch) -> None:
+    calls: list[int] = []
+
+    async def review_package(*_args, **_kwargs):
+        calls.append(len(calls) + 1)
+        approved = len(calls) == 3
+        return {
+            "approved": approved,
+            "score": 91 if approved else 55,
+            "valuable": approved,
+            "interesting": approved,
+            "commercially_effective": approved,
+            "logically_coherent": approved,
+            "product_accurate": True,
+            "issues": [] if approved else [f"Scene {len(calls)} needs a more concrete payoff"],
+            "regeneration_feedback": "Replace the generic payoff with one observable audience outcome.",
+        }
+
+    monkeypatch.setattr(client.app.state.workflow.editorial, "review_package", review_package)
+    created = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={
+            "title": "A concrete lesson workflow",
+            "visual_mode": "storytelling",
+            "audio_mode": "veo_native",
+            "aspect_ratios": ["9:16"],
+            "target_duration_seconds": 8,
+            "scene_count_min": 2,
+            "scene_count_max": 2,
+            "scene_count_flex": 0,
+            "generation_start_mode": "review_script",
+            "test_mode": True,
+            "max_cost_usd": 10,
+        },
+        headers={**auth_headers, "Idempotency-Key": "whole-script-quality-review-three-attempts"},
+    )
+    assert created.status_code == 202, created.text
+    review = wait_for_job_status(client, created.json()["generation_job_id"], auth_headers, "awaiting_script_review")
+    package = next(
+        item["output"]["package"]
+        for item in review["stages"]
+        if item["name"] == "editorial_strategy"
+    )
+    assert calls == [1, 2, 3]
+    assert package["script_quality_review"]["approved"] is True
+    assert len(package["script_quality_review"]["attempts"]) == 3
+
+
 def test_script_review_edit_and_admin_test_mode_skip_veo(client, auth_headers) -> None:
     created = client.post(
         "/v1/projects/prj_subschool/generation-jobs",
@@ -76,6 +124,8 @@ def test_script_review_edit_and_admin_test_mode_skip_veo(client, auth_headers) -
         for item in review["stages"]
         if item["name"] == "editorial_strategy"
     )
+    assert package["script_quality_review"]["approved"] is True
+    assert package["script_quality_review"]["attempts"][0]["score"] >= 90
     first = package["storyboard"]["scenes"][0]
     scene_id = review["scene_ids"][0]
     edited = client.patch(

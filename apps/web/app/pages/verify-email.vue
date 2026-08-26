@@ -17,7 +17,7 @@ onMounted(async () => {
     auth.setSession(payload)
     state.value = 'success'
     message.value = 'Email confirmed. Your private workspace is ready.'
-    setTimeout(() => void navigateTo('/app'), 900)
+    setTimeout(() => void navigateTo(payload.user?.onboarding_complete === false ? '/onboarding' : '/app'), 900)
   }
   catch (reason: any) {
     state.value = 'error'

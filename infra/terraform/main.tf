@@ -74,8 +74,7 @@ locals {
     EMAIL_DELIVERY_MODE            = "sendpulse"
     EMAIL_FROM_NAME                = "Framewise"
     EMAIL_FROM_EMAIL               = "maksim@subschool.us"
-    SENDPULSE_TEMPLATE_ID          = "266399"
-    SENDPULSE_TEMPLATE_NAME        = "subschool_main"
+    GOOGLE_OAUTH_CLIENT_ID         = var.google_oauth_client_id
     BOOTSTRAP_ADMIN_EMAIL          = "maksim@subschool.us"
     BOOTSTRAP_ADMIN_NAME           = "Maksim Mamchur"
     SEED_DEMO_DATA                 = "false"
@@ -691,6 +690,10 @@ resource "google_cloud_run_v2_service" "web" {
       env {
         name  = "NUXT_PUBLIC_GRAFANA_URL"
         value = google_cloud_run_v2_service.grafana[0].uri
+      }
+      env {
+        name  = "NUXT_PUBLIC_GOOGLE_CLIENT_ID"
+        value = var.google_oauth_client_id
       }
     }
   }

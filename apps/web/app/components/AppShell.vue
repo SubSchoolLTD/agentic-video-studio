@@ -36,7 +36,7 @@ onMounted(() => { hydrated.value = true })
 
 const baseNav: any[] = [
   { label: 'Overview', to: '/app', icon: Gauge },
-  { label: 'Sources', to: '/sources', icon: FileStack },
+  { label: 'Context', to: '/sources', icon: FileStack },
   { label: 'Research', to: '/research', icon: RadioTower },
   { label: 'Ideas', to: '/ideas', icon: Sparkles },
   { label: 'Characters', to: '/characters', icon: UserRound },

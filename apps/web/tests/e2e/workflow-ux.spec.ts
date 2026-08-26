@@ -137,7 +137,7 @@ test('ideas move between kanban columns and settings require explicit edit mode'
 
   await page.getByTestId('settings-tab-automation').click()
   await page.getByRole('button', { name: 'Edit automation settings' }).click()
-  await page.getByLabel('Run idea research automatically').check()
+  await page.getByLabel('Automation mode').selectOption('research_only')
   await page.getByLabel('Research interval, hours').fill('48')
   await page.getByTestId('save-settings').click()
   await expect(page.getByText('Every 48 hours', { exact: true })).toBeVisible()

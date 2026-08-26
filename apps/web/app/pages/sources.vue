@@ -5,13 +5,15 @@ const { api, projectId } = useApi()
 const { show } = useToast()
 const modalOpen = ref(false)
 const contentModalOpen = ref(false)
+const contextModalOpen = ref(false)
 const saving = ref(false)
 const form = reactive({ type: 'rss', name: '', url: '' })
 const contentForm = reactive({ source_type: 'text', title: '', canonical_url: '', content_markdown: '', run_research: true })
+const contextForm = reactive({ product_essence: '', target_audience: '', problem_statement: '', solution_summary: '', product_keywords: '', problem_keywords: '', audience_interest_keywords: '' })
 const { data, refresh } = await useAsyncData('sources', async () => {
-  const [sources, items] = await Promise.all([api<any>(`/v1/projects/${projectId.value}/sources`), api<any>(`/v1/projects/${projectId.value}/source-items`)])
-  return { sources: sources.items, items: items.items }
-}, { default: () => ({ sources: [], items: [] }) })
+  const [sources, items, onboarding] = await Promise.all([api<any>(`/v1/projects/${projectId.value}/sources`), api<any>(`/v1/projects/${projectId.value}/source-items`), api<any>(`/v1/projects/${projectId.value}/onboarding`)])
+  return { sources: sources.items, items: items.items, onboarding }
+}, { default: () => ({ sources: [], items: [], onboarding: null as any }) })
 const iconFor = (type: string) => ({ website: Globe2, rss: Rss, api: Braces, text: FileText } as any)[type] || FileText
 const checkedLabel = (value?: string) => value ? new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value)) : 'Not yet'
 
@@ -40,15 +42,46 @@ async function saveContent() {
   catch (error: any) { show('Could not add content', error.message, 'error') }
   finally { saving.value = false }
 }
+
+function openSource(source: any) {
+  if (source.type !== 'website') return
+  const value = data.value.onboarding?.project_context || {}
+  Object.assign(contextForm, {
+    product_essence: value.product_essence || '', target_audience: value.target_audience || '',
+    problem_statement: value.problem_statement || '', solution_summary: value.solution_summary || '',
+    product_keywords: (value.product_keywords || []).join('\n'), problem_keywords: (value.problem_keywords || []).join('\n'),
+    audience_interest_keywords: (value.audience_interest_keywords || []).join('\n'),
+  })
+  contextModalOpen.value = true
+}
+
+async function saveContext() {
+  saving.value = true
+  try {
+    const lines = (value: string) => value.split('\n').map(item => item.trim()).filter(Boolean)
+    await api(`/v1/projects/${projectId.value}/onboarding/context`, { method: 'PATCH', body: {
+      product_essence: contextForm.product_essence, target_audience: contextForm.target_audience,
+      problem_statement: contextForm.problem_statement, solution_summary: contextForm.solution_summary,
+      product_keywords: lines(contextForm.product_keywords), problem_keywords: lines(contextForm.problem_keywords),
+      audience_interest_keywords: lines(contextForm.audience_interest_keywords),
+    } })
+    contextModalOpen.value = false
+    await refresh()
+    show('Project context saved', 'Future research and script reviews will use the updated context.', 'success')
+  }
+  catch (error: any) { show('Could not save project context', error.message, 'error') }
+  finally { saving.value = false }
+}
 </script>
 
 <template>
   <div>
-    <UiPageHeader eyebrow="Owned inputs" title="Sources" description="Websites, RSS, API and pasted material become one normalized, rights-aware source model."><button class="button" @click="contentModalOpen = true"><Upload :size="15" /> Add content</button><button class="button button--primary" @click="modalOpen = true"><Plus :size="15" /> Connect source</button></UiPageHeader>
-    <div class="source-grid"><UiAppCard v-for="source in data.sources" :key="source.id" interactive class="source-card"><div class="source-card__head"><span><component :is="iconFor(source.type)" :size="19" /></span><UiStatusBadge :status="source.status" /></div><h3>{{ source.name }}</h3><p>{{ source.url || `${source.type} intake` }}</p><dl><div><dt>Trust</dt><dd>{{ source.trust_level || 'review' }}</dd></div><div><dt>Policy</dt><dd>{{ source.generation_policy?.replaceAll('_',' ') }}</dd></div><div><dt>Last checked</dt><dd>{{ checkedLabel(source.last_checked) }}</dd></div></dl></UiAppCard><button class="source-add" @click="modalOpen = true"><Plus :size="22" /><strong>Connect another source</strong><span>RSS, website, API or text</span></button></div>
+    <UiPageHeader eyebrow="Owned inputs" title="Context" description="Your website context, RSS, API and pasted material become one normalized, rights-aware source model."><button class="button" @click="contentModalOpen = true"><Upload :size="15" /> Add content</button><button class="button button--primary" @click="modalOpen = true"><Plus :size="15" /> Connect source</button></UiPageHeader>
+    <div class="source-grid"><UiAppCard v-for="source in data.sources" :key="source.id" interactive class="source-card" role="button" :tabindex="source.type === 'website' ? 0 : -1" @click="openSource(source)" @keydown.enter="openSource(source)"><div class="source-card__head"><span><component :is="iconFor(source.type)" :size="19" /></span><UiStatusBadge :status="source.status" /></div><h3>{{ source.name }}</h3><p>{{ source.url || `${source.type} intake` }}</p><dl><div><dt>Trust</dt><dd>{{ source.trust_level || 'review' }}</dd></div><div><dt>Policy</dt><dd>{{ source.generation_policy?.replaceAll('_',' ') }}</dd></div><div><dt>Last checked</dt><dd>{{ checkedLabel(source.last_checked) }}</dd></div></dl></UiAppCard><button class="source-add" @click="modalOpen = true"><Plus :size="22" /><strong>Connect another source</strong><span>RSS, website, API or text</span></button></div>
     <UiAppCard class="items-card"><div class="section-heading"><div><h2>Recent source items</h2><p>Canonical URLs, hashes and provenance are preserved.</p></div><span class="rights-pill"><ShieldCheck :size="13" /> Rights required</span></div><div v-if="data.items.length" class="table-wrap"><table class="data-table"><thead><tr><th>Material</th><th>Type</th><th>Language</th><th>Dedupe</th><th>Status</th></tr></thead><tbody><tr v-for="item in data.items" :key="item.id"><td><div class="table-title"><strong>{{ item.title }}</strong><span>{{ item.canonical_url || item.external_id || item.content_hash?.slice(0,16) }}</span></div></td><td>{{ item.source_type }}</td><td>{{ item.language }}</td><td>{{ item.duplicate_status }}</td><td><UiStatusBadge :status="item.status" /></td></tr></tbody></table></div><div v-else class="empty-state"><div><span class="empty-state__icon"><FileText :size="23" /></span><h3>No source items received</h3><p>Send an article through REST, connect an RSS feed, or paste owned content.</p></div></div></UiAppCard>
     <div v-if="modalOpen" class="modal-backdrop" @click.self="modalOpen = false"><form class="modal" @submit.prevent="saveSource"><div class="modal__header"><div><h2>Connect content source</h2><p>Polling and automation policies remain independent.</p></div><button type="button" class="icon-button icon-button--plain" @click="modalOpen = false"><X :size="18" /></button></div><div class="modal__body"><div class="form-grid"><div class="field"><label>Source type</label><select v-model="form.type"><option value="rss">RSS / Atom</option><option value="website">Website</option><option value="api">REST API</option><option value="manual">Manual intake</option></select></div><div class="field"><label>Name</label><input v-model="form.name" required placeholder="Company blog" /></div><div v-if="!['api','manual'].includes(form.type)" class="field field--full"><label>Public URL</label><input v-model="form.url" type="url" required placeholder="https://example.com/rss.xml" /></div></div><label class="checkbox-row"><input type="checkbox" checked /> I own this content or have permission to use it in generated media.</label></div><div class="modal__footer"><button type="button" class="button" @click="modalOpen = false">Cancel</button><button class="button button--primary" :disabled="saving">{{ saving ? 'Connecting…' : 'Connect source' }}</button></div></form></div>
     <div v-if="contentModalOpen" class="modal-backdrop" @click.self="contentModalOpen = false"><form class="modal" @submit.prevent="saveContent"><div class="modal__header"><div><h2>Add owned content</h2><p>Paste Markdown or provide a public article URL for safe extraction.</p></div><button type="button" class="icon-button icon-button--plain" @click="contentModalOpen = false"><X :size="18" /></button></div><div class="modal__body"><div class="form-grid"><div class="field"><label>Input type</label><select v-model="contentForm.source_type"><option value="text">Text / Markdown</option><option value="url">Public article URL</option></select></div><div class="field"><label>Title</label><input v-model="contentForm.title" required minlength="3" /></div><div v-if="contentForm.source_type === 'url'" class="field field--full"><label>Article URL</label><input v-model="contentForm.canonical_url" type="url" required /></div><div v-else class="field field--full"><label>Content</label><textarea v-model="contentForm.content_markdown" required /></div></div><label class="checkbox-row"><input v-model="contentForm.run_research" type="checkbox" /> Run Parallel research around this material</label><label class="checkbox-row"><input type="checkbox" checked disabled /> Rights confirmed for this owned material</label></div><div class="modal__footer"><button type="button" class="button" @click="contentModalOpen = false">Cancel</button><button class="button button--primary" :disabled="saving">{{ saving ? 'Adding…' : 'Add content' }}</button></div></form></div>
+    <div v-if="contextModalOpen" class="modal-backdrop" @click.self="contextModalOpen = false"><form class="modal modal--wide" @submit.prevent="saveContext"><div class="modal__header"><div><h2>Website project context</h2><p>Edit the AI analysis used by research, candidate selection and script review.</p></div><button type="button" class="icon-button icon-button--plain" @click="contextModalOpen = false"><X :size="18" /></button></div><div class="modal__body"><div class="form-grid"><div class="field field--full"><label>Product essence</label><textarea v-model="contextForm.product_essence" required /></div><div class="field"><label>Target audience</label><textarea v-model="contextForm.target_audience" required /></div><div class="field"><label>Audience problem</label><textarea v-model="contextForm.problem_statement" required /></div><div class="field field--full"><label>How the product solves it</label><textarea v-model="contextForm.solution_summary" required /></div><div class="field"><label>Product keywords · one per line</label><textarea v-model="contextForm.product_keywords" /></div><div class="field"><label>Problem keywords · one per line</label><textarea v-model="contextForm.problem_keywords" /></div><div class="field field--full"><label>Audience interest keywords · one per line</label><textarea v-model="contextForm.audience_interest_keywords" /></div></div></div><div class="modal__footer"><button type="button" class="button" @click="contextModalOpen = false">Cancel</button><button class="button button--primary" :disabled="saving">{{ saving ? 'Saving…' : 'Save context' }}</button></div></form></div>
   </div>
 </template>
 

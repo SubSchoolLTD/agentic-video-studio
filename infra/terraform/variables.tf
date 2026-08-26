@@ -57,6 +57,12 @@ variable "web_base_url" {
   default     = "https://example.invalid"
 }
 
+variable "google_oauth_client_id" {
+  description = "Public Google Identity Services OAuth web client ID"
+  type        = string
+  default     = ""
+}
+
 variable "additional_web_origins" {
   description = "Additional public web origins allowed by CORS, such as a custom domain."
   type        = list(string)

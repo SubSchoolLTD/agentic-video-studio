@@ -83,6 +83,9 @@ from .schemas import (
     GenerationCreate,
     IdeaCreate,
     IdeaPatch,
+    OnboardingContextPatch,
+    OnboardingPreferences,
+    OnboardingWebsite,
     OrganizationCreate,
     ProductionScenePatch,
     ProductionScriptRegenerate,
@@ -279,7 +282,14 @@ def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
 
 
 @router.get("/me", tags=["auth"])
-def me(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
+def me(
+    principal: Principal = Depends(get_principal), session: Session = Depends(get_db)
+) -> dict[str, Any]:
+    onboarding = session.scalar(
+        select(Resource)
+        .where(Resource.kind == "onboarding", Resource.project_id == principal.project_id)
+        .order_by(Resource.created_at.desc())
+    )
     return {
         "actor_id": principal.actor_id,
         "organization_id": principal.organization_id,
@@ -289,6 +299,7 @@ def me(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
         "email": principal.email,
         "display_name": principal.display_name,
         "is_platform_admin": principal.is_platform_admin,
+        "onboarding_complete": onboarding is None or onboarding.status == "completed",
     }
 
 
@@ -642,6 +653,201 @@ def get_analysis(
     return ResourceRepository.serialize(
         require_resource(ResourceRepository(session), analysis_id, principal, kind="project_analysis")
     )
+
+
+def _onboarding_resource(session: Session, project_id: str, organization_id: str) -> Resource:
+    onboarding = session.scalar(
+        select(Resource)
+        .where(
+            Resource.kind == "onboarding",
+            Resource.project_id == project_id,
+            Resource.organization_id == organization_id,
+        )
+        .order_by(Resource.created_at.desc())
+    )
+    if not onboarding:
+        onboarding = Resource(
+            id=ResourceRepository.new_id("onb"),
+            organization_id=organization_id,
+            project_id=project_id,
+            kind="onboarding",
+            status="pending",
+            data={"step": "website", "created_at": datetime.now(UTC).isoformat()},
+        )
+        session.add(onboarding)
+        session.commit()
+    return onboarding
+
+
+@router.get("/projects/{project_id}/onboarding", tags=["onboarding"])
+def get_onboarding(
+    project_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    project = require_project(ResourceRepository(session), project_id, principal)
+    onboarding = _onboarding_resource(session, project_id, principal.organization_id)
+    brand = session.scalar(
+        select(Resource)
+        .where(Resource.kind == "brand_profile", Resource.project_id == project_id)
+        .order_by(Resource.version.desc())
+    )
+    analysis = session.scalar(
+        select(Resource)
+        .where(Resource.kind == "project_analysis", Resource.project_id == project_id)
+        .order_by(Resource.created_at.desc())
+    )
+    return {
+        "status": onboarding.status,
+        "step": onboarding.data.get("step", "website"),
+        "website_url": project.data.get("website_url", ""),
+        "preferences": onboarding.data.get("preferences", {}),
+        "project_context": (brand.data.get("project_context", {}) if brand else {}),
+        "analysis": ResourceRepository.serialize(analysis) if analysis else None,
+    }
+
+
+@router.post("/projects/{project_id}/onboarding/website", status_code=202, tags=["onboarding"])
+def onboarding_website(
+    project_id: str,
+    payload: OnboardingWebsite,
+    background: BackgroundTasks,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("projects:write")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    website_url = str(payload.website_url)
+    try:
+        validate_public_url(website_url, resolve_dns=False)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    repo.update(project, data={"website_url": website_url})
+    source = session.scalar(
+        select(Resource).where(Resource.kind == "source", Resource.project_id == project_id, Resource.data["type"].as_string() == "website")
+    )
+    if source:
+        repo.update(source, status="healthy", data={"url": website_url, "name": f"{project.data.get('name', 'Project')} website"})
+    else:
+        repo.add(
+            kind="source", organization_id=principal.organization_id, project_id=project_id, status="healthy",
+            data={"type": "website", "name": f"{project.data.get('name', 'Project')} website", "url": website_url, "trust_level": "owned", "generation_policy": "research_then_approval"},
+        )
+    analysis = repo.add(
+        kind="project_analysis", organization_id=principal.organization_id, project_id=project_id, status="queued",
+        data={"website_url": website_url, "providers": ["parallel", "google"], "billing": "included_with_onboarding"},
+    )
+    onboarding = _onboarding_resource(session, project_id, principal.organization_id)
+    repo.update(onboarding, data={"step": "preferences", "analysis_id": analysis.id})
+    background.add_task(
+        _analyze_project_task,
+        project_id=project_id,
+        analysis_id=analysis.id,
+        organization_id=principal.organization_id,
+        settings=settings,
+    )
+    return {"status": "analysis_started", "analysis_id": analysis.id}
+
+
+@router.patch("/projects/{project_id}/onboarding/preferences", tags=["onboarding"])
+def onboarding_preferences(
+    project_id: str,
+    payload: OnboardingPreferences,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("projects:write")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    preferences = payload.model_dump()
+    content_mix = {
+        "selling": payload.selling_percent,
+        "viral": payload.viral_percent,
+        "informative": payload.informative_percent,
+    }
+    settings_data = dict(project.data.get("settings") or {})
+    settings_data.update({
+        "content_mix": content_mix,
+        "research": {**dict(settings_data.get("research") or {}), "backlog_target": 150, "max_candidates": 50},
+        "production": {
+            **dict(settings_data.get("production") or {}),
+            "videos_per_week": payload.videos_per_week,
+            "average_duration_seconds": payload.average_duration_seconds,
+            "audio_quality": payload.audio_quality,
+        },
+    })
+    repo.update(project, data={"automation_mode": payload.automation_mode, "settings": settings_data})
+    profile = session.scalar(
+        select(Resource).where(Resource.kind == "research_profile", Resource.project_id == project_id).order_by(Resource.created_at.asc())
+    )
+    profile_data = {
+        "name": "Automatic idea discovery",
+        "objective": "Find fresh, evidence-backed short-form topics for this project and its primary audience.",
+        "interval_hours": 24,
+        "timezone": project.data.get("timezone", "UTC"),
+        "recency_days": 30,
+        "max_candidates": 50,
+        "next_run_at": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+    }
+    profile_status = "paused" if payload.automation_mode == "off" else "active"
+    if profile:
+        repo.update(profile, status=profile_status, data=profile_data)
+    else:
+        repo.add(kind="research_profile", organization_id=principal.organization_id, project_id=project_id, status=profile_status, data=profile_data)
+    onboarding = _onboarding_resource(session, project_id, principal.organization_id)
+    repo.update(onboarding, data={"step": "connections", "preferences": preferences})
+    feature = "video.generate_native_audio" if payload.audio_quality == "premium" else "video.generate"
+    billable = estimate_veo_billable_seconds(
+        target_duration_seconds=payload.average_duration_seconds,
+        scene_count_min=max(2, round(payload.average_duration_seconds / 8)),
+        scene_count_max=max(2, round(payload.average_duration_seconds / 6)),
+        scene_count_flex=2,
+        continuous_scenes=False,
+    )
+    quote = quote_feature(session, feature, billable * payload.videos_per_week)
+    return {"status": "saved", "estimated_weekly_cost_usd": round(float(quote["charge_usd"]), 2)}
+
+
+@router.patch("/projects/{project_id}/onboarding/context", tags=["onboarding"])
+def onboarding_context(
+    project_id: str,
+    payload: OnboardingContextPatch,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    principal.require("projects:write")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    existing = session.scalar(
+        select(Resource).where(Resource.kind == "brand_profile", Resource.project_id == project_id).order_by(Resource.version.desc())
+    )
+    data = {**(existing.data if existing else {}), "project_context": payload.model_dump()}
+    version = (existing.version + 1) if existing else 1
+    brand = repo.add(kind="brand_profile", organization_id=principal.organization_id, project_id=project_id, status="confirmed", version=version, data=data)
+    repo.update(project, data={"brand_profile_version": version})
+    onboarding = _onboarding_resource(session, project_id, principal.organization_id)
+    repo.update(onboarding, data={"step": "review"})
+    return {"status": "saved", "brand_profile_id": brand.id}
+
+
+@router.post("/projects/{project_id}/onboarding/complete", tags=["onboarding"])
+def complete_onboarding(
+    project_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    project = require_project(ResourceRepository(session), project_id, principal)
+    if not str(project.data.get("website_url") or "").strip():
+        raise HTTPException(409, "Website analysis is required before onboarding can be completed")
+    onboarding = _onboarding_resource(session, project_id, principal.organization_id)
+    ResourceRepository(session).update(
+        onboarding,
+        status="completed",
+        data={"step": "complete", "completed_at": datetime.now(UTC).isoformat()},
+    )
+    return {"status": "completed"}
 
 
 @router.get("/projects/{project_id}/characters", tags=["characters"])
@@ -1727,7 +1933,7 @@ def enqueue_backlog_replenishment(
         session.scalars(select(Resource).where(Resource.kind == "project", Resource.status == "active"))
     )
     for project in projects:
-        if project.data.get("autopilot_paused"):
+        if project.data.get("autopilot_paused") or project.data.get("automation_mode") == "off":
             continue
         target = int(((project.data.get("settings") or {}).get("research") or {}).get("backlog_target", 0))
         if target <= 0:
@@ -2036,6 +2242,136 @@ def _record_research_feedback(
     )
 
 
+def _enqueue_automatic_candidate_productions(
+    session: Session,
+    repo: ResourceRepository,
+    run: Resource,
+    candidate_ids: list[str],
+) -> list[str]:
+    project = repo.get_any(str(run.project_id), kind="project")
+    if not project:
+        return []
+    mode = str(project.data.get("automation_mode") or "off")
+    if mode not in {"scripts", "videos", "publish"} or not candidate_ids:
+        return []
+    settings_data = dict(project.data.get("settings") or {})
+    weekly_target = max(1, int((settings_data.get("production") or {}).get("videos_per_week", 3)))
+    selection_count = min(weekly_target, max(1, len(candidate_ids) // 3))
+    candidates = [repo.get_any(candidate_id, kind="topic_candidate") for candidate_id in candidate_ids]
+    selected = sorted(
+        (candidate for candidate in candidates if candidate),
+        key=lambda item: float(item.data.get("topic_opportunity_score") or 0),
+        reverse=True,
+    )[:selection_count]
+    job_ids: list[str] = []
+    for candidate in selected:
+        visual_mode = str(candidate.data.get("recommended_visual_mode") or "ugc_creator")
+        defaults = dict((settings_data.get("video_defaults") or {}).get(visual_mode) or {})
+        audio_mode = str(defaults.get("audio_mode") or "veo_native")
+        continue_scenes = bool(defaults.get("continue_scenes", visual_mode == "ugc_creator"))
+        target_duration = int(
+            candidate.data.get("recommended_duration_seconds")
+            or (settings_data.get("production") or {}).get("average_duration_seconds")
+            or 30
+        )
+        scene_min = int(candidate.data.get("recommended_scene_count_min") or 4)
+        scene_max = max(scene_min, int(candidate.data.get("recommended_scene_count_max") or 6))
+        idea = repo.add(
+            kind="idea",
+            organization_id=run.organization_id,
+            project_id=run.project_id,
+            status="planned",
+            data={
+                "title": candidate.data.get("title"),
+                "hook": candidate.data.get("angle"),
+                "audience": candidate.data.get("audience"),
+                "objective": candidate.data.get("objective", "awareness"),
+                "format": candidate.data.get("format", "problem_solution"),
+                "visual_mode": visual_mode,
+                "audio_mode": audio_mode,
+                "native_voice_preset": defaults.get("native_voice_preset", "warm_conversational"),
+                "topic_candidate_id": candidate.id,
+                "research_run_id": run.id,
+                "automatic": True,
+            },
+        )
+        repo.update(candidate, status="selected", data={"idea_id": idea.id, "selected_by": "automation"})
+        pricing_feature = "video.generate_native_audio" if audio_mode == "veo_native" else "video.generate"
+        billable_seconds = estimate_veo_billable_seconds(
+            target_duration_seconds=target_duration,
+            scene_count_min=scene_min,
+            scene_count_max=scene_max,
+            scene_count_flex=2,
+            continuous_scenes=continue_scenes,
+        )
+        quote = quote_feature(session, pricing_feature, billable_seconds)
+        job_id = ResourceRepository.new_id("gener")
+        job = repo.add(
+            resource_id=job_id,
+            kind="generation_job",
+            organization_id=run.organization_id,
+            project_id=run.project_id,
+            status="queued",
+            data={
+                "idea_id": idea.id,
+                "title": candidate.data.get("title"),
+                "aspect_ratios": ["9:16"],
+                "target_duration_seconds": target_duration,
+                "scene_count_min": scene_min,
+                "scene_count_max": scene_max,
+                "scene_count_flex": 2,
+                "visual_mode": visual_mode,
+                "audio_mode": audio_mode,
+                "continue_scenes": continue_scenes,
+                "native_voice_preset": defaults.get("native_voice_preset", "warm_conversational"),
+                "approval_mode": "final_only",
+                "generation_start_mode": "review_script" if mode == "scripts" else "immediate",
+                "automatic": True,
+                "automatic_publish": mode == "publish",
+                "created_by_id": "automation_scheduler",
+                "stages": initial_stage_state(),
+                "current_stage": "queued",
+                "progress": 0,
+                "max_cost_usd": float(quote["charge_usd"]),
+                "estimated_cost": {
+                    "currency": "USD",
+                    "min": float(quote["charge_usd"]),
+                    "max": float(quote["charge_usd"]),
+                    "basis": pricing_feature,
+                    "provider_cost_usd": float(quote["provider_cost_usd"]),
+                },
+                "actual_cost_usd": None,
+            },
+        )
+        if mode != "scripts":
+            try:
+                charge_feature(
+                    session,
+                    organization_id=run.organization_id,
+                    user_id="automation_scheduler",
+                    feature_key=pricing_feature,
+                    quantity=billable_seconds,
+                    reference_id=job.id,
+                )
+            except HTTPException as exc:
+                repo.update(
+                    job,
+                    status="budget_blocked",
+                    data={"current_stage": "cost_guard", "last_error": str(exc.detail)},
+                )
+                continue
+        repo.update(idea, data={"generation_job_id": job.id, "production_requested_at": datetime.now(UTC).isoformat()})
+        job_ids.append(job.id)
+    if job_ids:
+        # Research executes as a FastAPI background task on the application instance
+        # that owns the durable workflow manager. Schedule only after every row is committed.
+        from .main import app
+
+        for job_id in job_ids:
+            app.state.workflow.schedule(job_id)
+    return job_ids
+
+
 async def _run_research_task(run_id: str, settings: Settings) -> None:
     with SessionLocal() as session:
         repo = ResourceRepository(session)
@@ -2076,7 +2412,16 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                 )
                 .order_by(Resource.version.desc())
             )
-            brand = brand_resource.data if brand_resource else {}
+            brand = dict(brand_resource.data) if brand_resource else {}
+            project_resource = repo.get_any(str(run.project_id), kind="project")
+            project_context = dict(brand.get("project_context") or {})
+            if project_resource:
+                project_context["content_mix"] = dict(
+                    (project_resource.data.get("settings") or {}).get("content_mix")
+                    or {"selling": 20, "viral": 30, "informative": 50}
+                )
+                project_context["website_url"] = project_resource.data.get("website_url")
+            brand["project_context"] = project_context
             drafts = await TopicCandidateProvider(settings).propose(
                 objective=run.data["objective"],
                 brand=brand,
@@ -2171,6 +2516,9 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                     "completed_at": datetime.now(UTC).isoformat(),
                 },
             )
+            automatic_job_ids = _enqueue_automatic_candidate_productions(session, repo, run, candidate_ids)
+            if automatic_job_ids:
+                repo.update(run, data={"automatic_generation_job_ids": automatic_job_ids})
             await EventSink(settings).emit(
                 session,
                 organization_id=run.organization_id,
@@ -2715,20 +3063,42 @@ async def create_generation(
         effective_visual_mode = "ugc_creator"
     if effective_visual_mode == "product_demo":
         effective_visual_mode = "storytelling"
+    project_settings = dict(project.data.get("settings") or {})
+    video_defaults = dict(project_settings.get("video_defaults") or {})
+    mode_defaults = dict(video_defaults.get(effective_visual_mode) or {})
     effective_audio_mode = str(
-        payload.audio_mode
+        (payload.audio_mode if "audio_mode" in payload.model_fields_set else None)
         or (idea.data.get("audio_mode") if idea else None)
-        or ("veo_native" if legacy_native_audio else "google_tts")
+        or mode_defaults.get("audio_mode")
+        or "veo_native"
     )
     effective_native_voice_preset = str(
-        payload.native_voice_preset
+        (payload.native_voice_preset if "native_voice_preset" in payload.model_fields_set else None)
         or (idea.data.get("native_voice_preset") if idea else None)
+        or mode_defaults.get("native_voice_preset")
         or "warm_conversational"
     )
     continue_scenes = (
         bool(payload.continue_scenes)
         if payload.continue_scenes is not None
-        else effective_visual_mode == "ugc_creator"
+        else bool(mode_defaults.get("continue_scenes", effective_visual_mode == "ugc_creator"))
+    )
+    target_duration_seconds = int(
+        payload.target_duration_seconds
+        if "target_duration_seconds" in payload.model_fields_set
+        else mode_defaults.get("target_duration_seconds")
+        or (project_settings.get("production") or {}).get("average_duration_seconds")
+        or 30
+    )
+    scene_count_min = int(
+        payload.scene_count_min
+        if "scene_count_min" in payload.model_fields_set
+        else mode_defaults.get("scene_count_min") or payload.scene_count_min
+    )
+    scene_count_max = int(
+        payload.scene_count_max
+        if "scene_count_max" in payload.model_fields_set
+        else mode_defaults.get("scene_count_max") or payload.scene_count_max
     )
     character_id = payload.character_id or (idea.data.get("character_id") if idea else None)
     if character_id:
@@ -2744,6 +3114,9 @@ async def create_generation(
             "continue_scenes": continue_scenes,
             "native_voice_preset": effective_native_voice_preset,
             "character_id": character_id,
+            "target_duration_seconds": target_duration_seconds,
+            "scene_count_min": scene_count_min,
+            "scene_count_max": scene_count_max,
             "created_by_id": principal.actor_id,
         }
     )
@@ -2766,9 +3139,9 @@ async def create_generation(
         require_resource(repo, payload.source_item_id, principal, kind="source_item", project_id=project_id)
     pricing_feature = "video.generate_native_audio" if effective_audio_mode == "veo_native" else "video.generate"
     billable_seconds = estimate_veo_billable_seconds(
-        target_duration_seconds=payload.target_duration_seconds,
-        scene_count_min=payload.scene_count_min,
-        scene_count_max=payload.scene_count_max,
+        target_duration_seconds=target_duration_seconds,
+        scene_count_min=scene_count_min,
+        scene_count_max=scene_count_max,
         scene_count_flex=payload.scene_count_flex,
         continuous_scenes=continue_scenes,
     )

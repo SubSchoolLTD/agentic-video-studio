@@ -11,7 +11,7 @@ from apps.api.app.config import Settings, get_settings
 from apps.api.app.database import SessionLocal
 from apps.api.app.email_service import test_token as outbox_token
 from apps.api.app.main import app
-from apps.api.app.models import Resource, User
+from apps.api.app.models import AuthIdentity, Resource, User
 from apps.api.app.paypal import PayPalClient, PayPalOrderState
 
 
@@ -60,6 +60,45 @@ def register_and_verify(client: TestClient, label: str) -> dict:
 
 def headers(account: dict) -> dict[str, str]:
     return {"Authorization": f"Bearer {account['access_token']}"}
+
+
+def test_minimal_registration_and_google_identity_share_one_account(jwt_client: TestClient, monkeypatch):
+    email = f"linked-{uuid4().hex[:10]}@example.com"
+    registered = jwt_client.post(
+        "/v1/auth/register",
+        json={
+            "email": email,
+            "password": "correct horse battery staple",
+            "display_name": "Linked Owner",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    base = get_settings()
+    configured = Settings(**{**base.model_dump(), "google_oauth_client_id": "test-google-client.apps.googleusercontent.com"})
+    jwt_client.app.dependency_overrides[get_settings] = lambda: configured
+    monkeypatch.setattr(
+        "apps.api.app.auth_routes.google_id_token.verify_oauth2_token",
+        lambda *_args, **_kwargs: {
+            "sub": "google-subject-linked-account",
+            "email": email,
+            "email_verified": True,
+            "name": "Linked Owner",
+        },
+    )
+    google = jwt_client.post("/v1/auth/google", json={"credential": "x" * 120})
+    assert google.status_code == 200, google.text
+    assert google.json()["user"]["onboarding_complete"] is False
+    assert google.json()["user"]["email"] == email
+    with SessionLocal() as session:
+        assert session.scalar(select(User).where(User.email == email))
+        assert len(list(session.scalars(select(User).where(User.email == email)))) == 1
+        identity = session.scalar(select(AuthIdentity).where(AuthIdentity.provider_subject == "google-subject-linked-account"))
+        assert identity
+    login = jwt_client.post(
+        "/v1/auth/login", json={"email": email, "password": "correct horse battery staple"}
+    )
+    assert login.status_code == 200
+    assert login.json()["user"]["id"] == google.json()["user"]["id"]
 
 
 def test_registration_login_refresh_reset_and_tenant_isolation(jwt_client: TestClient):

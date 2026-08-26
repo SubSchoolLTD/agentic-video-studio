@@ -26,6 +26,17 @@ async function submit() {
   }
   finally { loading.value = false }
 }
+
+async function googleCredential(credential: string) {
+  loading.value = true
+  error.value = ''
+  try {
+    const payload = await auth.loginWithGoogle(credential)
+    await navigateTo(payload.user?.onboarding_complete === false ? '/onboarding' : '/app')
+  }
+  catch (reason: any) { error.value = reason?.data?.error?.message || reason?.data?.detail || 'Google sign-in failed.' }
+  finally { loading.value = false }
+}
 </script>
 
 <template>
@@ -38,6 +49,8 @@ async function submit() {
     <section class="auth-panel">
       <form class="auth-card" @submit.prevent="submit">
         <div><span class="eyebrow">Welcome back</span><h2>Sign in to Framewise</h2><p>Use the account linked to your organization.</p></div>
+        <GoogleSignInButton @credential="googleCredential" @error="error = $event" />
+        <div class="auth-divider"><span>or use email</span></div>
         <label>Email<input v-model="email" name="email" type="email" autocomplete="email" required placeholder="you@company.com"></label>
         <label>Password<input v-model="password" name="password" type="password" autocomplete="current-password" required minlength="10" placeholder="Your password"></label>
         <div v-if="error" class="auth-error" role="alert">{{ error }}</div>

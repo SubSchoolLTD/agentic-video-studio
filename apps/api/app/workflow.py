@@ -70,6 +70,7 @@ VEO_HIGH_LOAD_REPAIR_FIELD = "veo_high_load_v1_retry_at"
 NATIVE_SPEECH_EDGE_GATE_ERROR = "native audio speech qa failed"
 NATIVE_SPEECH_EDGE_GATE_REPAIR_FIELD = "native_speech_edge_gate_v1_retry_at"
 NATIVE_SPEECH_COMPLETION_REPAIR_FIELD = "native_speech_completion_v2_retry_at"
+RENDER_SAMPLE_ASPECT_RATIO_REPAIR_FIELD = "render_sample_aspect_ratio_v1_retry_at"
 
 
 def stable_veo_seed(job_id: str, voice_preset: str) -> int:
@@ -169,6 +170,13 @@ def generation_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         and not job_data.get(NATIVE_SPEECH_COMPLETION_REPAIR_FIELD)
     ):
         return NATIVE_SPEECH_COMPLETION_REPAIR_FIELD
+    if (
+        job_data.get("current_stage") == "render"
+        and "sar " in error_message
+        and "failed to configure output pad" in error_message
+        and not job_data.get(RENDER_SAMPLE_ASPECT_RATIO_REPAIR_FIELD)
+    ):
+        return RENDER_SAMPLE_ASPECT_RATIO_REPAIR_FIELD
     return None
 
 

@@ -319,7 +319,10 @@ def render_motion_video(
             chains.append(
                 f"[{index}:v]scale={overscan_width}:{overscan_height}:"
                 f"force_original_aspect_ratio=increase,crop={width}:{height},"
-                f"fps=30,trim=duration={clip_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
+                # Veo occasionally returns an almost-square, but non-identical sample aspect
+                # ratio (for example 2997:2996), while another scene is reported as 0:1.
+                # FFmpeg's concat filter requires every input to have the exact same SAR.
+                f"setsar=1,fps=30,trim=duration={clip_duration:.3f},setpts=PTS-STARTPTS[v{index}]"
             )
             if use_scene_audio:
                 chains.append(
@@ -431,6 +434,7 @@ def render_motion_video(
         "logo_applied": bool(logo_path and scene_video_paths),
         "captions_burned_in": bool(burn_in_captions and scene_video_paths),
         "generated_clip_edge_overscan_percent": 4 if scene_video_paths else 0,
+        "generated_clip_sample_aspect_ratio": "1:1" if scene_video_paths else None,
         "output": str(output_path),
         "checksum": hashlib.sha256(output_path.read_bytes()).hexdigest(),
     }
@@ -489,7 +493,10 @@ def probe_video(path: Path) -> dict[str, Any]:
         "-v",
         "error",
         "-show_entries",
-        "format=duration,size:stream=index,codec_type,codec_name,width,height",
+        (
+            "format=duration,size:"
+            "stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,display_aspect_ratio"
+        ),
         "-of",
         "json",
         str(path),

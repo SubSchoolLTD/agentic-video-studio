@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from apps.api.app.billing import (
     charge_feature,
     estimate_veo_billable_seconds,
     outstanding_charge_cents,
+    project_budget_snapshot,
     refund_feature_charges,
     settle_feature_charge,
 )
 from apps.api.app.database import SessionLocal
-from apps.api.app.models import CreditLedger, Wallet
+from apps.api.app.models import CreditLedger, Resource, Wallet
 
 
 def test_continuous_scene_quote_reserves_for_role_specific_roots() -> None:
@@ -135,3 +138,84 @@ def test_successful_feature_charge_is_settled_to_actual_provider_units(client) -
         )
         assert len(charges) == 1
         assert float(charges[0].monetary_amount_usd or 0) == 6.0
+
+
+def test_monthly_project_budget_uses_net_ledger_spend_and_blocks_overage(client) -> None:
+    organization_id = f"org_budget_{uuid4().hex[:12]}"
+    project_id = f"prj_budget_{uuid4().hex[:12]}"
+    first_job_id = f"job_budget_{uuid4().hex[:12]}"
+    second_job_id = f"job_budget_{uuid4().hex[:12]}"
+    with SessionLocal() as session:
+        project = Resource(
+            id=project_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            kind="project",
+            status="active",
+            data={"timezone": "UTC", "settings": {"budget": {"monthly_usd": 5}}},
+        )
+        first_job = Resource(
+            id=first_job_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            kind="generation_job",
+            status="queued",
+            data={},
+        )
+        second_job = Resource(
+            id=second_job_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            kind="generation_job",
+            status="queued",
+            data={},
+        )
+        session.add_all([project, first_job, second_job, Wallet(organization_id=organization_id, balance_cents=10_000)])
+        session.commit()
+
+        # Deposits never count as monthly usage.
+        charge_feature(
+            session,
+            organization_id=organization_id,
+            user_id="usr_budget_test",
+            feature_key="video.generate",
+            quantity=10,
+            reference_id=first_job_id,
+        )
+        snapshot = project_budget_snapshot(session, project=project)
+        assert snapshot["spent_cents"] == 240
+        assert snapshot["remaining_cents"] == 260
+        assert snapshot["percent_used"] == pytest.approx(0.48)
+
+        with pytest.raises(HTTPException) as blocked:
+            charge_feature(
+                session,
+                organization_id=organization_id,
+                user_id="usr_budget_test",
+                feature_key="video.generate",
+                quantity=11,
+                reference_id=second_job_id,
+            )
+        assert blocked.value.status_code == 402
+        assert blocked.value.detail["code"] == "monthly_budget_exceeded"
+        assert blocked.value.detail["remaining_cents"] == 260
+
+        refund_feature_charges(
+            session,
+            organization_id=organization_id,
+            reference_id=first_job_id,
+            reason="No usable result",
+        )
+        refreshed_project = session.get(Resource, project_id)
+        refunded = project_budget_snapshot(session, project=refreshed_project)
+        assert refunded["spent_cents"] == 0
+        assert refunded["remaining_cents"] == 500
+
+        charge_feature(
+            session,
+            organization_id=organization_id,
+            user_id="usr_budget_test",
+            feature_key="video.generate",
+            quantity=11,
+            reference_id=second_job_id,
+        )

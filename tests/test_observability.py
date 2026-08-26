@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from apps.api.app.billing import add_ledger_entry
 from apps.api.app.database import SessionLocal
 from apps.api.app.repository import ResourceRepository
 from apps.api.app.routes import evaluate_operational_alerts
@@ -25,12 +26,22 @@ def test_operational_alert_evaluator_detects_and_resolves_conditions(client, aut
             status="active",
             data={
                 "name": "Alert fixture",
-                "settings": {"budget": {"monthly_usd": 10, "used_usd": 11}},
+                "timezone": "UTC",
+                "settings": {"budget": {"monthly_usd": 10}},
             },
         )
         project.project_id = project.id
         session.add(project)
         session.commit()
+        add_ledger_entry(
+            session,
+            organization_id="org_demo",
+            amount_cents=-1_100,
+            event_type="ai_usage",
+            description="Alert fixture usage",
+            reference_id=project.id,
+            allow_negative_balance=True,
+        )
         checkpoint = repo.add(
             kind="metric_checkpoint",
             organization_id="org_demo",
@@ -57,7 +68,14 @@ def test_operational_alert_evaluator_detects_and_resolves_conditions(client, aut
         project = repo.get_any(project_id, kind="project")
         checkpoint = repo.get_any(checkpoint_id, kind="metric_checkpoint")
         assert project and checkpoint
-        repo.update(project, data={"settings": {"budget": {"monthly_usd": 10, "used_usd": 1}}})
+        add_ledger_entry(
+            session,
+            organization_id="org_demo",
+            amount_cents=1_000,
+            event_type="ai_usage_refund",
+            description="Alert fixture refund",
+            reference_id=project.id,
+        )
         repo.update(checkpoint, status="complete")
         evaluate_operational_alerts(session)
     resolved = client.get("/v1/admin/alerts?status=resolved", headers=auth_headers)

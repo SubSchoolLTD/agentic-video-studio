@@ -4,6 +4,12 @@ import { creditTestBalance, registerThroughUi } from './helpers'
 test('research keeps action candidates focused and exposes created and hidden history', async ({ page }) => {
   const account = await registerThroughUi(page, 'Research UX')
   await creditTestBalance(page.request, account.email, 1_000)
+  const accessToken = (await page.context().cookies()).find(item => item.name === 'avs_access')?.value
+  const budgetUpdate = await page.request.patch(`${process.env.E2E_API_BASE || 'http://127.0.0.1:8100'}/v1/projects/${account.projectId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    data: { settings: { budget: { monthly_usd: 10 } } },
+  })
+  expect(budgetUpdate.status(), await budgetUpdate.text()).toBe(200)
   await page.goto('/research')
   await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
 
@@ -16,6 +22,25 @@ test('research keeps action candidates focused and exposes created and hidden hi
   await expect(page.getByTestId('research-history')).toContainText('Research history')
   await expect(page.getByTestId('research-history')).toContainText('5 / 5 candidates')
   await expect(page.getByRole('link', { name: 'Configure automatic research' }).first()).toHaveAttribute('href', '/settings?tab=automation')
+
+  await page.goto('/app')
+  const monthlyBudget = page.getByRole('link', { name: 'Open monthly budget settings' })
+  await expect(monthlyBudget).toContainText('$9.94')
+  await expect(monthlyBudget).toContainText('$0.06 spent of $10.00')
+  await page.goto('/research')
+
+  const firstEvidence = page.getByRole('button', { name: /Read full evidence:/ }).first()
+  await expect(firstEvidence).toBeVisible()
+  await firstEvidence.click()
+  const evidenceDetails = page.getByTestId('evidence-details')
+  await expect(evidenceDetails).toBeVisible()
+  await expect(evidenceDetails.locator('.markdown-text')).not.toBeEmpty()
+  await expect(evidenceDetails.getByRole('heading', { name: 'Primary evidence' })).toBeVisible()
+  await expect(evidenceDetails.locator('.markdown-text strong')).toContainText('primary-source signal')
+  await expect(evidenceDetails.getByRole('heading', { name: 'Source links' })).toBeVisible()
+  await expect(evidenceDetails.getByRole('link', { name: /Open original/ })).toHaveAttribute('target', '_blank')
+  await evidenceDetails.getByRole('button', { name: 'Close evidence details' }).click()
+  await expect(evidenceDetails).toHaveCount(0)
 
   const cards = page.locator('.candidate-card')
   await expect(cards.first()).toBeVisible()
@@ -94,7 +119,7 @@ test('ideas move between kanban columns and settings require explicit edit mode'
   await page.getByRole('link', { name: 'Open monthly budget settings' }).click()
   await expect(page).toHaveURL(/\/settings\?tab=budget/)
   await expect(page.getByRole('heading', { name: 'Budget & limits', exact: true })).toBeVisible()
-  await expect(page.getByLabel(/Hard monthly provider-cost guard/)).toBeVisible()
+  await expect(page.getByLabel(/Hard monthly spending guard/)).toBeVisible()
 
   await page.goto('/settings')
   await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible()

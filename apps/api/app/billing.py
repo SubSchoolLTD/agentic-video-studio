@@ -6,12 +6,13 @@ import secrets
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import CreditLedger, PriceRule, PromoCode, PromoRedemption, Wallet
+from .models import CreditLedger, PriceRule, PromoCode, PromoRedemption, Resource, Wallet
 
 
 def _customer_cents(provider_cost_usd: str) -> int:
@@ -211,6 +212,112 @@ def quote_feature(session: Session, feature_key: str, quantity: int = 1) -> dict
     }
 
 
+def _project_budget_period(project: Resource, now: datetime | None = None) -> tuple[datetime, datetime]:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    timezone_name = str(project.data.get("timezone") or "UTC")
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        timezone = ZoneInfo("UTC")
+    local = current.astimezone(timezone)
+    start = datetime(local.year, local.month, 1, tzinfo=timezone)
+    if local.month == 12:
+        end = datetime(local.year + 1, 1, 1, tzinfo=timezone)
+    else:
+        end = datetime(local.year, local.month + 1, 1, tzinfo=timezone)
+    return start.astimezone(UTC), end.astimezone(UTC)
+
+
+def project_budget_snapshot(
+    session: Session,
+    *,
+    project: Resource,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return current-month customer usage from the immutable credit ledger.
+
+    Only paid AI debits and their refunds count. Deposits, promo credits and admin
+    adjustments never make a project's usage appear larger or smaller.
+    """
+    period_start, period_end = _project_budget_period(project, now)
+    net_amount_cents = int(
+        session.scalar(
+            select(func.coalesce(func.sum(CreditLedger.amount_cents), 0))
+            .join(Resource, Resource.id == CreditLedger.reference_id)
+            .where(
+                CreditLedger.organization_id == project.organization_id,
+                CreditLedger.event_type.in_(("ai_usage", "ai_usage_refund")),
+                CreditLedger.created_at >= period_start,
+                CreditLedger.created_at < period_end,
+                Resource.organization_id == project.organization_id,
+                Resource.project_id == project.id,
+            )
+        )
+        or 0
+    )
+    spent_cents = max(0, -net_amount_cents)
+    raw_limit = ((project.data.get("settings") or {}).get("budget") or {}).get("monthly_usd", 0)
+    limit_cents = max(0, int((Decimal(str(raw_limit or 0)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
+    remaining_cents = max(0, limit_cents - spent_cents) if limit_cents else 0
+    return {
+        "limit_cents": limit_cents,
+        "spent_cents": spent_cents,
+        "remaining_cents": remaining_cents,
+        "limit_usd": round(limit_cents / 100, 2),
+        "spent_usd": round(spent_cents / 100, 2),
+        "remaining_usd": round(remaining_cents / 100, 2),
+        "percent_used": min(1.0, spent_cents / limit_cents) if limit_cents else 0.0,
+        "is_exhausted": bool(limit_cents and spent_cents >= limit_cents),
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+    }
+
+
+def enforce_project_budget(
+    session: Session,
+    *,
+    organization_id: str,
+    reference_id: str | None,
+    charge_cents: int,
+) -> None:
+    if not reference_id or charge_cents <= 0:
+        return
+    reference = session.get(Resource, reference_id)
+    if not reference or reference.organization_id != organization_id or not reference.project_id:
+        return
+    project = session.scalar(
+        select(Resource)
+        .where(
+            Resource.id == reference.project_id,
+            Resource.kind == "project",
+            Resource.organization_id == organization_id,
+        )
+        .with_for_update()
+    )
+    if not project:
+        return
+    budget = project_budget_snapshot(session, project=project)
+    limit_cents = int(budget["limit_cents"])
+    if limit_cents and int(budget["spent_cents"]) + charge_cents > limit_cents:
+        raise HTTPException(
+            402,
+            {
+                "code": "monthly_budget_exceeded",
+                "message": "This action would exceed the project's monthly budget",
+                "project_id": project.id,
+                "limit_cents": limit_cents,
+                "spent_cents": int(budget["spent_cents"]),
+                "remaining_cents": int(budget["remaining_cents"]),
+                "required_cents": charge_cents,
+                "period_start": budget["period_start"],
+                "period_end": budget["period_end"],
+                "currency": "USD",
+            },
+        )
+
+
 def charge_feature(
     session: Session,
     *,
@@ -222,6 +329,12 @@ def charge_feature(
 ) -> CreditLedger:
     rule = feature_price(session, feature_key)
     quote = quote_feature(session, feature_key, quantity)
+    enforce_project_budget(
+        session,
+        organization_id=organization_id,
+        reference_id=reference_id,
+        charge_cents=int(quote["charge_cents"]),
+    )
     return add_ledger_entry(
         session,
         organization_id=organization_id,

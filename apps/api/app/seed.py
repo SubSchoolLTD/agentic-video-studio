@@ -116,7 +116,7 @@ def seed_demo(session: Session) -> None:
                 "generation": {"aspect_ratios": ["9:16", "16:9"], "duration": 30, "exploration": 0.2},
                 "publishing": {"weekly_cap": 3, "minimum_gap_hours": 18},
                 "scoring": {"readiness_manual": 70, "readiness_autopublish": 88, "confidence": 0.65},
-                "budget": {"monthly_usd": 120, "used_usd": 24.8},
+                "budget": {"monthly_usd": 120},
             },
         },
     )

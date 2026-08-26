@@ -34,7 +34,7 @@ const help = {
   window: 'Automatic publication is allowed only inside this local-time window.',
   quiet: 'A one-off blackout interval. No external publication may start during it.',
   pause: 'Immediately blocks every external publication attempt while leaving research and generation available.',
-  budget: 'Hard monthly provider-cost guard. New paid AI operations are blocked before they would exceed this amount; it does not add money to the wallet.',
+  budget: 'Hard monthly spending guard based on actual AI charges in the credit ledger. Refunds restore the available monthly budget; wallet top-ups and promo codes do not change usage.',
   manual: 'Readiness score at or above this value may enter the human review queue. Lower-scoring work stays blocked for revision.',
   autopublish: 'Readiness score required for automatic publishing. Compliance, evidence, cadence, connection and budget gates still apply.',
   confidence: 'Minimum confidence required for evidence-backed claims. Lower-confidence claims are blocked or routed for review.',
@@ -184,7 +184,7 @@ async function toggleProject() {
         <UiAppCard v-else-if="activeTab === 'budget'">
           <div class="section-heading"><div><h2>Budget & limits</h2><p>Cost and decision thresholds that every automatic action must respect.</p></div><CircleDollarSign :size="18" /></div>
           <div v-if="editing" class="form-grid"><div class="field"><label>Monthly budget, USD <UiSettingHelp :text="help.budget" /></label><input v-model.number="projectForm.monthly_budget" type="number" min="0" /></div><div class="field"><label>Manual-review readiness <UiSettingHelp :text="help.manual" /></label><input v-model.number="projectForm.readiness_manual" type="number" min="70" max="100" /></div><div class="field"><label>Auto-publish readiness <UiSettingHelp :text="help.autopublish" /></label><input v-model.number="projectForm.readiness_autopublish" type="number" min="85" max="100" /></div><div class="field"><label>Minimum evidence confidence <UiSettingHelp :text="help.confidence" /></label><input v-model.number="projectForm.confidence_threshold" type="number" min="0.6" max="1" step="0.05" /></div></div>
-          <dl v-else class="settings-values"><div><dt>Monthly provider budget <UiSettingHelp :text="help.budget" /></dt><dd>${{ projectForm.monthly_budget }}</dd></div><div><dt>Manual review threshold <UiSettingHelp :text="help.manual" /></dt><dd>{{ projectForm.readiness_manual }}/100</dd></div><div><dt>Auto-publish threshold <UiSettingHelp :text="help.autopublish" /></dt><dd>{{ projectForm.readiness_autopublish }}/100</dd></div><div><dt>Evidence confidence <UiSettingHelp :text="help.confidence" /></dt><dd>{{ Math.round(projectForm.confidence_threshold * 100) }}%</dd></div></dl>
+          <dl v-else class="settings-values"><div><dt>Monthly AI spending budget <UiSettingHelp :text="help.budget" /></dt><dd>${{ projectForm.monthly_budget }}</dd></div><div><dt>Manual review threshold <UiSettingHelp :text="help.manual" /></dt><dd>{{ projectForm.readiness_manual }}/100</dd></div><div><dt>Auto-publish threshold <UiSettingHelp :text="help.autopublish" /></dt><dd>{{ projectForm.readiness_autopublish }}/100</dd></div><div><dt>Evidence confidence <UiSettingHelp :text="help.confidence" /></dt><dd>{{ Math.round(projectForm.confidence_threshold * 100) }}%</dd></div></dl>
           <div class="protected-note"><Check :size="15" /><span>Admin model pricing controls dollar charges; this project budget remains the hard provider-spend guard.</span></div>
         </UiAppCard>
 

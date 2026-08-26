@@ -37,6 +37,7 @@ from .billing import (
     charge_feature,
     estimate_veo_billable_seconds,
     outstanding_charge_cents,
+    project_budget_snapshot,
     quote_feature,
     refund_feature_charges,
     veo_request_duration,
@@ -1803,11 +1804,14 @@ def evaluate_operational_alerts(session: Session, *, now: datetime | None = None
         ):
             add_alert(resource, "stuck_job", "Generation job has made no progress for more than 30 minutes", "critical")
         if resource.kind == "project":
-            budget = dict((resource.data.get("settings") or {}).get("budget") or {})
-            limit = float(budget.get("monthly_usd", 0))
-            used = float(budget.get("used_usd", 0))
-            if limit and used >= limit:
-                add_alert(resource, "budget_breach", f"Project budget is exhausted ({used:.2f}/{limit:.2f} USD)", "critical")
+            budget = project_budget_snapshot(session, project=resource, now=current)
+            if budget["is_exhausted"]:
+                add_alert(
+                    resource,
+                    "budget_breach",
+                    f"Project budget is exhausted ({budget['spent_usd']:.2f}/{budget['limit_usd']:.2f} USD)",
+                    "critical",
+                )
         if resource.kind == "metric_checkpoint" and resource.status in {"scheduled", "collecting"}:
             due_value = resource.data.get("scheduled_at")
             try:
@@ -4845,7 +4849,7 @@ def analytics_summary(
     metrics = repo.list(organization_id=principal.organization_id, project_id=project_id, kind="metric_snapshot")
     publications = repo.list(organization_id=principal.organization_id, project_id=project_id, kind="publication")
     ideas = repo.list(organization_id=principal.organization_id, project_id=project_id, kind="idea")
-    budget = project.data.get("settings", {}).get("budget", {"monthly_usd": 0, "used_usd": 0})
+    budget = project_budget_snapshot(session, project=project)
     return {
         "project_id": project_id,
         "period": "28d",
@@ -4855,8 +4859,12 @@ def analytics_summary(
             "awaiting_approval": sum(1 for item in videos if item.status == "approval_required"),
             "active_jobs": sum(1 for item in jobs if item.status in {"queued", "running"}),
             "idea_backlog": len(ideas),
-            "budget_used_usd": budget.get("used_usd", 0),
-            "budget_limit_usd": budget.get("monthly_usd", 0),
+            "budget_used_usd": budget["spent_usd"],
+            "budget_limit_usd": budget["limit_usd"],
+            "budget_remaining_usd": budget["remaining_usd"],
+            "budget_percent_used": budget["percent_used"],
+            "budget_period_start": budget["period_start"],
+            "budget_period_end": budget["period_end"],
         },
         "latest_metrics": [ResourceRepository.serialize(item) for item in metrics[:5]],
         # Patterns are only emitted after a real cohort-analysis job persists them.

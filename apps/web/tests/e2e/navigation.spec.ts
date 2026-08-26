@@ -71,6 +71,29 @@ test('registration creates an isolated tenant and logout protects the workspace'
   await expect(page).toHaveURL(/\/login\?redirect=/)
 })
 
+test('browser session rotates an expired access token and redirects when refresh fails', async ({ page }) => {
+  await registerThroughUi(page, 'Session rotation')
+  const origin = new URL(page.url()).origin
+  const before = await page.context().cookies()
+  const firstRefresh = before.find(item => item.name === 'avs_refresh')?.value
+  expect(firstRefresh).toMatch(/^avs_rt_/)
+
+  await page.context().addCookies([{ name: 'avs_access', value: 'expired-access-token', url: origin }])
+  await page.goto('/app')
+  await expect(page).toHaveURL('/app')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
+  const rotated = await page.context().cookies()
+  expect(rotated.find(item => item.name === 'avs_access')?.value).not.toBe('expired-access-token')
+  expect(rotated.find(item => item.name === 'avs_refresh')?.value).not.toBe(firstRefresh)
+
+  await page.context().addCookies([
+    { name: 'avs_access', value: 'expired-again', url: origin },
+    { name: 'avs_refresh', value: 'avs_rt_invalid_browser_session_token', url: origin },
+  ])
+  await page.goto('/app')
+  await expect(page).toHaveURL(/\/login\?redirect=\/app/)
+})
+
 test('registration reports a transactional email failure honestly', async ({ page }) => {
   await page.route('**/v1/auth/register', async (route) => {
     await route.fulfill({

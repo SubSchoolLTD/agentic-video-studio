@@ -63,6 +63,7 @@ EDITORIAL_PAYLOAD_SHAPE_ERROR = "editorial provider returned invalid json twice"
 EDITORIAL_PAYLOAD_REPAIR_FIELD = "editorial_payload_normalization_v2_retry_at"
 EDITORIAL_GLOBAL_CAPACITY_REPAIR_FIELD = "editorial_global_capacity_v1_retry_at"
 EDITORIAL_TARGETED_QUALITY_REPAIR_FIELD = "editorial_targeted_quality_v1_retry_at"
+EDITORIAL_STRUCTURED_BEATS_REPAIR_FIELD = "editorial_structured_beats_v1_retry_at"
 LEGACY_VEO_EMPTY_RESPONSE_ERROR = "'nonetype' object is not subscriptable"
 VEO_EMPTY_RESPONSE_REPAIR_FIELD = "veo_empty_response_v1_retry_at"
 VEO_HIGH_LOAD_REPAIR_FIELD = "veo_high_load_v1_retry_at"
@@ -130,6 +131,12 @@ def editorial_deployment_repair_field(job_data: dict[str, Any]) -> str | None:
         and not job_data.get(EDITORIAL_TARGETED_QUALITY_REPAIR_FIELD)
     ):
         return EDITORIAL_TARGETED_QUALITY_REPAIR_FIELD
+    if (
+        "dramatic_structure." in error_message
+        and "input should be a valid string" in error_message
+        and not job_data.get(EDITORIAL_STRUCTURED_BEATS_REPAIR_FIELD)
+    ):
+        return EDITORIAL_STRUCTURED_BEATS_REPAIR_FIELD
     return None
 
 

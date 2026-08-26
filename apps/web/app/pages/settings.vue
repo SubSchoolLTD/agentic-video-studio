@@ -81,12 +81,16 @@ function lines(value: string) { return value.split('\n').map(item => item.trim()
 function lineValue(value: any) { return Array.isArray(value) ? value.join('\n') : '' }
 function displayLines(value: string, fallback = 'Not configured') { return lines(value).join(' · ') || fallback }
 function formatAutomation(value: string) { return value.replaceAll('_', ' ') }
+function normalizeAutomation(value: string) {
+  if (['off', 'research_only', 'scripts', 'videos', 'publish'].includes(value)) return value
+  return value === 'manual' ? 'off' : 'research_only'
+}
 
 function hydrate() {
   if (!data.value) return
   const { project, brand } = data.value
   Object.assign(projectForm, {
-    name: project.name || '', timezone: project.timezone || 'America/New_York', automation_mode: project.automation_mode || 'research_only',
+    name: project.name || '', timezone: project.timezone || 'America/New_York', automation_mode: normalizeAutomation(project.automation_mode || 'research_only'),
     videos_per_week: project.settings?.production?.videos_per_week ?? 3,
     average_duration_seconds: project.settings?.production?.average_duration_seconds ?? 30,
     weekly_cap: project.settings?.publishing?.weekly_cap ?? 3, daily_cap: project.settings?.publishing?.daily_cap ?? 1,

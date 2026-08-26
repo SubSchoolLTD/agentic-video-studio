@@ -126,6 +126,23 @@ def test_editorial_package_normalizes_lossless_gemini_shape_variations() -> None
     assert package["policy"] == {"decision": "pass", "high_risk": False, "unsupported_claims": []}
 
 
+def test_editorial_package_normalizes_structured_dramatic_beats_without_losing_meaning() -> None:
+    payload = editorial_payload()
+    payload["script"]["dramatic_structure"] = [
+        {"beat": "setup", "summary": "Maya is overwhelmed by disconnected course tools."},
+        {"beat": "turn", "summary": "Leo lays physical lesson cards into one sequence."},
+        {"beat": "payoff", "summary": "Maya teaches from the reusable sequence."},
+    ]
+
+    package = EditorialPackage.model_validate(payload).model_dump()
+
+    assert package["script"]["dramatic_structure"] == [
+        "setup: Maya is overwhelmed by disconnected course tools.",
+        "turn: Leo lays physical lesson cards into one sequence.",
+        "payoff: Maya teaches from the reusable sequence.",
+    ]
+
+
 def test_editorial_quality_gate_rejects_generic_voiceover_only_storytelling() -> None:
     payload = editorial_payload()
     payload["script"].update(
@@ -535,6 +552,24 @@ def test_failed_editorial_quality_gate_is_recovered_once_after_deployment() -> N
 
     assert repair_field == "editorial_targeted_quality_v1_retry_at"
     job_data[repair_field] = "2026-08-26T20:30:00+00:00"
+    assert editorial_deployment_repair_field(job_data) is None
+
+
+def test_structured_editorial_beats_failure_is_recovered_once_after_deployment() -> None:
+    job_data = {
+        "current_stage": "editorial_strategy",
+        "last_error": {
+            "message": (
+                "Editorial provider failed schema or quality review three times: 4 validation errors for "
+                "EditorialPackage script.dramatic_structure.0 Input should be a valid string"
+            )
+        },
+    }
+
+    repair_field = editorial_deployment_repair_field(job_data)
+
+    assert repair_field == "editorial_structured_beats_v1_retry_at"
+    job_data[repair_field] = "2026-08-26T20:45:00+00:00"
     assert editorial_deployment_repair_field(job_data) is None
 
 

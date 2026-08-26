@@ -150,8 +150,41 @@ def normalize_string_list(value: Any) -> Any:
     if isinstance(value, str):
         normalized = value.strip()
         return [normalized] if normalized and normalized.lower() not in {"none", "none."} else []
-    if isinstance(value, (tuple, set)):
-        return list(value)
+    if isinstance(value, dict):
+        value = [value]
+    elif isinstance(value, (tuple, set)):
+        value = list(value)
+    if isinstance(value, list):
+        normalized_items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                label = next(
+                    (str(item[key]).strip() for key in ("beat", "phase", "name", "title", "type") if item.get(key)),
+                    "",
+                )
+                detail = next(
+                    (
+                        str(item[key]).strip()
+                        for key in ("summary", "description", "text", "content", "value")
+                        if item.get(key)
+                    ),
+                    "",
+                )
+                if label and detail:
+                    rendered = f"{label}: {detail}"
+                elif detail or label:
+                    rendered = detail or label
+                else:
+                    rendered = "; ".join(
+                        f"{key}: {json.dumps(item_value, ensure_ascii=False) if isinstance(item_value, (dict, list)) else item_value}"
+                        for key, item_value in item.items()
+                        if item_value not in (None, "", [], {})
+                    )
+            else:
+                rendered = str(item).strip()
+            if rendered and rendered.lower() not in {"none", "none."}:
+                normalized_items.append(rendered)
+        return normalized_items
     return value
 
 

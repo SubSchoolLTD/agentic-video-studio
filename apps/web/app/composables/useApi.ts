@@ -11,9 +11,11 @@ export interface ApiError {
 export function useApi() {
   const config = useRuntimeConfig()
   const auth = useAuth()
+  const route = useRoute()
+  const nuxtApp = useNuxtApp()
   const projectId = auth.projectId
 
-  async function api<T>(path: string, options: Record<string, unknown> = {}): Promise<T> {
+  async function api<T>(path: string, options: Record<string, unknown> = {}, alreadyRefreshed = false): Promise<T> {
     const headers: Record<string, string> = {
       ...(auth.accessToken.value ? { Authorization: `Bearer ${auth.accessToken.value}` } : {}),
       ...(auth.organizationId.value ? { 'X-Organization-ID': auth.organizationId.value } : {}),
@@ -27,8 +29,11 @@ export function useApi() {
       })
     }
     catch (error: any) {
-      if (error?.response?.status === 401 && !path.startsWith('/v1/auth/') && await auth.refresh()) {
-        return api<T>(path, options)
+      if (error?.response?.status === 401 && !path.startsWith('/v1/auth/')) {
+        if (!alreadyRefreshed && await auth.refresh()) return api<T>(path, options, true)
+        auth.clearSession()
+        const redirect = route.fullPath && !route.path.startsWith('/login') ? `?redirect=${encodeURIComponent(route.fullPath)}` : ''
+        await nuxtApp.runWithContext(() => navigateTo(`/login${redirect}`))
       }
       const payload = error?.data as ApiError | undefined
       const message = payload?.error?.message || error?.message || 'The request could not be completed.'

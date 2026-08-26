@@ -20,8 +20,8 @@ const { data, refresh, status } = await useAsyncData('overview-data', async () =
   return { project, analytics, jobs: jobs.items, ideas: ideas.items, connections: connections.items }
 }, {
   default: () => ({
-    project: { name: 'Project', status: 'active', autopilot_paused: false, settings: { budget: { used_usd: 0, monthly_usd: 0 } } },
-    analytics: { kpis: { published: 0, videos_ready: 0, awaiting_approval: 0, active_jobs: 0, idea_backlog: 0, budget_used_usd: 0, budget_limit_usd: 0 }, patterns: [] },
+    project: { name: 'Project', status: 'active', autopilot_paused: false, settings: { budget: { monthly_usd: 0 } } },
+    analytics: { kpis: { published: 0, videos_ready: 0, awaiting_approval: 0, active_jobs: 0, idea_backlog: 0, budget_used_usd: 0, budget_limit_usd: 0, budget_remaining_usd: 0, budget_percent_used: 0 }, patterns: [] },
     jobs: [], ideas: [], connections: [],
   }),
 })
@@ -31,9 +31,12 @@ const recentJobs = computed(() => data.value.jobs?.slice(0, 5) || [])
 const topIdeas = computed(() => [...(data.value.ideas || [])].sort((a, b) => (b.topic_opportunity_score || 0) - (a.topic_opportunity_score || 0)).slice(0, 4))
 const topPattern = computed(() => data.value.analytics?.patterns?.[0] || null)
 const budgetPercent = computed(() => {
+  if (kpis.value.budget_percent_used != null) return Number(kpis.value.budget_percent_used)
   const limit = Number(kpis.value.budget_limit_usd || 1)
   return Math.min(1, Number(kpis.value.budget_used_usd || 0) / limit)
 })
+const budgetRemaining = computed(() => Math.max(0, Number(kpis.value.budget_remaining_usd || 0)))
+const budgetConfigured = computed(() => Number(kpis.value.budget_limit_usd || 0) > 0)
 const firstName = computed(() => (user.value?.display_name || 'Creator').trim().split(/\s+/)[0])
 
 function formatDate(value?: string) {
@@ -94,7 +97,7 @@ async function toggleAutopilot() {
       <UiAppCard class="metric-card"><span class="metric-card__icon"><Clapperboard :size="18" /></span><span class="metric-card__label">Videos ready</span><div class="metric-card__value"><strong>{{ kpis.videos_ready || 0 }}</strong><span>{{ kpis.awaiting_approval || 0 }} to review</span></div></UiAppCard>
       <UiAppCard class="metric-card"><span class="metric-card__icon"><Sparkles :size="18" /></span><span class="metric-card__label">Idea backlog</span><div class="metric-card__value"><strong>{{ kpis.idea_backlog || 0 }}</strong><span>Target 7</span></div></UiAppCard>
       <UiAppCard class="metric-card"><span class="metric-card__icon"><Activity :size="18" /></span><span class="metric-card__label">Active productions</span><div class="metric-card__value"><strong>{{ kpis.active_jobs || 0 }}</strong><span>Durable jobs</span></div></UiAppCard>
-      <NuxtLink class="metric-card-link" to="/settings?tab=budget" aria-label="Open monthly budget settings"><UiAppCard class="metric-card"><span class="metric-card__icon"><CircleDollarSign :size="18" /></span><span class="metric-card__label">Monthly budget</span><div class="metric-card__value"><strong>${{ Number(kpis.budget_used_usd || 0).toFixed(0) }}</strong><span>spent of ${{ kpis.budget_limit_usd || 0 }}</span></div><UiProgressBar :value="budgetPercent" style="margin-top: 9px" /></UiAppCard></NuxtLink>
+      <NuxtLink class="metric-card-link" to="/settings?tab=budget" aria-label="Open monthly budget settings"><UiAppCard class="metric-card"><span class="metric-card__icon"><CircleDollarSign :size="18" /></span><span class="metric-card__label">Monthly budget remaining</span><div class="metric-card__value"><strong>{{ budgetConfigured ? `$${budgetRemaining.toFixed(2)}` : 'No cap' }}</strong><span>${{ Number(kpis.budget_used_usd || 0).toFixed(2) }} spent{{ budgetConfigured ? ` of $${Number(kpis.budget_limit_usd || 0).toFixed(2)}` : ' this month' }}</span></div><UiProgressBar v-if="budgetConfigured" :value="budgetPercent" style="margin-top: 9px" /></UiAppCard></NuxtLink>
     </div>
 
     <div class="overview-layout">

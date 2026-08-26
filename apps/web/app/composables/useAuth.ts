@@ -18,21 +18,26 @@ interface SessionPayload {
   user?: SessionUser
 }
 
-let refreshPromise: Promise<boolean> | null = null
-
 export function useAuth() {
   const config = useRuntimeConfig()
-  const accessToken = useCookie<string | null>('avs_access', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 30 })
-  const refreshToken = useCookie<string | null>('avs_refresh', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 30 })
-  const organizationId = useCookie<string | null>('avs_organization', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 365 })
+  const nuxtApp = useNuxtApp() as ReturnType<typeof useNuxtApp> & { _avsRefreshPromise?: Promise<boolean> | null }
+  const accessCookie = useCookie<string | null>('avs_access', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 30 })
+  const refreshCookie = useCookie<string | null>('avs_refresh', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 30 })
+  const organizationCookie = useCookie<string | null>('avs_organization', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 365 })
   const projectCookie = useCookie<string | null>('avs_project', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 365 })
+  const accessToken = useState<string | null>('session-access-token', () => accessCookie.value)
+  const refreshToken = useState<string | null>('session-refresh-token', () => refreshCookie.value)
+  const organizationId = useState<string | null>('session-organization', () => organizationCookie.value)
   const user = useState<SessionUser | null>('session-user', () => null)
   const projectId = useState<string>('active-project', () => projectCookie.value || '')
 
   function setSession(payload: SessionPayload) {
     accessToken.value = payload.access_token
+    accessCookie.value = payload.access_token
     refreshToken.value = payload.refresh_token
+    refreshCookie.value = payload.refresh_token
     organizationId.value = payload.organization_id
+    organizationCookie.value = payload.organization_id
     if (payload.default_project_id) {
       projectCookie.value = payload.default_project_id
       projectId.value = payload.default_project_id
@@ -42,8 +47,11 @@ export function useAuth() {
 
   function clearSession() {
     accessToken.value = null
+    accessCookie.value = null
     refreshToken.value = null
+    refreshCookie.value = null
     organizationId.value = null
+    organizationCookie.value = null
     projectCookie.value = null
     projectId.value = ''
     user.value = null
@@ -61,8 +69,7 @@ export function useAuth() {
 
   async function refresh(): Promise<boolean> {
     if (!refreshToken.value) return false
-    if (!refreshPromise) {
-      refreshPromise = $fetch<SessionPayload>('/v1/auth/refresh', {
+    const rotate = () => $fetch<SessionPayload>('/v1/auth/refresh', {
         baseURL: config.public.apiBase,
         method: 'POST',
         body: { token: refreshToken.value },
@@ -72,13 +79,19 @@ export function useAuth() {
       }).catch(() => {
         clearSession()
         return false
-      }).finally(() => { refreshPromise = null })
+      })
+    // The Nuxt app is request-scoped on SSR and singleton in the browser. Keeping the
+    // promise here prevents concurrent page loaders from replaying one rotating token.
+    if (!nuxtApp._avsRefreshPromise) {
+      nuxtApp._avsRefreshPromise = rotate().finally(() => { nuxtApp._avsRefreshPromise = null })
     }
-    return refreshPromise
+    return nuxtApp._avsRefreshPromise
   }
 
-  async function loadMe() {
-    if (!accessToken.value) return null
+  async function loadMe(alreadyRefreshed = false): Promise<SessionUser | null> {
+    if (!accessToken.value) {
+      if (alreadyRefreshed || !await refresh()) return null
+    }
     try {
       const payload = await $fetch<any>('/v1/me', {
         baseURL: config.public.apiBase,
@@ -99,8 +112,8 @@ export function useAuth() {
       }
       return user.value
     }
-    catch {
-      if (await refresh()) return loadMe()
+    catch (error: any) {
+      if (!alreadyRefreshed && error?.response?.status === 401 && await refresh()) return loadMe(true)
       return null
     }
   }

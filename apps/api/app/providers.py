@@ -1053,12 +1053,33 @@ class ParallelSearchProvider:
             excerpts = item.get("excerpts") or item.get("excerpt") or []
             if isinstance(excerpts, str):
                 excerpts = [excerpts]
+            excerpts = [str(value).strip() for value in excerpts if str(value).strip()]
+            full_text = str(item.get("content") or item.get("text") or "").strip()
+            if not full_text:
+                full_text = "\n\n".join(excerpts)
+            raw_links = item.get("links") or item.get("related_urls") or item.get("citations") or []
+            if isinstance(raw_links, (str, dict)):
+                raw_links = [raw_links]
+            links: list[dict[str, str]] = []
+            for link in raw_links:
+                if isinstance(link, str):
+                    url = link
+                    label = link
+                elif isinstance(link, dict):
+                    url = str(link.get("url") or link.get("href") or "")
+                    label = str(link.get("title") or link.get("label") or url)
+                else:
+                    continue
+                if url.startswith(("https://", "http://")):
+                    links.append({"url": url, "label": label})
             sources.append(
                 {
                     "id": f"src_{index + 1}",
                     "url": item.get("url"),
                     "title": item.get("title") or "Untitled source",
                     "excerpt": "\n".join(excerpts[:3]),
+                    "content": full_text,
+                    "links": links,
                     "published_at": item.get("publish_date") or item.get("published_at"),
                     "retrieved_at": datetime.now(UTC).isoformat(),
                     "query_purpose": "evidence",
@@ -1098,6 +1119,13 @@ class ParallelSearchProvider:
                 "url": "https://developers.googleblog.com/",
                 "title": "Primary signal for the requested topic",
                 "excerpt": f"The test provider retained a primary-source signal for this objective: {objective[:160]}",
+                "content": (
+                    "## Primary evidence\n\n"
+                    f"The test provider retained a **primary-source signal** for this objective: {objective[:160]}\n\n"
+                    "- The full retrieved passage remains attached to the research run.\n"
+                    "- Links open separately from the evidence viewer."
+                ),
+                "links": [{"url": "https://developers.googleblog.com/", "label": "Google Developers Blog"}],
                 "published_at": (now - timedelta(days=min(3, recency_days))).isoformat(),
                 "retrieved_at": now.isoformat(),
                 "query_purpose": "audience_demand",

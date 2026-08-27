@@ -768,6 +768,16 @@ def onboarding_preferences(
         "informative": payload.informative_percent,
     }
     settings_data = dict(project.data.get("settings") or {})
+    selected_audio_mode = "veo_native" if payload.audio_quality == "premium" else "google_tts"
+    video_defaults = dict(settings_data.get("video_defaults") or {})
+    for visual_mode in ("ugc_creator", "storytelling", "cinematic", "motion_graphics"):
+        current_defaults = dict(video_defaults.get(visual_mode) or {})
+        video_defaults[visual_mode] = {
+            **current_defaults,
+            "audio_mode": selected_audio_mode,
+            "native_voice_preset": current_defaults.get("native_voice_preset", "warm_conversational"),
+            "continue_scenes": current_defaults.get("continue_scenes", visual_mode == "ugc_creator"),
+        }
     settings_data.update({
         "content_mix": content_mix,
         "research": {**dict(settings_data.get("research") or {}), "backlog_target": 150, "max_candidates": 50},
@@ -777,6 +787,7 @@ def onboarding_preferences(
             "average_duration_seconds": payload.average_duration_seconds,
             "audio_quality": payload.audio_quality,
         },
+        "video_defaults": video_defaults,
     })
     repo.update(project, data={"automation_mode": payload.automation_mode, "settings": settings_data})
     profile = session.scalar(

@@ -22,6 +22,7 @@ test('new email account completes guided website and automation onboarding', asy
   await page.getByRole('button', { name: 'Continue' }).click()
   await page.getByLabel('Videos per week').fill('4')
   await page.getByLabel('Average duration, seconds').fill('35')
+  await page.getByLabel('Sound quality').selectOption('standard')
   await page.getByLabel('Automation').selectOption('scripts')
   await page.getByRole('button', { name: 'Save & calculate' }).click()
   await expect(page.getByText(/Estimated from current model pricing/)).toBeVisible()
@@ -34,5 +35,5 @@ test('new email account completes guided website and automation onboarding', asy
 
   await page.goto('/settings?tab=video')
   await expect(page.getByRole('heading', { name: 'Video defaults' })).toBeVisible()
-  await expect(page.getByText('Premium · Veo native').first()).toBeVisible()
+  await expect(page.getByText('Standard · Google TTS').first()).toBeVisible()
 })

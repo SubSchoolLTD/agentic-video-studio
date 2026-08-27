@@ -9,7 +9,7 @@ from apps.api.app.workflow import WorkflowManager
 
 
 @pytest.mark.asyncio
-async def test_publish_automation_sends_youtube_and_queues_social_consent(client) -> None:
+async def test_publish_automation_sends_every_connected_channel_without_an_extra_confirmation(client) -> None:
     del client  # The fixture starts the app lifespan and initializes the test database.
     with SessionLocal() as session:
         repo = ResourceRepository(session)
@@ -76,6 +76,13 @@ async def test_publish_automation_sends_youtube_and_queues_social_consent(client
             status="active",
             data={"provider": "instagram", "display_name": "Instagram fixture"},
         )
+        repo.add(
+            kind="connection",
+            organization_id="org_demo",
+            project_id=project.id,
+            status="active",
+            data={"provider": "tiktok", "display_name": "TikTok fixture"},
+        )
 
         workflow = WorkflowManager(get_settings())
         await workflow._complete_automatic_publications(
@@ -97,6 +104,7 @@ async def test_publish_automation_sends_youtube_and_queues_social_consent(client
         )
         youtube = next(item for item in publications if item.data["platform"] == "youtube")
         instagram = next(item for item in publications if item.data["platform"] == "instagram")
+        tiktok = next(item for item in publications if item.data["platform"] == "tiktok")
         checkpoints = repo.list(
             organization_id="org_demo",
             project_id=project.id,
@@ -107,10 +115,13 @@ async def test_publish_automation_sends_youtube_and_queues_social_consent(client
     assert version.status == "approved"
     assert video.status == "approved"
     assert youtube.status == "published"
-    assert instagram.status == "awaiting_consent"
-    assert instagram.data["automatic_consent_pending"] is True
-    assert job.data["automatic_publication_status"] == "attention_required"
-    assert set(job.data["automatic_publication_ids"]) == {youtube.id, instagram.id}
+    assert instagram.status == "published"
+    assert tiktok.status == "published"
+    assert instagram.data["automation_consent_granted_at"]
+    assert tiktok.data["automation_consent_granted_at"]
+    assert job.data["automatic_publication_status"] == "published"
+    assert set(job.data["automatic_publication_ids"]) == {youtube.id, instagram.id, tiktok.id}
+    assert job.data["automatic_publication_consent_required_ids"] == []
     assert {item.data["window"] for item in checkpoints if item.data["publication_id"] == youtube.id} == {
         "24h",
         "7d",

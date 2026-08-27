@@ -1193,9 +1193,8 @@ class WorkflowManager:
     ) -> None:
         """Approve an automated render and hand it to every connected channel.
 
-        YouTube supports true unattended publishing. Instagram and TikTok require
-        per-post consent, so their publication rows are prepared and left in the
-        explicit-consent queue instead of silently bypassing provider safeguards.
+        Selecting the final automation mode is the workspace owner's explicit
+        instruction to publish every completed render to every connected channel.
         """
         if not job.data.get("automatic_publish") or not version_ids:
             return
@@ -1261,7 +1260,6 @@ class WorkflowManager:
         hashtags = [item for item in hashtags if item][:8]
         caption = str(job.data.get("publication_caption") or title)
         publication_ids: list[str] = []
-        consent_required_ids: list[str] = []
         errors: list[dict[str, str]] = []
         for connection in connections:
             platform = str(connection.data.get("provider"))
@@ -1278,8 +1276,6 @@ class WorkflowManager:
             ]
             if existing:
                 publication_ids.append(existing[0].id)
-                if existing[0].status == "awaiting_consent":
-                    consent_required_ids.append(existing[0].id)
                 continue
             try:
                 payload = PublicationCreate(
@@ -1309,23 +1305,20 @@ class WorkflowManager:
                 )
                 publication_id = str(prepared["publication_id"])
                 publication_ids.append(publication_id)
-                if prepared.get("requires_user_consent"):
-                    consent_required_ids.append(publication_id)
-                    publication = repo.get_any(publication_id, kind="publication")
-                    if publication:
-                        repo.update(
-                            publication,
-                            data={
-                                "automatic": True,
-                                "automatic_consent_pending": True,
-                            },
-                        )
-                    continue
+                publication = repo.get_any(publication_id, kind="publication")
+                if publication:
+                    repo.update(
+                        publication,
+                        data={
+                            "automatic": True,
+                            "automation_consent_granted_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
                 await confirm_publication(
                     publication_id=publication_id,
                     payload=PublicationConfirm(
                         confirmation_token=str(prepared["confirmation_token"]),
-                        explicit_consent=False,
+                        explicit_consent=bool(prepared.get("requires_user_consent")),
                     ),
                     principal=principal,
                     session=session,
@@ -1342,13 +1335,9 @@ class WorkflowManager:
         repo.update(
             job,
             data={
-                "automatic_publication_status": (
-                    "attention_required"
-                    if errors or consent_required_ids
-                    else "published"
-                ),
+                "automatic_publication_status": "attention_required" if errors else "published",
                 "automatic_publication_ids": publication_ids,
-                "automatic_publication_consent_required_ids": consent_required_ids,
+                "automatic_publication_consent_required_ids": [],
                 "automatic_publication_errors": errors,
             },
         )

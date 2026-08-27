@@ -1182,6 +1182,177 @@ class WorkflowManager:
             correlation_id=str(job.data.get("correlation_id") or job.id),
         )
 
+    async def _complete_automatic_publications(
+        self,
+        session: Any,
+        repo: ResourceRepository,
+        job: Resource,
+        version_ids: list[str],
+        *,
+        title: str,
+    ) -> None:
+        """Approve an automated render and hand it to every connected channel.
+
+        YouTube supports true unattended publishing. Instagram and TikTok require
+        per-post consent, so their publication rows are prepared and left in the
+        explicit-consent queue instead of silently bypassing provider safeguards.
+        """
+        if not job.data.get("automatic_publish") or not version_ids:
+            return
+
+        connections = repo.list(
+            organization_id=job.organization_id,
+            project_id=str(job.project_id),
+            kind="connection",
+            statuses={"active", "healthy"},
+            limit=200,
+        )
+        connections = [
+            connection
+            for connection in connections
+            if str(connection.data.get("provider") or "") in {"youtube", "instagram", "tiktok"}
+        ]
+        if not connections:
+            repo.update(
+                job,
+                data={
+                    "automatic_publication_status": "no_connected_channels",
+                    "automatic_publication_ids": [],
+                },
+            )
+            return
+
+        # Import route-level orchestration lazily to reuse the same validation,
+        # provider policy and upload code as an interactive publication.
+        from .routes import _review_video_version, confirm_publication, prepare_publication
+        from .schemas import PublicationConfirm, PublicationCreate, ReviewAction
+        from .security import ALL_SCOPES, Principal
+
+        principal = Principal(
+            actor_id="automation_scheduler",
+            organization_id=job.organization_id,
+            project_id=str(job.project_id),
+            role="owner",
+            scopes=ALL_SCOPES,
+            project_scope=frozenset({str(job.project_id)}),
+        )
+        version_id = version_ids[0]
+        version = repo.get_any(version_id, kind="video_version")
+        if not version:
+            return
+        if version.status != "approved":
+            _review_video_version(
+                version_id=version_id,
+                review_status="approved",
+                payload=ReviewAction(comment="Approved by configured publication automation"),
+                principal=principal,
+                session=session,
+            )
+
+        project = repo.get_any(str(job.project_id), kind="project")
+        context = dict((project.data if project else {}).get("context") or {})
+        raw_keywords: list[str] = []
+        for key in ("product_keywords", "problem_keywords", "audience_interest_keywords"):
+            raw_keywords.extend(str(item) for item in context.get(key) or [])
+        hashtags = [
+            "".join(character for character in keyword if character.isalnum() or character == "_")[:50]
+            for keyword in raw_keywords
+        ]
+        hashtags = [item for item in hashtags if item][:8]
+        caption = str(job.data.get("publication_caption") or title)
+        publication_ids: list[str] = []
+        consent_required_ids: list[str] = []
+        errors: list[dict[str, str]] = []
+        for connection in connections:
+            platform = str(connection.data.get("provider"))
+            existing = [
+                item
+                for item in repo.list(
+                    organization_id=job.organization_id,
+                    project_id=str(job.project_id),
+                    kind="publication",
+                    limit=200,
+                )
+                if item.data.get("video_version_id") == version_id
+                and item.data.get("connection_id") == connection.id
+            ]
+            if existing:
+                publication_ids.append(existing[0].id)
+                if existing[0].status == "awaiting_consent":
+                    consent_required_ids.append(existing[0].id)
+                continue
+            try:
+                payload = PublicationCreate(
+                    video_version_id=version_id,
+                    connection_id=connection.id,
+                    platform=platform,
+                    title=title,
+                    caption=caption,
+                    hashtags=hashtags,
+                    privacy=(
+                        "public"
+                        if platform in {"youtube", "instagram"}
+                        else "SELF_ONLY"
+                    ),
+                    creator_info_acknowledged=platform == "tiktok",
+                    allow_comments=True if platform == "tiktok" else None,
+                    allow_duet=False if platform == "tiktok" else None,
+                    allow_stitch=False if platform == "tiktok" else None,
+                    synthetic_media_disclosure=True,
+                )
+                prepared = prepare_publication(
+                    payload=payload,
+                    idempotency_key=f"automatic-publication:{job.id}:{connection.id}",
+                    principal=principal,
+                    session=session,
+                    settings=self.settings,
+                )
+                publication_id = str(prepared["publication_id"])
+                publication_ids.append(publication_id)
+                if prepared.get("requires_user_consent"):
+                    consent_required_ids.append(publication_id)
+                    publication = repo.get_any(publication_id, kind="publication")
+                    if publication:
+                        repo.update(
+                            publication,
+                            data={
+                                "automatic": True,
+                                "automatic_consent_pending": True,
+                            },
+                        )
+                    continue
+                await confirm_publication(
+                    publication_id=publication_id,
+                    payload=PublicationConfirm(
+                        confirmation_token=str(prepared["confirmation_token"]),
+                        explicit_consent=False,
+                    ),
+                    principal=principal,
+                    session=session,
+                    settings=self.settings,
+                )
+            except Exception as exc:  # A provider failure must not discard the completed video.
+                logger.exception(
+                    "automatic_publication_failed job_id=%s connection_id=%s",
+                    job.id,
+                    connection.id,
+                )
+                errors.append({"connection_id": connection.id, "platform": platform, "message": str(exc)})
+
+        repo.update(
+            job,
+            data={
+                "automatic_publication_status": (
+                    "attention_required"
+                    if errors or consent_required_ids
+                    else "published"
+                ),
+                "automatic_publication_ids": publication_ids,
+                "automatic_publication_consent_required_ids": consent_required_ids,
+                "automatic_publication_errors": errors,
+            },
+        )
+
     async def run(self, job_id: str) -> None:
         if not self._claim_generation_job(job_id):
             logger.info("generation_job_claim_skipped job_id=%s", job_id)
@@ -2665,6 +2836,13 @@ class WorkflowManager:
                 "actual_cost_usd": 0.0 if not use_live_video else job.data.get("actual_cost_usd"),
                 "completed_at": datetime.now(UTC).isoformat(),
             },
+        )
+        await self._complete_automatic_publications(
+            session,
+            repo,
+            job,
+            [item["id"] for item in versions],
+            title=title,
         )
         logger.info(
             "generation_ready job_id=%s video_id=%s retry_source=%s",

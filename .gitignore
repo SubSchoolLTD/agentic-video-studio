@@ -23,6 +23,7 @@ coverage/
 playwright-report/
 test-results/
 output/playwright/
+.playwright-cli/
 local_data/
 .secrets/
 *.sqlite3

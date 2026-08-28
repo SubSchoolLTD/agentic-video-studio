@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ArrowLeft, ArrowRight, Check, Clapperboard, ExternalLink, Globe2, LoaderCircle, Sparkles } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, Check, CheckCircle2, Clapperboard, Globe2, KeyRound, LoaderCircle, LockKeyhole, Sparkles, X } from 'lucide-vue-next'
 
 definePageMeta({ layout: false })
 useHead({ title: 'Set up your project — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 
 const { api, projectId } = useApi()
 const auth = useAuth()
+const { show } = useToast()
 const step = ref(0)
 const loading = ref(false)
 const error = ref('')
@@ -13,6 +14,12 @@ const estimatedWeeklyCost = ref<number | null>(null)
 const planSaved = ref(false)
 const analysisRunning = ref(false)
 const website = ref('')
+const busyProvider = ref('')
+const selectedProvider = ref<any>(null)
+const loginStep = ref<'credentials' | 'verification'>('credentials')
+const verificationConnectionId = ref('')
+const credentials = reactive({ username: '', password: '', code: '' })
+let oauthPoll: ReturnType<typeof setInterval> | null = null
 const firstBoundary = ref(20)
 const secondBoundary = ref(50)
 const preferences = reactive({ videos_per_week: 3, average_duration_seconds: 30, audio_quality: 'premium', automation_mode: 'research_only' })
@@ -25,6 +32,152 @@ watch(preferences, () => {
 }, { deep: true })
 
 const { data: onboarding, refresh } = await useAsyncData('onboarding', () => api<any>(`/v1/projects/${projectId.value}/onboarding`))
+const { data: connections, refresh: refreshConnections } = await useAsyncData(
+  'onboarding-connections',
+  () => api<any>(`/v1/projects/${projectId.value}/connections`),
+  { default: () => ({ items: [] }) },
+)
+
+const channelOrder = ['youtube', 'tiktok', 'instagram']
+const channels = computed(() => channelOrder.map(provider => (
+  connections.value?.items?.find((item: any) => item.provider === provider) || {
+    id: `unconfigured_${provider}`,
+    provider,
+    display_name: provider[0]?.toUpperCase() + provider.slice(1),
+    status: 'not_connected',
+  }
+)))
+
+function providerName(provider: string) {
+  return provider === 'youtube' ? 'YouTube' : provider === 'tiktok' ? 'TikTok' : 'Instagram'
+}
+
+function isConnected(item: any) {
+  return ['active', 'healthy', 'limited'].includes(String(item?.status || ''))
+}
+
+function stopOauthPolling() {
+  if (oauthPoll) clearInterval(oauthPoll)
+  oauthPoll = null
+}
+
+onBeforeUnmount(stopOauthPolling)
+
+function closeLogin() {
+  selectedProvider.value = null
+  loginStep.value = 'credentials'
+  verificationConnectionId.value = ''
+  credentials.username = ''
+  credentials.password = ''
+  credentials.code = ''
+  error.value = ''
+}
+
+async function connectChannel(item: any) {
+  error.value = ''
+  if (item.provider === 'instagram' || item.provider === 'tiktok') {
+    selectedProvider.value = item
+    loginStep.value = item.status === 'verification_required' ? 'verification' : 'credentials'
+    verificationConnectionId.value = item.status === 'verification_required' ? item.id : ''
+    credentials.username = item.status === 'verification_required' ? String(item.display_name || '').replace(/^@/, '') : ''
+    return
+  }
+
+  busyProvider.value = item.provider
+  const authWindow = window.open('about:blank', 'youtube-oauth', 'popup=yes,width=560,height=760')
+  if (authWindow) authWindow.opener = null
+  try {
+    const result = await api<any>(`/v1/projects/${projectId.value}/connections/youtube/authorize`, { method: 'POST' })
+    if (!result.authorize_url) {
+      authWindow?.close()
+      await refreshConnections()
+      busyProvider.value = ''
+      show('YouTube connected', 'The channel is ready for automatic publishing.', 'success')
+      return
+    }
+    if (authWindow) authWindow.location.replace(result.authorize_url)
+    else window.location.assign(result.authorize_url)
+
+    stopOauthPolling()
+    oauthPoll = setInterval(async () => {
+      try {
+        await refreshConnections()
+        const youtube = connections.value?.items?.find((connection: any) => connection.provider === 'youtube')
+        if (isConnected(youtube)) {
+          stopOauthPolling()
+          busyProvider.value = ''
+          show('YouTube connected', 'The channel is ready for automatic publishing.', 'success')
+        }
+        else if (authWindow?.closed) {
+          stopOauthPolling()
+          busyProvider.value = ''
+        }
+      }
+      catch {
+        if (authWindow?.closed) {
+          stopOauthPolling()
+          busyProvider.value = ''
+        }
+      }
+    }, 1500)
+  }
+  catch (reason: any) {
+    authWindow?.close()
+    error.value = reason.message
+    busyProvider.value = ''
+  }
+}
+
+async function submitCredentials() {
+  if (!selectedProvider.value) return
+  const provider = selectedProvider.value.provider
+  busyProvider.value = provider
+  error.value = ''
+  try {
+    const result = await api<any>(`/v1/projects/${projectId.value}/connections/${provider}/browser-login`, {
+      method: 'POST',
+      body: { username: credentials.username, password: credentials.password },
+    })
+    credentials.password = ''
+    if (result.verification_required) {
+      verificationConnectionId.value = result.id
+      loginStep.value = 'verification'
+      show('Verification required', 'Enter the one-time code sent by the provider.', 'info')
+      return
+    }
+    const label = providerName(provider)
+    closeLogin()
+    await refreshConnections()
+    show(`${label} connected`, 'Only the encrypted browser session was saved. Your password was discarded.', 'success')
+  }
+  catch (reason: any) {
+    credentials.password = ''
+    error.value = reason.message
+  }
+  finally { busyProvider.value = '' }
+}
+
+async function submitVerification() {
+  const provider = selectedProvider.value?.provider
+  if (!verificationConnectionId.value || !provider) return
+  busyProvider.value = provider
+  error.value = ''
+  try {
+    const label = providerName(provider)
+    await api(`/v1/connections/${verificationConnectionId.value}/browser-verify`, {
+      method: 'POST',
+      body: { code: credentials.code },
+    })
+    closeLogin()
+    await refreshConnections()
+    show(`${label} connected`, 'The verified browser session is ready for automatic publishing.', 'success')
+  }
+  catch (reason: any) {
+    credentials.code = ''
+    error.value = reason.message
+  }
+  finally { busyProvider.value = '' }
+}
 
 function hydrateContext() {
   const value = onboarding.value?.project_context || {}
@@ -135,9 +288,25 @@ async function complete() {
       </template>
 
       <template v-else-if="step === 3">
-        <p class="eyebrow">Publishing</p><h1>Connect channels now or later.</h1><p class="lead">YouTube uses OAuth. TikTok and Instagram save your encrypted browser session after you sign in through their normal websites.</p>
-        <div class="channel-grid"><NuxtLink v-for="channel in ['YouTube','TikTok','Instagram']" :key="channel" to="/connections" target="_blank"><span>{{ channel }}</span><ExternalLink :size="15" /></NuxtLink></div>
-        <p class="secondary-note">The connections page opens in a new tab so this setup remains here.</p>
+        <p class="eyebrow">Publishing</p><h1>Connect channels now or later.</h1><p class="lead">Connect each account here. YouTube opens its secure Google OAuth window; TikTok and Instagram use their regular sign-in and save only an encrypted browser session.</p>
+        <div class="channel-grid">
+          <button
+            v-for="channel in channels"
+            :key="channel.provider"
+            type="button"
+            class="channel-card"
+            :class="{ 'channel-card--connected': isConnected(channel) }"
+            :disabled="busyProvider === channel.provider"
+            :aria-label="`${isConnected(channel) ? 'Reconnect' : 'Connect'} ${providerName(channel.provider)}`"
+            :data-testid="`onboarding-connect-${channel.provider}`"
+            @click="connectChannel(channel)"
+          >
+            <span><strong>{{ providerName(channel.provider) }}</strong><small>{{ isConnected(channel) ? channel.display_name : channel.provider === 'youtube' ? 'Continue with Google' : 'Sign in securely' }}</small></span>
+            <span v-if="isConnected(channel)" class="connected-mark"><CheckCircle2 :size="17" /> Connected</span>
+            <span v-else class="connect-mark"><KeyRound :size="16" /> {{ busyProvider === channel.provider ? 'Opening…' : 'Connect' }}</span>
+          </button>
+        </div>
+        <p class="secondary-note"><LockKeyhole :size="14" /> Passwords and one-time codes are never stored. You can also skip this step and connect channels later.</p>
         <div class="actions"><button class="button" @click="step--"><ArrowLeft :size="15" /> Back</button><button class="button button--primary" :disabled="loading" @click="loadAnalysis">{{ loading ? 'Finishing analysis…' : 'Continue' }} <ArrowRight :size="15" /></button></div>
       </template>
 
@@ -149,9 +318,31 @@ async function complete() {
       </template>
       <p v-if="error" class="auth-error" role="alert">{{ error }}</p>
     </section>
+
+    <div v-if="selectedProvider" class="modal-backdrop" @click.self="closeLogin">
+      <form class="modal login-modal" data-testid="onboarding-social-login" @submit.prevent="loginStep === 'credentials' ? submitCredentials() : submitVerification()">
+        <div class="modal__header">
+          <div><h2>Connect {{ providerName(selectedProvider.provider) }}</h2><p>Sign in without leaving onboarding.</p></div>
+          <button type="button" class="icon-button icon-button--plain" aria-label="Close" @click="closeLogin"><X :size="18" /></button>
+        </div>
+        <div class="modal__body">
+          <div class="login-security"><LockKeyhole :size="18" /><span>{{ loginStep === 'credentials' ? 'Your credentials are passed to a temporary private browser and discarded when this request finishes. Only the encrypted reusable session is stored.' : 'Enter the one-time code requested by the provider. The code is submitted to the pending browser session and never stored.' }}</span></div>
+          <div v-if="loginStep === 'credentials'" class="login-fields">
+            <label>Username or email<input v-model="credentials.username" autocomplete="username" required /></label>
+            <label>Password<input v-model="credentials.password" type="password" autocomplete="current-password" required /></label>
+          </div>
+          <label v-else>One-time verification code<input v-model="credentials.code" inputmode="numeric" autocomplete="one-time-code" minlength="4" maxlength="16" required /></label>
+          <p v-if="error" class="auth-error" role="alert">{{ error }}</p>
+        </div>
+        <div class="modal__footer">
+          <button type="button" class="button" @click="closeLogin">Cancel</button>
+          <button class="button button--primary" :disabled="Boolean(busyProvider)"><KeyRound :size="14" /> {{ busyProvider ? 'Signing in…' : loginStep === 'credentials' ? 'Sign in securely' : 'Verify account' }}</button>
+        </div>
+      </form>
+    </div>
   </main>
 </template>
 
 <style scoped>
-.onboarding-shell{min-height:100vh;padding:28px;background:radial-gradient(circle at 90% 0,#f6eafb,transparent 38%),#f7f5f4;color:#17131f}.onboarding-shell>header{display:grid;grid-template-columns:1fr minmax(180px,340px) 1fr;align-items:center;max-width:980px;margin:auto}.onboarding-shell header small{text-align:right;color:#766d7b}.step-meter{display:flex;gap:6px}.step-meter i{height:4px;flex:1;border-radius:10px;background:#e2dce5}.step-meter i.done{background:#982eb3}.onboarding-card{max-width:820px;margin:38px auto;padding:42px;border:1px solid #e3dce6;border-radius:24px;background:#fff;box-shadow:0 24px 70px rgba(38,23,43,.08)}h1{max-width:680px;margin:6px 0 12px;font-size:38px;letter-spacing:-.04em}.lead{max-width:680px;margin:0 0 28px;color:#716979;font-size:15px;line-height:1.6}.onboarding-icon{display:grid;width:46px;height:46px;place-items:center;border-radius:14px;background:#f8edfb;color:#982eb3}.onboarding-card label{display:grid;gap:7px;color:#312b35;font-size:12px;font-weight:700}.onboarding-card input,.onboarding-card select,.onboarding-card textarea{width:100%;padding:12px;border:1px solid #dcd4df;border-radius:10px;background:#fff;font:inherit}.onboarding-card textarea{min-height:95px;resize:vertical}.onboarding-card>.button{margin-top:18px}.mix-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.mix-summary div{display:grid;gap:5px;padding:18px;border:1px solid #e4dde7;border-radius:14px;background:#fcfafc}.mix-summary strong{font-size:24px}.mix-summary span{color:#716979;font-size:11px}.boundary-control{display:grid;gap:16px;margin:25px 0}.boundary-control input{padding:0;accent-color:#982eb3}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.context-grid .wide{grid-column:1/-1}.estimate{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:16px;border-radius:12px;background:#f8edfb}.estimate span{color:#716979;font-size:11px}.actions{display:flex;justify-content:space-between;margin-top:28px}.channel-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.channel-grid a{display:flex;justify-content:space-between;padding:20px;border:1px solid #e0d8e3;border-radius:14px;color:#26202a;text-decoration:none;font-weight:750}.secondary-note,.analysis-note{margin-top:14px;color:#716979;font-size:11px}.analysis-note{display:flex;align-items:center;gap:8px;padding:12px;border-radius:10px;background:#f8edfb}@media(max-width:700px){.onboarding-shell{padding:16px}.onboarding-shell>header{grid-template-columns:1fr auto}.step-meter{display:none}.onboarding-card{margin-top:24px;padding:24px}.form-grid,.mix-summary,.channel-grid{grid-template-columns:1fr}.context-grid .wide{grid-column:auto}h1{font-size:30px}}
+.onboarding-shell{min-height:100vh;padding:28px;background:radial-gradient(circle at 90% 0,#f6eafb,transparent 38%),#f7f5f4;color:#17131f}.onboarding-shell>header{display:grid;grid-template-columns:1fr minmax(180px,340px) 1fr;align-items:center;max-width:980px;margin:auto}.onboarding-shell header small{text-align:right;color:#766d7b}.step-meter{display:flex;gap:6px}.step-meter i{height:4px;flex:1;border-radius:10px;background:#e2dce5}.step-meter i.done{background:#982eb3}.onboarding-card{max-width:820px;margin:38px auto;padding:42px;border:1px solid #e3dce6;border-radius:24px;background:#fff;box-shadow:0 24px 70px rgba(38,23,43,.08)}h1{max-width:680px;margin:6px 0 12px;font-size:38px;letter-spacing:-.04em}.lead{max-width:680px;margin:0 0 28px;color:#716979;font-size:15px;line-height:1.6}.onboarding-icon{display:grid;width:46px;height:46px;place-items:center;border-radius:14px;background:#f8edfb;color:#982eb3}.onboarding-card label,.login-modal label{display:grid;gap:7px;color:#312b35;font-size:12px;font-weight:700}.onboarding-card input,.onboarding-card select,.onboarding-card textarea,.login-modal input{width:100%;padding:12px;border:1px solid #dcd4df;border-radius:10px;background:#fff;font:inherit}.onboarding-card textarea{min-height:95px;resize:vertical}.onboarding-card>.button{margin-top:18px}.mix-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.mix-summary div{display:grid;gap:5px;padding:18px;border:1px solid #e4dde7;border-radius:14px;background:#fcfafc}.mix-summary strong{font-size:24px}.mix-summary span{color:#716979;font-size:11px}.boundary-control{display:grid;gap:16px;margin:25px 0}.boundary-control input{padding:0;accent-color:#982eb3}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.context-grid .wide{grid-column:1/-1}.estimate{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:16px;border-radius:12px;background:#f8edfb}.estimate span{color:#716979;font-size:11px}.actions{display:flex;justify-content:space-between;margin-top:28px}.channel-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.channel-card{display:grid;min-width:0;gap:16px;padding:18px;border:1px solid #e0d8e3;border-radius:14px;background:#fff;color:#26202a;text-align:left;transition:border-color .16s,box-shadow .16s,transform .16s}.channel-card:hover:not(:disabled){transform:translateY(-2px);border-color:#bd80ca;box-shadow:0 10px 30px rgba(57,29,63,.08)}.channel-card>span:first-child{display:grid;gap:4px}.channel-card strong{font-size:15px}.channel-card small{overflow:hidden;color:#716979;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.channel-card--connected{border-color:#b9dfcb;background:#f5fcf8}.connected-mark,.connect-mark{display:flex;align-items:center;gap:6px;color:#15824b;font-size:10px;font-weight:800}.connect-mark{color:#8c26a5}.secondary-note,.analysis-note{margin-top:14px;color:#716979;font-size:11px}.secondary-note{display:flex;align-items:center;gap:6px}.analysis-note{display:flex;align-items:center;gap:8px;padding:12px;border-radius:10px;background:#f8edfb}.login-modal{width:min(520px,100%)}.login-fields{display:grid;gap:14px}.login-security{display:flex;gap:9px;align-items:flex-start;margin-bottom:16px;padding:11px;border-radius:10px;background:#eef9f3;color:#15824b}.login-security span{font-size:10px;line-height:1.5}.login-modal .auth-error{margin-top:14px}@media(max-width:700px){.onboarding-shell{padding:16px}.onboarding-shell>header{grid-template-columns:1fr auto}.step-meter{display:none}.onboarding-card{margin-top:24px;padding:24px}.form-grid,.mix-summary,.channel-grid{grid-template-columns:1fr}.context-grid .wide{grid-column:auto}h1{font-size:30px}}
 </style>

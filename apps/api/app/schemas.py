@@ -36,6 +36,28 @@ class ProjectPatch(BaseModel):
     brief: dict[str, Any] | None = None
 
 
+class AutomationConfigure(BaseModel):
+    mode: Literal["off", "research_only", "scripts", "videos", "publish"]
+    videos_per_week: int = Field(default=3, ge=1, le=100)
+    average_duration_seconds: int = Field(default=30, ge=8, le=3_600)
+    audio_quality: Literal["standard", "premium"] = "premium"
+    selling_percent: int = Field(default=20, ge=0, le=100)
+    viral_percent: int = Field(default=30, ge=0, le=100)
+    informative_percent: int = Field(default=50, ge=0, le=100)
+    research_interval_hours: int = Field(default=24, ge=1, le=720)
+    research_recency_days: int = Field(default=30, ge=1, le=365)
+    research_max_candidates: int = Field(default=50, ge=1, le=50)
+    research_backlog_target: int = Field(default=150, ge=1, le=1_000)
+    video_defaults: dict[str, dict[str, Any]] | None = None
+    publishing: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def content_mix_totals_one_hundred(self) -> AutomationConfigure:
+        if self.selling_percent + self.viral_percent + self.informative_percent != 100:
+            raise ValueError("selling_percent, viral_percent and informative_percent must total 100")
+        return self
+
+
 class BrandProfilePatch(BaseModel):
     description: str | None = None
     audiences: dict[str, list[str]] | None = None

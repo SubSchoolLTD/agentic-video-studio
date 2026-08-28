@@ -480,6 +480,24 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
     ).json()["items"]
     assert next(item for item in all_candidates if item["id"] == candidates[1]["id"])["status"] == "hidden"
     with SessionLocal() as session:
+        ResourceRepository(session).add(
+            kind="metric_snapshot",
+            organization_id="org_demo",
+            project_id="prj_subschool",
+            status="complete",
+            data={
+                "publication_id": "pub_feedback_fixture",
+                "window": "7d",
+                "observed_performance_index": 78,
+                "confidence": 0.42,
+                "content_features": {
+                    "topic": candidates[0]["title"],
+                    "visual_mode": candidates[0]["recommended_visual_mode"],
+                    "candidate_type": candidates[0]["candidate_type"],
+                    "objective": candidates[0]["objective"],
+                },
+            },
+        )
         feedback = _research_feedback_context(
             ResourceRepository(session),
             organization_id="org_demo",
@@ -489,6 +507,12 @@ async def test_scheduled_research_converts_candidates_and_supports_mute(client, 
     assert feedback["hidden_count"] >= 1
     assert any(candidates[0]["title"] in pattern for pattern in feedback["positive_patterns"])
     assert any(candidates[1]["title"] in pattern for pattern in feedback["negative_patterns"])
+    assert feedback["published_observation_count"] >= 1
+    assert any(candidates[0]["title"] in pattern for pattern in feedback["winning_performance_patterns"])
+    assert feedback["exploration_floor_percent"] == 20
+    exposed = client.get("/v1/projects/prj_subschool/research-feedback", headers=auth_headers)
+    assert exposed.status_code == 200
+    assert exposed.json()["published_observation_count"] >= 1
 
 
 def test_research_profile_cadence_can_be_edited_and_paused(client, auth_headers) -> None:

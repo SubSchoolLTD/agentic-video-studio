@@ -42,6 +42,24 @@ test('public landing page explains the product, pricing and account entry points
   await expect(page.locator('script[type="application/ld+json"]')).toHaveCount(2)
   await expect(page.locator('footer').getByRole('link', { name: 'Create account' })).toHaveAttribute('href', '/register')
   await expect(page.locator('footer').getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
+  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Solutions' })).toHaveAttribute('href', '/solutions')
+})
+
+test('solution pages address distinct audiences', async ({ page }) => {
+  const overview = await page.goto('/solutions')
+  expect(overview?.status()).toBe(200)
+  await expect(page.getByRole('heading', { name: /one autonomous studio/i })).toBeVisible()
+  await expect(page.getByRole('link', { name: /studios & media teams/i })).toHaveAttribute('href', '/solutions/studios-media-teams')
+  for (const [slug, heading] of [
+    ['studios-media-teams', /keep the story alive/i],
+    ['creators-experts', /turn expertise into a channel/i],
+    ['small-businesses', /stay visible every week/i],
+    ['education-teams', /make useful educational video/i],
+  ] as const) {
+    const response = await page.goto(`/solutions/${slug}`)
+    expect(response?.status(), slug).toBe(200)
+    await expect(page.getByRole('heading', { name: heading })).toBeVisible()
+  }
 })
 
 test('all product sections render without route errors', async ({ page }) => {

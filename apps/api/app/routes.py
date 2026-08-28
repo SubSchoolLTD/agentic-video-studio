@@ -79,6 +79,7 @@ from .repository import (
 )
 from .schemas import (
     ApiKeyCreate,
+    AutomationConfigure,
     BrandProfilePatch,
     CharacterGenerate,
     ContentItemCreate,
@@ -544,6 +545,142 @@ def patch_project(
                 merged_settings[section] = value
         changes["settings"] = merged_settings
     return ResourceRepository.serialize(repo.update(project, data=changes))
+
+
+@router.get("/projects/{project_id}/automation", tags=["automation"])
+def get_project_automation(
+    project_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("projects:read")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    profile = session.scalar(
+        select(Resource)
+        .where(
+            Resource.kind == "research_profile",
+            Resource.organization_id == principal.organization_id,
+            Resource.project_id == project_id,
+        )
+        .order_by(Resource.created_at.asc())
+    )
+    return {
+        "project_id": project_id,
+        "mode": str(project.data.get("automation_mode") or "off"),
+        "paused": bool(project.data.get("autopilot_paused")),
+        "settings": dict(project.data.get("settings") or {}),
+        "research_profile": ResourceRepository.serialize(profile) if profile else None,
+        "funding": _automation_funding_plan(session, project, settings),
+    }
+
+
+@router.put("/projects/{project_id}/automation", tags=["automation"])
+def configure_project_automation(
+    project_id: str,
+    payload: AutomationConfigure,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Configure the same automation controls used by onboarding and project settings."""
+    principal.require("projects:write")
+    principal.require("research:run")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    current_settings = dict(project.data.get("settings") or {})
+    selected_audio_mode = "veo_native" if payload.audio_quality == "premium" else "google_tts"
+    video_defaults = dict(current_settings.get("video_defaults") or {})
+    if payload.video_defaults:
+        for visual_mode, values in payload.video_defaults.items():
+            video_defaults[str(visual_mode)] = {
+                **dict(video_defaults.get(str(visual_mode)) or {}),
+                **dict(values or {}),
+            }
+    for visual_mode in ("ugc_creator", "storytelling", "cinematic", "motion_graphics"):
+        defaults = dict(video_defaults.get(visual_mode) or {})
+        video_defaults[visual_mode] = {
+            **defaults,
+            "audio_mode": defaults.get("audio_mode", selected_audio_mode),
+            "native_voice_preset": defaults.get("native_voice_preset", "warm_conversational"),
+            "continue_scenes": defaults.get("continue_scenes", visual_mode == "ugc_creator"),
+        }
+
+    configured_settings = {
+        **current_settings,
+        "content_mix": {
+            "selling": payload.selling_percent,
+            "viral": payload.viral_percent,
+            "informative": payload.informative_percent,
+        },
+        "research": {
+            **dict(current_settings.get("research") or {}),
+            "backlog_target": payload.research_backlog_target,
+            "max_candidates": payload.research_max_candidates,
+            "recency_days": payload.research_recency_days,
+        },
+        "production": {
+            **dict(current_settings.get("production") or {}),
+            "videos_per_week": payload.videos_per_week,
+            "average_duration_seconds": payload.average_duration_seconds,
+            "audio_quality": payload.audio_quality,
+        },
+        "video_defaults": video_defaults,
+    }
+    if payload.publishing is not None:
+        configured_settings["publishing"] = {
+            **dict(current_settings.get("publishing") or {}),
+            **dict(payload.publishing),
+        }
+    project = repo.update(
+        project,
+        data={
+            "automation_mode": payload.mode,
+            "autopilot_paused": payload.mode == "off",
+            "settings": configured_settings,
+        },
+    )
+
+    profile = session.scalar(
+        select(Resource)
+        .where(
+            Resource.kind == "research_profile",
+            Resource.organization_id == principal.organization_id,
+            Resource.project_id == project_id,
+        )
+        .order_by(Resource.created_at.asc())
+    )
+    profile_data = {
+        "name": str((profile.data.get("name") if profile else None) or "Automatic idea discovery"),
+        "objective": str(
+            (profile.data.get("objective") if profile else None)
+            or "Find fresh, evidence-backed short-form topics for this project and its primary audience."
+        ),
+        "interval_hours": payload.research_interval_hours,
+        "timezone": project.data.get("timezone", "UTC"),
+        "recency_days": payload.research_recency_days,
+        "max_candidates": payload.research_max_candidates,
+        "next_run_at": (datetime.now(UTC) + timedelta(hours=payload.research_interval_hours)).isoformat(),
+    }
+    profile_status = "paused" if payload.mode == "off" else "active"
+    if profile:
+        profile = repo.update(profile, status=profile_status, data=profile_data)
+    else:
+        profile = repo.add(
+            kind="research_profile",
+            organization_id=principal.organization_id,
+            project_id=project_id,
+            status=profile_status,
+            data=profile_data,
+        )
+    return {
+        "project_id": project_id,
+        "mode": payload.mode,
+        "settings": configured_settings,
+        "research_profile": ResourceRepository.serialize(profile),
+        "funding": _automation_funding_plan(session, project, settings),
+    }
 
 
 async def _analyze_project_task(
@@ -2581,6 +2718,66 @@ def _research_feedback_context(
             ).most_common(8)
         )
 
+    snapshots = repo.list(
+        organization_id=organization_id,
+        project_id=project_id,
+        kind="metric_snapshot",
+        limit=200,
+    )
+    # Prefer the mature 7d observation when both checkpoints exist for the same
+    # publication. Imported snapshots without a publication remain independent.
+    window_rank = {"24h": 1, "7d": 2}
+    latest_per_publication: dict[str, Resource] = {}
+    for snapshot in snapshots:
+        if snapshot.data.get("observed_performance_index") is None:
+            continue
+        key = str(snapshot.data.get("publication_id") or snapshot.id)
+        current = latest_per_publication.get(key)
+        if not current or window_rank.get(str(snapshot.data.get("window")), 0) >= window_rank.get(
+            str(current.data.get("window")), 0
+        ):
+            latest_per_publication[key] = snapshot
+
+    performance_observations: list[dict[str, Any]] = []
+    for snapshot in latest_per_publication.values():
+        features = dict(snapshot.data.get("content_features") or {})
+        score = int(round(float(snapshot.data.get("observed_performance_index") or 0)))
+        pattern_parts = [
+            features.get("topic"),
+            features.get("candidate_type"),
+            features.get("objective"),
+            features.get("visual_mode"),
+        ]
+        performance_observations.append(
+            {
+                "metric_snapshot_id": snapshot.id,
+                "publication_id": snapshot.data.get("publication_id"),
+                "window": snapshot.data.get("window"),
+                "score": score,
+                "confidence": float(snapshot.data.get("confidence") or 0.42),
+                "pattern": " · ".join(
+                    str(value).strip() for value in pattern_parts if str(value or "").strip()
+                )[:500],
+                "content_features": features,
+            }
+        )
+    performance_observations.sort(key=lambda item: item["score"], reverse=True)
+    winning_observations = [item for item in performance_observations if item["score"] >= 65]
+    underperforming_observations = [item for item in performance_observations if item["score"] < 45]
+
+    def average_scores(items: list[dict[str, Any]], key: str) -> dict[str, float]:
+        grouped: dict[str, list[int]] = {}
+        for item in items:
+            value = str((item.get("content_features") or {}).get(key) or "").strip()
+            if value:
+                grouped.setdefault(value, []).append(int(item["score"]))
+        return {
+            value: round(sum(scores) / len(scores), 1)
+            for value, scores in sorted(
+                grouped.items(), key=lambda pair: sum(pair[1]) / len(pair[1]), reverse=True
+            )[:8]
+        }
+
     return {
         "selected_count": len(positive),
         "hidden_count": len(negative),
@@ -2592,11 +2789,42 @@ def _research_feedback_context(
         "hidden_candidate_type_counts": counts(negative, "candidate_type"),
         "selected_audience_counts": counts(positive, "audience"),
         "hidden_audience_counts": counts(negative, "audience"),
+        "published_observation_count": len(performance_observations),
+        "winning_performance_patterns": [
+            item["pattern"] for item in winning_observations[:8] if item["pattern"]
+        ],
+        "underperforming_performance_patterns": [
+            item["pattern"] for item in underperforming_observations[:8] if item["pattern"]
+        ],
+        "performance_format_scores": average_scores(performance_observations, "visual_mode"),
+        "performance_candidate_type_scores": average_scores(performance_observations, "candidate_type"),
+        "performance_objective_scores": average_scores(performance_observations, "objective"),
+        "performance_observations": performance_observations[:12],
+        "exploration_floor_percent": 20,
         "instruction": (
             "Use selections as soft positive preference signals and hidden items as soft negative preference signals. "
-            "Never treat either as evidence or repeat a hidden candidate verbatim."
+            "Treat publication performance as low-confidence directional feedback, never as causal evidence. "
+            "Keep at least 20% of candidates exploratory, never treat feedback as factual evidence, and never repeat "
+            "a hidden candidate verbatim."
         ),
     }
+
+
+@router.get("/projects/{project_id}/research-feedback", tags=["research"])
+def get_research_feedback(
+    project_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Expose the bounded, non-causal preference memory actually sent to future research."""
+    principal.require("research:read")
+    repo = ResourceRepository(session)
+    require_project(repo, project_id, principal)
+    return _research_feedback_context(
+        repo,
+        organization_id=principal.organization_id,
+        project_id=project_id,
+    )
 
 
 def _record_research_feedback(
@@ -5738,10 +5966,20 @@ async def collect_metric_checkpoint(
         "hook": script_data.get("hook"),
         "format": idea.data.get("format") if idea else "educational_explainer",
         "topic": idea.data.get("title") if idea else publication.data.get("title"),
+        "audience": idea.data.get("audience") if idea else None,
+        "objective": idea.data.get("objective") if idea else None,
+        "candidate_type": idea.data.get("candidate_type") if idea else None,
+        "idea_id": idea.id if idea else None,
+        "topic_candidate_id": idea.data.get("topic_candidate_id") if idea else None,
+        "research_run_id": idea.data.get("research_run_id") if idea else None,
         "duration_seconds": round(float(version.data.get("duration_ms", 0)) / 1000, 2) if version else None,
         "cta": script_data.get("cta"),
         "aspect_ratio": version.data.get("aspect_ratio") if version else None,
-        "visual_mode": "motion_graphics_hybrid",
+        "visual_mode": (
+            idea.data.get("visual_mode")
+            if idea
+            else (job.data.get("visual_mode") if job else None)
+        ) or "motion_graphics",
     }
 
     published_at = datetime.fromisoformat(publication.data["published_at"])

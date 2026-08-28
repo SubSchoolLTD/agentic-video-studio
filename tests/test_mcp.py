@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.mcp.server import project_update_brief, research_run, source_add_text
+from apps.mcp.server import automation_configure, project_update_brief, research_run, source_add_text
 from apps.mcp.utils import stable_idempotency_key
 
 
@@ -28,3 +28,15 @@ async def test_mcp_mutating_tools_support_side_effect_free_dry_runs() -> None:
         "objective": "Find evidence about course reuse",
         "estimated_calls": 1,
     }
+    automation = await automation_configure(
+        "prj",
+        "publish",
+        videos_per_week=4,
+        selling_percent=20,
+        viral_percent=30,
+        informative_percent=50,
+        dry_run=True,
+    )
+    assert automation["dry_run"] is True
+    assert automation["payload"]["mode"] == "publish"
+    assert automation["content_mix_total"] == 100

@@ -1114,6 +1114,8 @@ class ParallelSearchProvider:
         preference_context = preference_context or {}
         positive_patterns = preference_context.get("positive_patterns") or []
         negative_patterns = preference_context.get("negative_patterns") or []
+        winning_performance_patterns = preference_context.get("winning_performance_patterns") or []
+        underperforming_performance_patterns = preference_context.get("underperforming_performance_patterns") or []
         search_queries = [
             objective,
             f"recent evidence and primary sources for {objective}",
@@ -1127,6 +1129,16 @@ class ParallelSearchProvider:
             search_queries.append(
                 "alternative evidence-backed angles that are materially different from hidden themes: "
                 f"{'; '.join(negative_patterns[:5])}"
+            )
+        if winning_performance_patterns:
+            search_queries.append(
+                "fresh adjacent audience questions—not repetitions—related to historically stronger published patterns: "
+                f"{'; '.join(winning_performance_patterns[:4])}"
+            )
+        if underperforming_performance_patterns:
+            search_queries.append(
+                "new evidence-backed directions that avoid relying on historically weak published treatments: "
+                f"{'; '.join(underperforming_performance_patterns[:4])}"
             )
         payload = {
             "objective": objective,
@@ -1558,6 +1570,8 @@ class TopicCandidateProvider:
                 "Creative direction must describe a filmable human situation with location, observable action, tension and payoff—not a dashboard, phone mockup or generic talking head.",
                 "Treat selected patterns as positive preference signals, not facts.",
                 "Avoid repeating hidden patterns; propose meaningfully different themes or angles.",
+                "Treat published performance observations as low-confidence directional signals, never causal evidence.",
+                "Reserve at least 20 percent of the batch for genuinely new topics, formats or audience hypotheses.",
                 "Choose exactly one candidate_type. When three or more candidates are requested, cover problem_solution, educational_value and entertaining_viral before repeating a type.",
                 "Across the full batch approximate the requested content mix: selling maps to problem_solution, viral maps to entertaining_viral, and informative maps to educational_value.",
                 "For every candidate choose exactly one recommended_visual_mode from available_video_formats.",

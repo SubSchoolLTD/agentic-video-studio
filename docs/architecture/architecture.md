@@ -9,9 +9,10 @@ The product must prove a stateful production loop rather than a prompt-to-video 
 ```mermaid
 flowchart LR
   User[Editor] --> Web[Nuxt web]
-  Client[RSS / REST / MCP client] --> API[FastAPI application API]
+  Client[RSS / REST client] --> API[FastAPI application API]
   Web --> API
-  MCP[MCP server] --> API
+  MCPClient[User agent] --> MCP[Bearer-protected Streamable HTTP /mcp]
+  MCP --> API
   API --> DB[(SQLite local / PostgreSQL cloud)]
   API --> WF[Durable stage state machine]
   Scheduler[Cloud Scheduler] --> GWF[Google Workflows]
@@ -25,6 +26,8 @@ flowchart LR
   API --> YouTube[YouTube official API]
   YouTube --> Metrics[24h / 7d metrics collector]
   Metrics --> DB
+  Metrics --> Feedback[Bounded performance memory]
+  Feedback --> Parallel
   Metrics --> Events[(ClickHouse append analytics)]
   API --> Events
   Events --> Grafana[Provisioned operations dashboard]
@@ -37,7 +40,7 @@ flowchart LR
 - `workflow`: typed stages and retry-safe transitions; every stage output is persisted.
 - `rendering`: optional uploaded-logo and opt-in clean-caption overlays, downloadable subtitle assets, and final H.264/AAC output.
 - `web`: no provider secrets; consumes the public `/v1` contract and reflects partial states.
-- `mcp`: thin, scoped wrapper over the same application services; publication uses prepare/commit.
+- `mcp`: remote, bearer-protected thin wrapper over the same application API and project scopes; publication uses prepare/commit.
 
 ## Data flow
 
@@ -69,6 +72,8 @@ The local build stores each resource and generation stage in SQLite. The cloud d
 PostgreSQL remains the transactional source of truth. Domain events and normalized publication facts are copied asynchronously to append-only ClickHouse tables. Failed analytics delivery is logged and never rolls back product state. Grafana reads only this event stream through a provisioned datasource; it does not become a runtime dependency.
 
 Cloud Scheduler starts the `avs-metrics-collector` Google Workflow every 15 minutes. Workflows signs an OIDC request as the runtime service account, and the private application endpoint verifies both token audience and service-account email before collecting due checkpoints. Domain events are also published at-least-once to `avs-domain-events`; consumers use event IDs for deduplication.
+
+Candidate selections, hides and mutes become bounded positive/negative research memory. The metrics workflow adds the latest available 24h or 7d observation for each publication—topic, objective, candidate type, format and conservative performance score—to the next research context. These observations are explicitly non-causal, keep a 20% exploration floor and never replace fresh evidence from Parallel.
 
 ## Security decisions
 

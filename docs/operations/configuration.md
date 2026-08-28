@@ -31,7 +31,7 @@ Copy `.env.example` to `.env`. Never commit `.env`, OAuth tokens, provider respo
 | `WEBHOOK_SIGNING_SECRET` | `WEBHOOK_SIGNING_SECRET` |
 | `API_KEY_PEPPER` | `API_KEY_PEPPER` |
 
-Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, `PAYPAL_ENV=live`, PayPal server credentials, and a strong `JWT_SECRET`. PayPal credentials never reach the browser; Orders v2 create/capture and amount verification happen on the API. Demo authentication is accepted only in explicit local/test environments. The MCP process requires `APP_API_TOKEN` containing a tenant-scoped API key or access token; it has no shared default credential.
+Production must set `APP_AUTH_MODE=jwt`, `EMAIL_DELIVERY_MODE=sendpulse`, `PAYPAL_ENV=live`, PayPal server credentials, and a strong `JWT_SECRET`. PayPal credentials never reach the browser; Orders v2 create/capture and amount verification happen on the API. Demo authentication is accepted only in explicit local/test environments. The deployed API mounts the Streamable HTTP MCP resource at `/mcp`; every request must carry a user JWT or revocable project-scoped API key as `Authorization: Bearer …`. The optional standalone MCP process may use `APP_API_TOKEN`, but there is no shared or anonymous production credential. In the combined Cloud Run service set `MCP_API_BASE=http://127.0.0.1:8080`, so authenticated MCP domain calls use container loopback instead of consuming a second public Cloud Run request.
 
 Google runtime identity should use workload identity/service account credentials in deployment; do not place long-lived service-account JSON in GitHub when federation is available.
 

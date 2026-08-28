@@ -3,7 +3,15 @@ import { Download, Film, Grid2X2, List, Search, Send } from 'lucide-vue-next'
 const { api, projectId, apiBase } = useApi()
 const view = ref<'grid' | 'list'>('grid')
 const search = ref('')
-const { data } = await useAsyncData('library-videos', () => api<any>(`/v1/projects/${projectId.value}/videos`), { default: () => ({ items: [] }) })
+const { data, refresh } = await useAsyncData(
+  () => `library-videos-${projectId.value}`,
+  () => api<any>(`/v1/projects/${projectId.value}/videos`),
+  { default: () => ({ items: [] }) },
+)
+// A NuxtLink can prefetch this page before the active tenant is fully restored.
+// Refresh after hydration so the library always reflects the current project,
+// even when a cached empty payload was produced by that early prefetch.
+onMounted(() => refresh())
 const assets = computed(() => (data.value.items || []).flatMap((video: any) => (video.versions || []).map((version: any) => ({ ...version, title: video.title, videoStatus: video.status }))).filter((asset: any) => asset.title?.toLowerCase().includes(search.value.trim().toLowerCase())))
 </script>
 <template><div><UiPageHeader eyebrow="Media provenance" title="Library" description="Final video versions with rights status, render manifests and checksums."><button class="button" :class="{'button--primary':view==='list'}" @click="view='list'"><List :size="14" /> List</button><button class="button" :class="{'button--primary':view==='grid'}" @click="view='grid'"><Grid2X2 :size="14" /> Grid</button></UiPageHeader><div class="library-toolbar"><span><Film :size="14" /> Video versions</span><label><Search :size="14" /><input v-model="search" aria-label="Search video assets" placeholder="Search assets…"></label></div><div v-if="assets.length" class="asset-grid" :class="{'asset-grid--list':view==='list'}"><UiAppCard v-for="asset in assets" :key="asset.id" :padded="false" class="asset-card"><div class="asset-card__preview"><video :src="`${apiBase}${asset.render_url}`" preload="metadata" muted controls /><span>{{ asset.aspect_ratio }}</span></div><div class="asset-card__body"><strong>{{ asset.title }}</strong><small>{{ Math.round(asset.duration_ms/1000) }} sec · H.264 · owned</small><div><UiStatusBadge :status="asset.status || asset.videoStatus" /><span class="asset-actions"><NuxtLink :to="`/publishing?version=${encodeURIComponent(asset.id)}`" class="icon-button" aria-label="Send video to publication" title="Send to publication"><Send :size="14" /></NuxtLink><a :href="`${apiBase}${asset.render_url}`" download class="icon-button" aria-label="Download video"><Download :size="14" /></a></span></div></div></UiAppCard></div><UiAppCard v-else><div class="empty-state"><div><span class="empty-state__icon"><Film :size="23" /></span><h3>{{ search ? 'No matching video assets' : 'No media assets yet' }}</h3><p>Completed productions will appear here with provenance, rights status, render manifests and checksums.</p><NuxtLink to="/ideas" class="button button--primary">Start production</NuxtLink></div></div></UiAppCard></div></template>

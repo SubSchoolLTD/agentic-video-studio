@@ -177,3 +177,81 @@ def send_account_email(
     except Exception:
         logger.exception("SendPulse delivery failed")
     return False
+
+
+def send_low_balance_email(
+    *,
+    user: User,
+    current_balance_usd: float,
+    required_balance_usd: float,
+    plan_options: list[dict[str, object]],
+    settings: Settings,
+) -> bool:
+    """Send one funding reminder for the current paid-balance cycle.
+
+    Deduplication is deliberately handled by the caller against the latest captured
+    top-up. This function only renders and delivers the transactional message.
+    """
+    if settings.email_delivery_mode == "log":
+        logger.info(
+            "Low-balance email queued in log mode: recipient_domain=%s",
+            user.email.rpartition("@")[2],
+        )
+        return True
+    token = _sendpulse_access_token(settings)
+    if not token:
+        return False
+
+    safe_name = html.escape(user.display_name)
+    rows: list[str] = []
+    text_links: list[str] = []
+    for option in plan_options:
+        label = html.escape(str(option.get("label") or "Top up"))
+        amount = int(option.get("amount_usd") or 0)
+        videos = int(option.get("video_count") or 0)
+        plan = html.escape(str(option.get("id") or "week"), quote=True)
+        link = f"{settings.web_base_url.rstrip('/')}/funding?plan={plan}&source=low_balance"
+        safe_link = html.escape(link, quote=True)
+        rows.append(
+            f'<a href="{safe_link}" style="display:block;margin:10px 0;padding:14px 18px;'
+            f'border-radius:12px;background:#982eb3;color:#fff;text-decoration:none;font-weight:700">'
+            f'{label} · ${amount} <span style="font-weight:400;opacity:.82">· about {videos} videos</span></a>'
+        )
+        text_links.append(f"{label} (${amount}, about {videos} videos): {link}")
+
+    subject = "Your Framewise automation needs more balance"
+    body = f"""<!doctype html>
+<html><body style="margin:0;background:#f6f3f7;font-family:Inter,Arial,sans-serif;color:#17131f">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f3f7;padding:36px 16px"><tr><td align="center">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#fff;border:1px solid #e8e1eb;border-radius:20px;overflow:hidden">
+<tr><td style="padding:24px 30px;background:#21172b;color:#fff"><div style="font-size:23px;font-weight:800">Framewise</div><div style="margin-top:5px;color:#dcb9e6;font-size:13px">Automatic content production</div></td></tr>
+<tr><td style="padding:34px 30px"><h1 style="margin:0 0 18px;font-size:27px;line-height:1.2">Keep your content plan running</h1>
+<p style="font-size:16px;line-height:1.6">Hello {safe_name},</p>
+<p style="font-size:16px;line-height:1.6">Your balance is ${current_balance_usd:.2f}. The next planned video needs about ${required_balance_usd:.2f}, so automatic video production is waiting for a top-up.</p>
+<div style="margin:26px 0">{''.join(rows)}</div>
+<p style="font-size:13px;line-height:1.6;color:#716979">After payment Framewise resumes the waiting automation automatically. If you need to sign in first, you will return to this funding page afterward.</p></td></tr>
+<tr><td style="padding:18px 30px;background:#faf8fb;color:#837989;font-size:12px">Framewise · studio.subschool.us</td></tr>
+</table></td></tr></table></body></html>"""
+    email_payload = {
+        "subject": subject,
+        "from": {"name": settings.email_from_name, "email": settings.email_from_email},
+        "to": [{"email": user.email, "name": user.display_name}],
+        "html": base64.b64encode(body.encode()).decode(),
+        "text": (
+            f"Your Framewise balance is ${current_balance_usd:.2f}. The next planned video needs "
+            f"about ${required_balance_usd:.2f}.\n\n" + "\n".join(text_links)
+        ),
+    }
+    try:
+        response = httpx.post(
+            "https://api.sendpulse.com/smtp/emails",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"email": email_payload},
+            timeout=10,
+        )
+        if response.status_code < 300:
+            return True
+        logger.error("SendPulse low-balance delivery failed: status=%s", response.status_code)
+    except Exception:
+        logger.exception("SendPulse low-balance delivery failed")
+    return False

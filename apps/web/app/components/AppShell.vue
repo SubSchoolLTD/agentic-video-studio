@@ -31,8 +31,7 @@ const { enabled: testMode } = useTestMode()
 const mobileOpen = ref(false)
 const collapsed = useState('sidebar-collapsed', () => false)
 const hydrated = ref(false)
-
-onMounted(() => { hydrated.value = true })
+let balancePoll: ReturnType<typeof setInterval> | null = null
 
 const baseNav: any[] = [
   { label: 'Overview', to: '/app', icon: Gauge },
@@ -57,9 +56,25 @@ const { data: projects } = await useAsyncData('shell-projects', () => api<any>('
 const { data: health } = await useAsyncData('shell-health', () => api<any>('/v1/health'), {
   default: () => ({ status: 'unknown', environment: 'unknown', provider_mode: 'unknown' }),
 })
-const { data: billingSummary } = await useAsyncData('billing-summary', () => api<any>('/v1/billing/summary'), {
+const { data: billingSummary, refresh: refreshBillingSummary } = await useAsyncData('billing-summary', () => api<any>('/v1/billing/summary'), {
   default: () => ({ balance_cents: 0, balance_usd: 0, currency: 'USD', prices: [] }),
 })
+const { data: fundingStatus, refresh: refreshFundingStatus } = await useAsyncData(
+  'shell-funding-status',
+  () => projectId.value
+    ? api<any>(`/v1/projects/${projectId.value}/funding-status`)
+    : Promise.resolve({ needs_topup: false }),
+  { default: () => ({ needs_topup: false }), watch: [projectId] },
+)
+const showFundingBanner = computed(() => (
+  Boolean(fundingStatus.value?.needs_topup)
+  && !['/funding', '/onboarding'].includes(route.path)
+))
+onMounted(() => {
+  hydrated.value = true
+  balancePoll = setInterval(() => { void Promise.all([refreshBillingSummary(), refreshFundingStatus()]) }, 30_000)
+})
+onBeforeUnmount(() => { if (balancePoll) clearInterval(balancePoll) })
 const { data: shellCandidates } = await useAsyncData(
   'shell-research-candidates',
   () => projectId.value
@@ -163,9 +178,21 @@ function switchProject(event: Event) {
           <button class="avatar-button" :title="`Sign out ${auth.user.value?.email || ''}`" aria-label="Sign out" @click="auth.logout"><span>{{ initials }}</span><LogOut :size="13" /></button>
         </div>
       </header>
+      <div v-if="showFundingBanner" class="funding-banner" data-testid="low-balance-banner">
+        <BadgeDollarSign :size="19" />
+        <div>
+          <strong>Automatic video production is waiting for balance</strong>
+          <span>You have ${{ Number(fundingStatus?.balance_usd || 0).toFixed(2) }}; the next planned video needs about ${{ Number(fundingStatus?.next_generation_usd || 0).toFixed(2) }}.</span>
+        </div>
+        <NuxtLink to="/funding?source=balance_guard" class="button button--primary button--small">Top up balance</NuxtLink>
+      </div>
       <main class="page-container">
         <slot />
       </main>
     </div>
   </div>
 </template>
+
+<style scoped>
+.funding-banner{display:flex;align-items:center;gap:12px;margin:14px 24px 0;padding:13px 15px;border:1px solid #edcf91;border-radius:12px;background:#fff8e8;color:#6c4910}.funding-banner>svg{flex:none}.funding-banner>div{display:grid;min-width:0;flex:1;gap:2px}.funding-banner strong{font-size:10px}.funding-banner span{color:#83652f;font-size:8px;line-height:1.45}.funding-banner .button{flex:none}@media(max-width:700px){.funding-banner{align-items:flex-start;flex-wrap:wrap;margin:10px 14px 0}.funding-banner .button{width:100%}}
+</style>

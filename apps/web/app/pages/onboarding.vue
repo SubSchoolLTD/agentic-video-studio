@@ -254,9 +254,9 @@ async function complete() {
       problem_keywords: lines(context.problem_keywords),
       audience_interest_keywords: lines(context.audience_interest_keywords),
     } })
-    await api(`/v1/projects/${projectId.value}/onboarding/complete`, { method: 'POST' })
+    const result = await api<any>(`/v1/projects/${projectId.value}/onboarding/complete`, { method: 'POST' })
     if (auth.user.value) auth.user.value.onboarding_complete = true
-    await navigateTo('/app')
+    await navigateTo(result.next_url || '/funding?source=onboarding')
   }
   catch (reason: any) { error.value = reason.message }
   finally { loading.value = false }

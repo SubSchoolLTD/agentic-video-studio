@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import secrets
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -35,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from .billing import (
     charge_feature,
+    ensure_wallet,
     estimate_veo_billable_seconds,
     outstanding_charge_cents,
     project_budget_snapshot,
@@ -45,10 +47,11 @@ from .billing import (
 from .cloud_auth import require_google_service_identity
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db
+from .email_service import send_low_balance_email
 from .events import EventSink
 from .ingestion import extract_article, fetch_public_text, prompt_injection_score
 from .metrics import collect_youtube_metrics, mock_youtube_metrics, observed_performance
-from .models import ApiKeyRecord, Resource
+from .models import ApiKeyRecord, PayPalTopup, Resource, User
 from .providers import (
     BrandProfileProvider,
     ParallelSearchProvider,
@@ -679,6 +682,175 @@ def _onboarding_resource(session: Session, project_id: str, organization_id: str
     return onboarding
 
 
+def _automation_funding_plan(
+    session: Session,
+    project: Resource,
+    settings: Settings,
+) -> dict[str, Any]:
+    settings_data = dict(project.data.get("settings") or {})
+    production = dict(settings_data.get("production") or {})
+    videos_per_week = max(1, int(production.get("videos_per_week") or 3))
+    target_duration = max(8, int(production.get("average_duration_seconds") or 30))
+    audio_quality = str(production.get("audio_quality") or "premium")
+    pricing_feature = "video.generate_native_audio" if audio_quality == "premium" else "video.generate"
+    billable_seconds = estimate_veo_billable_seconds(
+        target_duration_seconds=target_duration,
+        scene_count_min=max(2, round(target_duration / 8)),
+        scene_count_max=max(2, round(target_duration / 6)),
+        scene_count_flex=2,
+        continuous_scenes=False,
+    )
+    video_quote = quote_feature(session, pricing_feature, billable_seconds)
+    weekly_cost_cents = int(video_quote["charge_cents"]) * videos_per_week
+    next_blocked_job = next(
+        (
+            item
+            for item in session.scalars(
+                select(Resource)
+                .where(
+                    Resource.kind == "generation_job",
+                    Resource.organization_id == project.organization_id,
+                    Resource.project_id == project.id,
+                    Resource.status == "budget_blocked",
+                )
+                .order_by(Resource.created_at.asc())
+            )
+            if bool(item.data.get("automatic"))
+        ),
+        None,
+    )
+    next_generation_quote = video_quote
+    if next_blocked_job:
+        next_feature = str((next_blocked_job.data.get("estimated_cost") or {}).get("basis") or pricing_feature)
+        next_billable_seconds = estimate_veo_billable_seconds(
+            target_duration_seconds=int(next_blocked_job.data.get("target_duration_seconds") or target_duration),
+            scene_count_min=int(next_blocked_job.data.get("scene_count_min") or 4),
+            scene_count_max=int(next_blocked_job.data.get("scene_count_max") or 6),
+            scene_count_flex=int(next_blocked_job.data.get("scene_count_flex") or 2),
+            continuous_scenes=bool(next_blocked_job.data.get("continue_scenes")),
+        ) * len(next_blocked_job.data.get("aspect_ratios") or ["9:16"])
+        next_generation_quote = quote_feature(session, next_feature, next_billable_seconds)
+    minimum_topup = int(settings.paypal_min_topup_usd)
+    options = []
+    for option_id, label, weeks in (
+        ("week", "Fund one week", 1),
+        ("month", "Fund one month", 4),
+        ("quarter", "Fund three months", 12),
+    ):
+        options.append(
+            {
+                "id": option_id,
+                "label": label,
+                "weeks": weeks,
+                "video_count": videos_per_week * weeks,
+                "amount_usd": max(minimum_topup, math.ceil(weekly_cost_cents * weeks / 100)),
+            }
+        )
+    wallet = ensure_wallet(session, project.organization_id)
+    balance_cents = int(wallet.balance_cents)
+    next_generation_cents = int(next_generation_quote["charge_cents"])
+    mode = str(project.data.get("automation_mode") or "off")
+    needs_topup = mode in {"videos", "publish"} and balance_cents < next_generation_cents
+    has_paid_topup = session.scalar(
+        select(PayPalTopup.id)
+        .where(
+            PayPalTopup.organization_id == project.organization_id,
+            PayPalTopup.status == "captured",
+        )
+        .order_by(PayPalTopup.captured_at.desc())
+    ) is not None
+    return {
+        "currency": "USD",
+        "automation_mode": mode,
+        "videos_per_week": videos_per_week,
+        "average_duration_seconds": target_duration,
+        "audio_quality": audio_quality,
+        "weekly_cost_cents": weekly_cost_cents,
+        "weekly_cost_usd": round(weekly_cost_cents / 100, 2),
+        "next_generation_cents": next_generation_cents,
+        "next_generation_usd": round(next_generation_cents / 100, 2),
+        "next_generation_job_id": next_blocked_job.id if next_blocked_job else None,
+        "balance_cents": balance_cents,
+        "balance_usd": round(balance_cents / 100, 2),
+        "shortfall_cents": max(0, next_generation_cents - balance_cents),
+        "needs_topup": needs_topup,
+        "has_paid_topup": has_paid_topup,
+        "options": options,
+    }
+
+
+def _maybe_send_low_balance_email(
+    session: Session,
+    *,
+    project: Resource,
+    settings: Settings,
+) -> bool:
+    plan = _automation_funding_plan(session, project, settings)
+    if not plan["needs_topup"] or not plan["has_paid_topup"]:
+        return False
+    latest_topup = session.scalar(
+        select(PayPalTopup)
+        .where(
+            PayPalTopup.organization_id == project.organization_id,
+            PayPalTopup.status == "captured",
+        )
+        .order_by(PayPalTopup.captured_at.desc())
+    )
+    if not latest_topup:
+        return False
+    prior_notifications = list(
+        session.scalars(
+            select(Resource).where(
+                Resource.kind == "balance_notification",
+                Resource.organization_id == project.organization_id,
+                Resource.project_id == project.id,
+            )
+        )
+    )
+    if any(item.data.get("topup_id") == latest_topup.id for item in prior_notifications):
+        return False
+    memberships = list(
+        session.scalars(
+            select(Resource)
+            .where(
+                Resource.kind == "membership",
+                Resource.organization_id == project.organization_id,
+                Resource.status == "active",
+            )
+            .order_by(Resource.created_at.asc())
+        )
+    )
+    owner_membership = next(
+        (item for item in memberships if item.data.get("role") in {"owner", "admin"}),
+        memberships[0] if memberships else None,
+    )
+    user = session.get(User, str(owner_membership.data.get("actor_id"))) if owner_membership else None
+    if not user or user.status != "active":
+        return False
+    delivered = send_low_balance_email(
+        user=user,
+        current_balance_usd=float(plan["balance_usd"]),
+        required_balance_usd=float(plan["next_generation_usd"]),
+        plan_options=list(plan["options"]),
+        settings=settings,
+    )
+    if delivered:
+        ResourceRepository(session).add(
+            kind="balance_notification",
+            organization_id=project.organization_id,
+            project_id=project.id,
+            status="sent",
+            data={
+                "topup_id": latest_topup.id,
+                "recipient_user_id": user.id,
+                "balance_cents": plan["balance_cents"],
+                "required_cents": plan["next_generation_cents"],
+                "sent_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    return delivered
+
+
 @router.get("/projects/{project_id}/onboarding", tags=["onboarding"])
 def get_onboarding(
     project_id: str,
@@ -818,7 +990,15 @@ def onboarding_preferences(
         continuous_scenes=False,
     )
     quote = quote_feature(session, feature, billable * payload.videos_per_week)
-    return {"status": "saved", "estimated_weekly_cost_usd": round(float(quote["charge_usd"]), 2)}
+    estimated_weekly_cost_usd = round(float(quote["charge_usd"]), 2)
+    repo.update(
+        onboarding,
+        data={
+            "estimated_weekly_cost_usd": estimated_weekly_cost_usd,
+            "estimated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    return {"status": "saved", "estimated_weekly_cost_usd": estimated_weekly_cost_usd}
 
 
 @router.patch("/projects/{project_id}/onboarding/context", tags=["onboarding"])
@@ -849,16 +1029,172 @@ def complete_onboarding(
     principal: Principal = Depends(get_principal),
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    project = require_project(ResourceRepository(session), project_id, principal)
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
     if not str(project.data.get("website_url") or "").strip():
         raise HTTPException(409, "Website analysis is required before onboarding can be completed")
     onboarding = _onboarding_resource(session, project_id, principal.organization_id)
-    ResourceRepository(session).update(
+    repo.update(project, status="active", data={"autopilot_paused": False})
+    completion_data: dict[str, Any] = {
+        "step": "funding",
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    if not onboarding.data.get("initial_research_started_at"):
+        completion_data["awaiting_funding"] = True
+    repo.update(
         onboarding,
         status="completed",
-        data={"step": "complete", "completed_at": datetime.now(UTC).isoformat()},
+        data=completion_data,
     )
-    return {"status": "completed"}
+    return {"status": "completed", "next_url": "/funding?source=onboarding"}
+
+
+@router.get("/projects/{project_id}/funding-status", tags=["billing"])
+def project_funding_status(
+    project_id: str,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("projects:read")
+    project = require_project(ResourceRepository(session), project_id, principal)
+    return _automation_funding_plan(session, project, settings)
+
+
+@router.post("/projects/{project_id}/automation/activate", status_code=202, tags=["automation"])
+def activate_project_automation(
+    project_id: str,
+    request: Request,
+    background: BackgroundTasks,
+    principal: Principal = Depends(get_principal),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("projects:write")
+    repo = ResourceRepository(session)
+    project = require_project(repo, project_id, principal)
+    mode = str(project.data.get("automation_mode") or "off")
+    onboarding = _onboarding_resource(session, project_id, principal.organization_id)
+
+    resumed_job_ids: list[str] = []
+    blocked_jobs = [
+        item
+        for item in session.scalars(
+            select(Resource)
+            .where(
+                Resource.kind == "generation_job",
+                Resource.organization_id == principal.organization_id,
+                Resource.project_id == project_id,
+                Resource.status == "budget_blocked",
+            )
+            .order_by(Resource.created_at.asc())
+        )
+        if bool(item.data.get("automatic"))
+    ]
+    for job in blocked_jobs:
+        feature = str((job.data.get("estimated_cost") or {}).get("basis") or "video.generate")
+        billable_seconds = estimate_veo_billable_seconds(
+            target_duration_seconds=int(job.data.get("target_duration_seconds") or 30),
+            scene_count_min=int(job.data.get("scene_count_min") or 4),
+            scene_count_max=int(job.data.get("scene_count_max") or 6),
+            scene_count_flex=int(job.data.get("scene_count_flex") or 2),
+            continuous_scenes=bool(job.data.get("continue_scenes")),
+        ) * len(job.data.get("aspect_ratios") or ["9:16"])
+        try:
+            charge_feature(
+                session,
+                organization_id=principal.organization_id,
+                user_id=principal.actor_id,
+                feature_key=feature,
+                quantity=billable_seconds,
+                reference_id=job.id,
+            )
+        except HTTPException as exc:
+            if exc.status_code == 402:
+                break
+            raise
+        repo.update(
+            job,
+            status="queued",
+            data={"current_stage": "queued", "last_error": None, "funding_resumed_at": datetime.now(UTC).isoformat()},
+        )
+        resumed_job_ids.append(job.id)
+
+    if resumed_job_ids:
+        for job_id in resumed_job_ids:
+            request.app.state.workflow.schedule(job_id)
+
+    if mode == "off":
+        repo.update(onboarding, data={"awaiting_funding": False, "automation_activation_status": "off"})
+        return {"status": "automation_off", "research_run_id": None, "resumed_generation_job_ids": resumed_job_ids}
+
+    initial_run_id: str | None = None
+    if not onboarding.data.get("initial_research_started_at"):
+        existing_run = session.scalar(
+            select(Resource)
+            .where(
+                Resource.kind == "research_run",
+                Resource.organization_id == principal.organization_id,
+                Resource.project_id == project_id,
+                Resource.status.in_(("queued", "running")),
+            )
+            .order_by(Resource.created_at.desc())
+        )
+        if existing_run:
+            initial_run_id = existing_run.id
+        else:
+            profile = session.scalar(
+                select(Resource)
+                .where(Resource.kind == "research_profile", Resource.project_id == project_id)
+                .order_by(Resource.created_at.asc())
+            )
+            research_settings = dict((project.data.get("settings") or {}).get("research") or {})
+            run = repo.add(
+                kind="research_run",
+                organization_id=principal.organization_id,
+                project_id=project_id,
+                status="queued",
+                data={
+                    "objective": str(
+                        (profile.data.get("objective") if profile else None)
+                        or f"Find fresh evidence-backed content opportunities for {project.data.get('name', 'this project')}"
+                    ),
+                    "recency_days": int((profile.data.get("recency_days") if profile else None) or 30),
+                    "max_candidates": min(50, max(1, int(research_settings.get("max_candidates") or 50))),
+                    "trigger_type": "funding_activation",
+                    "provider": "parallel",
+                },
+            )
+            try:
+                charge_feature(
+                    session,
+                    organization_id=principal.organization_id,
+                    user_id=principal.actor_id,
+                    feature_key="research.run",
+                    quantity=1,
+                    reference_id=run.id,
+                )
+            except HTTPException:
+                session.delete(run)
+                session.commit()
+                raise
+            background.add_task(_run_research_task, run.id, settings)
+            initial_run_id = run.id
+        repo.update(
+            onboarding,
+            data={
+                "awaiting_funding": False,
+                "initial_research_started_at": datetime.now(UTC).isoformat(),
+                "initial_research_run_id": initial_run_id,
+            },
+        )
+
+    return {
+        "status": "activated",
+        "research_run_id": initial_run_id or onboarding.data.get("initial_research_run_id"),
+        "resumed_generation_job_ids": resumed_job_ids,
+        "next_url": "/research" if initial_run_id else "/app",
+    }
 
 
 @router.get("/projects/{project_id}/characters", tags=["characters"])
@@ -2298,6 +2634,7 @@ def _enqueue_automatic_candidate_productions(
     repo: ResourceRepository,
     run: Resource,
     candidate_ids: list[str],
+    settings: Settings,
 ) -> list[str]:
     project = repo.get_any(str(run.project_id), kind="project")
     if not project:
@@ -2410,6 +2747,8 @@ def _enqueue_automatic_candidate_productions(
                     status="budget_blocked",
                     data={"current_stage": "cost_guard", "last_error": str(exc.detail)},
                 )
+                if exc.status_code == 402:
+                    _maybe_send_low_balance_email(session, project=project, settings=settings)
                 continue
         repo.update(idea, data={"generation_job_id": job.id, "production_requested_at": datetime.now(UTC).isoformat()})
         job_ids.append(job.id)
@@ -2567,7 +2906,7 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                     "completed_at": datetime.now(UTC).isoformat(),
                 },
             )
-            automatic_job_ids = _enqueue_automatic_candidate_productions(session, repo, run, candidate_ids)
+            automatic_job_ids = _enqueue_automatic_candidate_productions(session, repo, run, candidate_ids, settings)
             if automatic_job_ids:
                 repo.update(run, data={"automatic_generation_job_ids": automatic_job_ids})
             await EventSink(settings).emit(

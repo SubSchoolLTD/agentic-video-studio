@@ -11,8 +11,9 @@ from apps.api.app.config import Settings, get_settings
 from apps.api.app.database import SessionLocal
 from apps.api.app.email_service import test_token as outbox_token
 from apps.api.app.main import app
-from apps.api.app.models import AuthIdentity, Resource, User
+from apps.api.app.models import AuthIdentity, PayPalTopup, Resource, User, Wallet
 from apps.api.app.paypal import PayPalClient, PayPalOrderState
+from apps.api.app.routes import _maybe_send_low_balance_email
 
 
 @pytest.fixture
@@ -222,10 +223,15 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
     assert repeated_redemption.status_code == 409
 
     order_id = f"PAYPAL-{uuid4().hex[:12]}"
+    paypal_order_args: dict[str, object] = {}
+    def create_paypal_order(_client, **kwargs):
+        paypal_order_args.update(kwargs)
+        return order_id, f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"
+
     monkeypatch.setattr(
         PayPalClient,
         "create_order",
-        lambda self, **_: (order_id, f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"),
+        create_paypal_order,
     )
     monkeypatch.setattr(
         PayPalClient,
@@ -238,13 +244,21 @@ def test_billing_paypal_promo_admin_and_usage_charge(jwt_client: TestClient, mon
         json={"amount_usd": "11.99"},
     )
     assert too_small.status_code == 422
+    unsafe_return = jwt_client.post(
+        "/v1/billing/topups/paypal",
+        headers=headers(customer),
+        json={"amount_usd": "12.00", "return_path": "//malicious.example/steal"},
+    )
+    assert unsafe_return.status_code == 422
     created_topup = jwt_client.post(
         "/v1/billing/topups/paypal",
         headers=headers(customer),
-        json={"amount_usd": "12.00"},
+        json={"amount_usd": "12.00", "return_path": "/funding?plan=month&activate=1"},
     )
     assert created_topup.status_code == 201, created_topup.text
     assert created_topup.json()["amount_usd"] == 12
+    assert "/funding?plan=month&activate=1&paypal=return&topup_id=" in str(paypal_order_args["return_url"])
+    assert "/funding?plan=month&activate=1&paypal=cancel&topup_id=" in str(paypal_order_args["cancel_url"])
     captured = jwt_client.post(
         "/v1/billing/topups/paypal/capture",
         headers=headers(customer),
@@ -374,3 +388,115 @@ def test_public_pricing_exposes_customer_rates_without_internal_economics(jwt_cl
     }
     assert all("provider_cost_usd" not in item and "margin_percent" not in item for item in payload["prices"])
     assert all("charge_cents" in item and "charge_usd" in item for item in payload["prices"])
+
+
+def test_onboarding_finishes_on_funding_and_payment_activation_starts_research(
+    jwt_client: TestClient,
+    monkeypatch,
+):
+    account = register_and_verify(jwt_client, "funding-onboarding")
+    project_id = account["default_project_id"]
+    saved = jwt_client.patch(
+        f"/v1/projects/{project_id}/onboarding/preferences",
+        headers=headers(account),
+        json={
+            "selling_percent": 20,
+            "viral_percent": 30,
+            "informative_percent": 50,
+            "videos_per_week": 3,
+            "average_duration_seconds": 30,
+            "audio_quality": "premium",
+            "automation_mode": "videos",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    completed = jwt_client.post(f"/v1/projects/{project_id}/onboarding/complete", headers=headers(account))
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["next_url"] == "/funding?source=onboarding"
+
+    funding = jwt_client.get(f"/v1/projects/{project_id}/funding-status", headers=headers(account))
+    assert funding.status_code == 200, funding.text
+    plan = funding.json()
+    assert plan["needs_topup"] is True
+    assert [item["id"] for item in plan["options"]] == ["week", "month", "quarter"]
+    assert [item["video_count"] for item in plan["options"]] == [3, 12, 36]
+    assert all(item["amount_usd"] == int(item["amount_usd"]) for item in plan["options"])
+
+    unfunded = jwt_client.post(f"/v1/projects/{project_id}/automation/activate", headers=headers(account))
+    assert unfunded.status_code == 402
+
+    with SessionLocal() as session:
+        wallet = session.get(Wallet, account["organization_id"])
+        assert wallet
+        wallet.balance_cents = 12_000
+        session.add(wallet)
+        session.commit()
+
+    async def no_research_task(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("apps.api.app.routes._run_research_task", no_research_task)
+    activated = jwt_client.post(f"/v1/projects/{project_id}/automation/activate", headers=headers(account))
+    assert activated.status_code == 202, activated.text
+    assert activated.json()["status"] == "activated"
+    assert activated.json()["research_run_id"]
+    repeated = jwt_client.post(f"/v1/projects/{project_id}/automation/activate", headers=headers(account))
+    assert repeated.status_code == 202
+    assert repeated.json()["research_run_id"] == activated.json()["research_run_id"]
+
+    with SessionLocal() as session:
+        project = session.get(Resource, project_id)
+        assert project and project.status == "active"
+        runs = list(
+            session.scalars(
+                select(Resource).where(
+                    Resource.kind == "research_run",
+                    Resource.project_id == project_id,
+                    Resource.data["trigger_type"].as_string() == "funding_activation",
+                )
+            )
+        )
+        assert len(runs) == 1
+
+
+def test_low_balance_email_is_sent_once_per_captured_topup(jwt_client: TestClient, monkeypatch):
+    account = register_and_verify(jwt_client, "low-balance-email")
+    project_id = account["default_project_id"]
+    with SessionLocal() as session:
+        project = session.get(Resource, project_id)
+        assert project
+        project.data = {
+            **project.data,
+            "automation_mode": "videos",
+            "settings": {
+                **dict(project.data.get("settings") or {}),
+                "production": {"videos_per_week": 2, "average_duration_seconds": 30, "audio_quality": "premium"},
+            },
+        }
+        topup = PayPalTopup(
+            id=f"top_{uuid4().hex[:24]}",
+            organization_id=account["organization_id"],
+            user_id=account["user"]["id"],
+            paypal_order_id=f"ORDER-{uuid4().hex[:16]}",
+            paypal_capture_id=f"CAPTURE-{uuid4().hex[:16]}",
+            amount_cents=1_200,
+            bonus_cents=0,
+            currency="USD",
+            status="captured",
+            captured_at=datetime.now(UTC),
+        )
+        session.add_all([project, topup])
+        session.commit()
+
+    deliveries: list[str] = []
+    def deliver(**kwargs):
+        deliveries.append(kwargs["user"].email)
+        return True
+
+    monkeypatch.setattr("apps.api.app.routes.send_low_balance_email", deliver)
+    with SessionLocal() as session:
+        project = session.get(Resource, project_id)
+        assert project
+        assert _maybe_send_low_balance_email(session, project=project, settings=get_settings()) is True
+        assert _maybe_send_low_balance_email(session, project=project, settings=get_settings()) is False
+    assert deliveries == [account["email"]]

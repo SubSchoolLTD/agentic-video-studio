@@ -55,6 +55,8 @@ The web application uses verified-email accounts, short-lived JWT access tokens 
 
 The deployed stack uses Cloud Run, Cloud SQL for PostgreSQL, private Cloud Storage, ClickHouse/Grafana, Artifact Registry, Cloud Build, Secret Manager, Vertex AI (Gemini 2.5 Flash and Veo 3.1), Google Cloud TTS, and Parallel Search. See [deployment.md](docs/operations/deployment.md).
 
+The production API also mounts a bearer-protected Streamable HTTP MCP endpoint at `/mcp`. Owners create a revocable project-scoped key in **Developer → Connect an agent**, select the narrowest REST scopes, and copy a ready-to-paste MCP client configuration. The MCP tools are a thin layer over the public API: project context, automation mode/cadence/defaults, sources, research decisions, ideas, durable generation, approval, publication, analytics and strategy all keep the same tenant and permission checks.
+
 ## Repository map
 
 ```text
@@ -68,7 +70,7 @@ tests           Unit, contract, integration, security, and pipeline tests
 
 ## Safety defaults
 
-Autopublish is off. High-risk claims require human review. TikTok and Instagram publication uses an encrypted Playwright browser session created by the user's regular provider sign-in; third-party passwords and verification codes are never stored. URL ingestion rejects non-public network targets. Passwords use Argon2id, refresh tokens and API keys are stored hashed, media links expire, webhooks are HMAC-signed, and publication is a prepare/commit operation.
+Autopublish is selected explicitly per project; lower automation modes retain review. High-risk claims still require review. TikTok and Instagram publication uses an encrypted Playwright browser session created by the user's regular provider sign-in; third-party passwords and verification codes are never stored. URL ingestion rejects non-public network targets. Passwords use Argon2id, refresh tokens and API keys are stored hashed, media links expire, webhooks are HMAC-signed, and ad-hoc publication uses a prepare/commit operation.
 
 ## License
 

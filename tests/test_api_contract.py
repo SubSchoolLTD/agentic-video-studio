@@ -16,6 +16,13 @@ def test_health_and_openapi(client) -> None:
     assert "/v1/generation-jobs/{job_id}/stages/{stage_name}/retry" in schema["paths"]
     assert "patch" in schema["paths"]["/v1/research-profiles/{profile_id}"]
     assert "/v1/publications" in schema["paths"]
+    assert "/v1/projects/{project_id}/automation" in schema["paths"]
+    assert "/v1/projects/{project_id}/research-feedback" in schema["paths"]
+
+
+def test_remote_mcp_requires_a_bearer_token(client) -> None:
+    response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert response.status_code == 401
 
 
 def test_observability_smoke_uses_configured_sinks(client, auth_headers) -> None:
@@ -73,6 +80,42 @@ def test_api_key_is_only_returned_once(client, auth_headers) -> None:
     listed_item = next(item for item in listed.json()["items"] if item["id"] == created.json()["id"])
     assert "key" not in listed_item
     assert listed_item["key_prefix"] == raw_key[:18]
+
+
+def test_project_scoped_key_can_configure_automation(client, auth_headers) -> None:
+    created = client.post(
+        "/v1/projects/prj_subschool/api-keys",
+        json={
+            "name": "Automation MCP",
+            "scopes": ["projects:read", "projects:write", "research:read", "research:run"],
+        },
+        headers=auth_headers,
+    )
+    assert created.status_code == 201
+    key_headers = {"Authorization": f"Bearer {created.json()['key']}"}
+    configured = client.put(
+        "/v1/projects/prj_subschool/automation",
+        json={
+            "mode": "research_only",
+            "videos_per_week": 4,
+            "average_duration_seconds": 35,
+            "audio_quality": "premium",
+            "selling_percent": 20,
+            "viral_percent": 30,
+            "informative_percent": 50,
+            "research_interval_hours": 12,
+            "research_recency_days": 21,
+            "research_max_candidates": 40,
+            "research_backlog_target": 120,
+        },
+        headers=key_headers,
+    )
+    assert configured.status_code == 200, configured.text
+    assert configured.json()["mode"] == "research_only"
+    assert configured.json()["research_profile"]["interval_hours"] == 12
+    current = client.get("/v1/projects/prj_subschool/automation", headers=key_headers)
+    assert current.status_code == 200
+    assert current.json()["settings"]["content_mix"] == {"selling": 20, "viral": 30, "informative": 50}
 
 
 def test_tiktok_requires_interactive_consent(client, auth_headers) -> None:

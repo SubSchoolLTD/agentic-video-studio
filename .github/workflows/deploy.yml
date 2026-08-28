@@ -55,7 +55,7 @@ jobs:
             --memory=4Gi \
             --timeout=3600 \
             --image="us-central1-docker.pkg.dev/${GCP_PROJECT_ID}/agentic-video-studio/api:${{ github.sha }}" \
-            --update-env-vars="APP_ENV=production,APP_AUTH_MODE=jwt,APP_BASE_URL=${PRODUCTION_API_URL},WEB_BASE_URL=${PRODUCTION_WEB_URL},PROVIDER_MODE=live,PAYPAL_ENV=live,PAYPAL_MIN_TOPUP_USD=12,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }},BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false,YOUTUBE_REDIRECT_URI=${PRODUCTION_API_URL}/v1/connections/youtube/callback" \
+            --update-env-vars="APP_ENV=production,APP_AUTH_MODE=jwt,APP_BASE_URL=${PRODUCTION_API_URL},MCP_API_BASE=http://127.0.0.1:8080,WEB_BASE_URL=${PRODUCTION_WEB_URL},PROVIDER_MODE=live,PAYPAL_ENV=live,PAYPAL_MIN_TOPUP_USD=12,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }},BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false,YOUTUBE_REDIRECT_URI=${PRODUCTION_API_URL}/v1/connections/youtube/callback" \
             --update-secrets="${secret_bindings}" \
             --remove-env-vars=APP_DEMO_TOKEN,INSTAGRAM_APP_ID,INSTAGRAM_APP_SECRET,INSTAGRAM_REDIRECT_URI,INSTAGRAM_GRAPH_VERSION,TIKTOK_CLIENT_KEY,TIKTOK_CLIENT_SECRET,TIKTOK_REDIRECT_URI,SOCIAL_BROWSER_SESSION_SECRET
       - name: Deploy web

@@ -161,6 +161,7 @@ useHead({
 
         <nav class="landing-nav" aria-label="Main navigation">
           <a href="#product">Product</a>
+          <NuxtLink to="/solutions">Solutions</NuxtLink>
           <a href="#workflow">How it works</a>
           <a href="#examples">Examples</a>
           <a href="#pricing">Pricing</a>
@@ -177,6 +178,7 @@ useHead({
       </div>
       <div v-if="menuOpen" class="landing-mobile-nav">
         <a href="#product" @click="menuOpen = false">Product</a>
+        <NuxtLink to="/solutions" @click="menuOpen = false">Solutions</NuxtLink>
         <a href="#workflow" @click="menuOpen = false">How it works</a>
         <a href="#examples" @click="menuOpen = false">Examples</a>
         <a href="#pricing" @click="menuOpen = false">Pricing</a>
@@ -345,7 +347,7 @@ useHead({
     <footer class="landing-footer">
       <div class="landing-container landing-footer__grid">
         <div><NuxtLink class="landing-brand landing-brand--footer" to="/"><span class="landing-brand__mark"><Clapperboard :size="20" /></span><span><strong>Framewise</strong><small>Agentic video studio</small></span></NuxtLink><p>Automatic topic research, AI video creation and social publishing from one product website.</p></div>
-        <div><strong>Product</strong><a href="#workflow">How it works</a><a href="#examples">Examples</a><a href="#pricing">Pricing</a></div>
+        <div><strong>Product</strong><NuxtLink to="/solutions">Solutions</NuxtLink><a href="#workflow">How it works</a><a href="#examples">Examples</a><a href="#pricing">Pricing</a></div>
         <div><strong>Workspace</strong><NuxtLink to="/register">Create account</NuxtLink><NuxtLink to="/login">Sign in</NuxtLink><a href="https://github.com/SubSchoolLTD/agentic-video-studio" rel="noopener">GitHub</a></div>
         <div><strong>Technology</strong><span>Parallel Search</span><span>Google Gemini</span><span>Google Veo</span></div>
       </div>

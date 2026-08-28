@@ -2,7 +2,7 @@ const publicRoutes = new Set(['/', '/login', '/register', '/verify-email', '/for
 
 export default defineNuxtRouteMiddleware(async (to) => {
   const auth = useAuth()
-  const isPublic = publicRoutes.has(to.path)
+  const isPublic = publicRoutes.has(to.path) || to.path === '/solutions' || to.path.startsWith('/solutions/')
   if (isPublic) {
     if (!auth.accessToken.value && auth.refreshToken.value && ['/login', '/register'].includes(to.path)) await auth.refresh()
     if (auth.accessToken.value && ['/login', '/register'].includes(to.path)) {

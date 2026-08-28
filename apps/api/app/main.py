@@ -10,6 +10,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from apps.mcp.server import mcp, mcp_http_app
+
 from .admin_routes import router as admin_router
 from .auth_routes import router as auth_router
 from .billing_routes import router as billing_router
@@ -32,10 +34,11 @@ async def lifespan(app: FastAPI):
         seed_application(session, settings)
     app.state.workflow = WorkflowManager(settings)
     app.state.workflow.resume_pending()
-    yield
-    for task in list(app.state.workflow.tasks.values()):
-        if not task.done():
-            task.cancel()
+    async with mcp.session_manager.run():
+        yield
+        for task in list(app.state.workflow.tasks.values()):
+            if not task.done():
+                task.cancel()
 
 
 app = FastAPI(
@@ -176,3 +179,4 @@ app.include_router(router)
 app.include_router(auth_router)
 app.include_router(billing_router)
 app.include_router(admin_router)
+app.mount("/", mcp_http_app, name="mcp")

@@ -158,8 +158,10 @@ test('ideas move between kanban columns and settings require explicit edit mode'
 })
 
 test('library sends a selected video version to the publication composer', async ({ page }) => {
-  await registerThroughUi(page, 'Library publish')
   const versionId = `ver_${Date.now()}`
+  // Install the API fixture before registration. Once the authenticated shell
+  // appears, Nuxt may prefetch the visible Library link immediately; registering
+  // this route afterwards makes the test race that legitimate prefetch.
   await page.route(/\/v1\/projects\/[^/]+\/videos(?:\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -180,6 +182,7 @@ test('library sends a selected video version to the publication composer', async
       }),
     })
   })
+  await registerThroughUi(page, 'Library publish')
   await page.locator('a[href="/library"]').evaluate((element: HTMLAnchorElement) => element.click())
   await expect(page).toHaveURL('/library')
   await page.getByRole('link', { name: 'Send video to publication' }).click()

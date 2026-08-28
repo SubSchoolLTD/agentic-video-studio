@@ -4,6 +4,7 @@ import logging
 import secrets
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -30,6 +31,7 @@ class TopupCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     amount_usd: Decimal = Field(ge=Decimal("12.00"), le=Decimal("100000.00"))
+    return_path: str = Field(default="/billing", min_length=1, max_length=500)
 
     @field_validator("amount_usd")
     @classmethod
@@ -38,6 +40,13 @@ class TopupCreateRequest(BaseModel):
         if value != normalized:
             raise ValueError("amount_usd supports at most two decimal places")
         return normalized
+
+    @field_validator("return_path")
+    @classmethod
+    def safe_return_path(cls, value: str) -> str:
+        if not value.startswith("/") or value.startswith("//") or "\n" in value or "\r" in value:
+            raise ValueError("return_path must be a local application path")
+        return value
 
 
 class TopupCaptureRequest(BaseModel):
@@ -61,6 +70,13 @@ def _price(rule: PriceRule) -> dict[str, object]:
         "charge_cents": int(rule.charge_cents),
         "charge_usd": dollars(rule.charge_cents),
     }
+
+
+def _return_url(base_url: str, path: str, *, paypal: str, topup_id: str) -> str:
+    target = urlsplit(f"{base_url.rstrip('/')}{path}")
+    query = dict(parse_qsl(target.query, keep_blank_values=True))
+    query.update({"paypal": paypal, "topup_id": topup_id})
+    return urlunsplit((target.scheme, target.netloc, target.path, urlencode(query), ""))
 
 
 @router.get("/public-pricing")
@@ -184,8 +200,18 @@ def create_paypal_topup(
         order_id, approval_url = PayPalClient(settings).create_order(
             merchant_reference=topup.id,
             amount_cents=amount_cents,
-            return_url=f"{settings.web_base_url.rstrip('/')}/billing?paypal=return&topup_id={topup.id}",
-            cancel_url=f"{settings.web_base_url.rstrip('/')}/billing?paypal=cancel&topup_id={topup.id}",
+            return_url=_return_url(
+                settings.web_base_url,
+                payload.return_path,
+                paypal="return",
+                topup_id=topup.id,
+            ),
+            cancel_url=_return_url(
+                settings.web_base_url,
+                payload.return_path,
+                paypal="cancel",
+                topup_id=topup.id,
+            ),
         )
     except PayPalError as exc:
         topup.status = "failed"

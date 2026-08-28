@@ -11,6 +11,14 @@ const hydrated = ref(false)
 
 onMounted(() => { hydrated.value = true })
 
+const requestedPath = computed(() => (
+  typeof route.query.redirect === 'string'
+  && route.query.redirect.startsWith('/')
+  && !route.query.redirect.startsWith('//')
+    ? route.query.redirect
+    : '/app'
+))
+
 useHead({ title: 'Sign in — Framewise', meta: [{ name: 'robots', content: 'noindex, nofollow' }] })
 
 async function submit() {
@@ -18,8 +26,7 @@ async function submit() {
   error.value = ''
   try {
     await auth.login(email.value, password.value)
-    const target = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/') ? route.query.redirect : '/app'
-    await navigateTo(target)
+    await navigateTo(requestedPath.value)
   }
   catch (reason: any) {
     error.value = reason?.data?.error?.message || reason?.data?.detail || 'Email or password is incorrect.'
@@ -32,7 +39,7 @@ async function googleCredential(credential: string) {
   error.value = ''
   try {
     const payload = await auth.loginWithGoogle(credential)
-    await navigateTo(payload.user?.onboarding_complete === false ? '/onboarding' : '/app')
+    await navigateTo(payload.user?.onboarding_complete === false ? '/onboarding' : requestedPath.value)
   }
   catch (reason: any) { error.value = reason?.data?.error?.message || reason?.data?.detail || 'Google sign-in failed.' }
   finally { loading.value = false }

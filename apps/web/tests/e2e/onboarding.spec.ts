@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { verificationToken } from './helpers'
+import { registerThroughApi, verificationToken } from './helpers'
 
 test('new email account completes guided website and automation onboarding', async ({ page }) => {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
@@ -66,9 +66,48 @@ test('new email account completes guided website and automation onboarding', asy
   await page.getByRole('button', { name: 'Continue' }).click()
   await expect(page.getByRole('heading', { name: 'Does this describe your project?' })).toBeVisible({ timeout: 40_000 })
   await page.getByTestId('complete-onboarding').click()
-  await expect(page).toHaveURL('/app')
+  await expect(page).toHaveURL('/funding?source=onboarding')
+  await expect(page.getByRole('heading', { name: 'Fund your automatic content plan' })).toBeVisible()
+  await expect(page.getByTestId('funding-options')).toBeVisible()
+  await expect(page.getByTestId('funding-plan-week')).toContainText('(approximately 4 videos)')
+  await expect(page.getByTestId('funding-plan-month')).toContainText('(approximately 16 videos)')
+  await expect(page.getByTestId('funding-plan-quarter')).toContainText('(approximately 48 videos)')
 
   await page.goto('/settings?tab=video')
   await expect(page.getByRole('heading', { name: 'Video defaults' })).toBeVisible()
   await expect(page.getByText('Standard · Google TTS').first()).toBeVisible()
+})
+
+test('low automatic-production balance shows the calculated funding form', async ({ page, request }) => {
+  const account = await registerThroughApi(request, 'Low balance banner')
+  const apiBase = process.env.E2E_API_BASE || 'http://127.0.0.1:8100'
+  const changed = await request.patch(`${apiBase}/v1/projects/${account.default_project_id}`, {
+    headers: { Authorization: `Bearer ${account.access_token}` },
+    data: {
+      automation_mode: 'videos',
+      settings: { production: { videos_per_week: 2, average_duration_seconds: 30, audio_quality: 'premium' } },
+    },
+  })
+  expect(changed.status(), await changed.text()).toBe(200)
+
+  await page.goto('/login')
+  await expect(page.locator('main.auth-layout')).toHaveAttribute('data-hydrated', 'true')
+  await page.getByLabel('Email').fill(account.email)
+  await page.getByLabel('Password').fill('correct horse battery staple')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page).toHaveURL('/app')
+  await expect(page.getByTestId('low-balance-banner')).toContainText('the next planned video needs about')
+  await page.getByTestId('low-balance-banner').getByRole('link', { name: 'Top up balance' }).click()
+  await expect(page).toHaveURL('/funding?source=balance_guard')
+  await expect(page.getByTestId('funding-plan-week')).toContainText('(approximately 2 videos)')
+
+  await page.context().clearCookies()
+  await page.goto('/funding?plan=month&source=low_balance')
+  await expect(page).toHaveURL(/\/login\?redirect=/)
+  await expect(page.locator('main.auth-layout')).toHaveAttribute('data-hydrated', 'true')
+  await page.getByLabel('Email').fill(account.email)
+  await page.getByLabel('Password').fill('correct horse battery staple')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page).toHaveURL('/funding?plan=month&source=low_balance')
+  await expect(page.getByTestId('funding-plan-month')).toHaveClass(/plan-option--selected/)
 })

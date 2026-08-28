@@ -7,7 +7,12 @@ export default defineNuxtRouteMiddleware(async (to) => {
     if (!auth.accessToken.value && auth.refreshToken.value && ['/login', '/register'].includes(to.path)) await auth.refresh()
     if (auth.accessToken.value && ['/login', '/register'].includes(to.path)) {
       if (!auth.user.value) await auth.loadMe()
-      return navigateTo(auth.user.value?.onboarding_complete === false ? '/onboarding' : '/app')
+      const requested = typeof to.query.redirect === 'string'
+        && to.query.redirect.startsWith('/')
+        && !to.query.redirect.startsWith('//')
+        ? to.query.redirect
+        : '/app'
+      return navigateTo(auth.user.value?.onboarding_complete === false ? '/onboarding' : requested)
     }
     return
   }

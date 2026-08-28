@@ -42,7 +42,14 @@ test('public landing page explains the product, pricing and account entry points
   await expect(page.locator('script[type="application/ld+json"]')).toHaveCount(2)
   await expect(page.locator('footer').getByRole('link', { name: 'Create account' })).toHaveAttribute('href', '/register')
   await expect(page.locator('footer').getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
-  await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Solutions' })).toHaveAttribute('href', '/solutions')
+  const mobileMenu = page.getByRole('button', { name: 'Toggle navigation' })
+  if (await mobileMenu.isVisible()) {
+    await mobileMenu.click()
+    await expect(page.locator('.landing-mobile-nav').getByRole('link', { name: 'Solutions' })).toHaveAttribute('href', '/solutions')
+  }
+  else {
+    await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Solutions' })).toHaveAttribute('href', '/solutions')
+  }
 })
 
 test('solution pages address distinct audiences', async ({ page }) => {

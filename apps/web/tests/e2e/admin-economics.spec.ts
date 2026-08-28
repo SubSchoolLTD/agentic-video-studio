@@ -12,6 +12,7 @@ test('separate admin UI manages analytics, prices, balance promo codes and admin
   expect(promoted.status(), await promoted.text()).toBe(200)
 
   await page.getByRole('button', { name: 'Sign out' }).click()
+  await expect(page).toHaveURL('/login')
   await page.getByLabel('Email').fill(account.email)
   await page.getByLabel('Password').fill(account.password)
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()

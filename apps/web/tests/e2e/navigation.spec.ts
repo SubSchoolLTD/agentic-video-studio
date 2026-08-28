@@ -45,18 +45,22 @@ test('public landing page explains the product, pricing and account entry points
   const mobileMenu = page.getByRole('button', { name: 'Toggle navigation' })
   if (await mobileMenu.isVisible()) {
     await mobileMenu.click()
-    await expect(page.locator('.landing-mobile-nav').getByRole('link', { name: 'Solutions' })).toHaveAttribute('href', '/solutions')
+    await expect(page.locator('.landing-mobile-nav').getByRole('link', { name: 'Studios & media teams' })).toHaveAttribute('href', '/solutions/studios-media-teams')
+    await expect(page.locator('.landing-mobile-nav').getByRole('link', { name: 'Creators & experts' })).toHaveAttribute('href', '/solutions/creators-experts')
+    await expect(page.locator('.landing-mobile-nav').getByRole('link', { name: 'Small businesses' })).toHaveAttribute('href', '/solutions/small-businesses')
+    await expect(page.locator('.landing-mobile-nav').getByRole('link', { name: 'Education teams' })).toHaveAttribute('href', '/solutions/education-teams')
   }
   else {
-    await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Solutions' })).toHaveAttribute('href', '/solutions')
+    await page.getByRole('button', { name: 'Solutions menu' }).click()
+    const solutionMenu = page.getByRole('menu')
+    await expect(solutionMenu.getByRole('menuitem')).toHaveCount(4)
+    await expect(solutionMenu.getByRole('menuitem', { name: /Small businesses/ })).toHaveAttribute('href', '/solutions/small-businesses')
   }
 })
 
 test('solution pages address distinct audiences', async ({ page }) => {
-  const overview = await page.goto('/solutions')
-  expect(overview?.status()).toBe(200)
-  await expect(page.getByRole('heading', { name: /one autonomous studio/i })).toBeVisible()
-  await expect(page.getByRole('link', { name: /studios & media teams/i })).toHaveAttribute('href', '/solutions/studios-media-teams')
+  await page.goto('/solutions')
+  await expect(page).toHaveURL('/solutions/small-businesses')
   for (const [slug, heading] of [
     ['studios-media-teams', /keep the story alive/i],
     ['creators-experts', /turn expertise into a channel/i],
@@ -66,6 +70,10 @@ test('solution pages address distinct audiences', async ({ page }) => {
     const response = await page.goto(`/solutions/${slug}`)
     expect(response?.status(), slug).toBe(200)
     await expect(page.getByRole('heading', { name: heading })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'A working content operation, not another generation tool.' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'From one project context to the next published video.' })).toBeVisible()
+    await expect(page.locator('.workflow-list article')).toHaveCount(6)
+    await expect(page.locator('.faq details')).toHaveCount(4)
   }
 })
 

@@ -5,7 +5,6 @@
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
-  <url><loc>https://studio.subschool.us/solutions</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
   <url><loc>https://studio.subschool.us/solutions/studios-media-teams</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>
   <url><loc>https://studio.subschool.us/solutions/creators-experts</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>
   <url><loc>https://studio.subschool.us/solutions/small-businesses</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>

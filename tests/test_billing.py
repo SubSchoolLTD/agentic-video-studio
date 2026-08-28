@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from apps.api.app.billing import (
+    DEFAULT_PRICES,
     charge_feature,
     estimate_veo_billable_seconds,
     outstanding_charge_cents,
@@ -16,6 +17,17 @@ from apps.api.app.billing import (
 )
 from apps.api.app.database import SessionLocal
 from apps.api.app.models import CreditLedger, Resource, Wallet
+
+
+def test_default_veo_prices_apply_twenty_percent_markup() -> None:
+    prices = {item["feature_key"]: item for item in DEFAULT_PRICES}
+
+    standard = prices["video.generate"]
+    native_audio = prices["video.generate_native_audio"]
+    assert str(standard["provider_cost_per_unit_usd"]) == "0.20"
+    assert standard["charge_cents"] == 24
+    assert str(native_audio["provider_cost_per_unit_usd"]) == "0.40"
+    assert native_audio["charge_cents"] == 48
 
 
 def test_continuous_scene_quote_reserves_for_role_specific_roots() -> None:
@@ -121,6 +133,7 @@ def test_successful_feature_charge_is_settled_to_actual_provider_units(client) -
             "customer_charge_cents": 720,
             "provider_cost_usd": 6.0,
             "refunded_cents": 288,
+            "overage_charged_cents": 0,
             "absorbed_customer_charge_cents": 0,
         }
         assert repeated["refunded_cents"] == 0
@@ -138,6 +151,58 @@ def test_successful_feature_charge_is_settled_to_actual_provider_units(client) -
         )
         assert len(charges) == 1
         assert float(charges[0].monetary_amount_usd or 0) == 6.0
+
+
+def test_successful_feature_charge_collects_actual_retry_overage_once(client) -> None:
+    organization_id = f"org_overage_{uuid4().hex[:12]}"
+    reference_id = f"job_overage_{uuid4().hex[:12]}"
+    with SessionLocal() as session:
+        session.add(Wallet(organization_id=organization_id, balance_cents=1_000))
+        session.commit()
+        charge_feature(
+            session,
+            organization_id=organization_id,
+            user_id="usr_overage_test",
+            feature_key="video.generate_native_audio",
+            quantity=10,
+            reference_id=reference_id,
+        )
+
+        settled = settle_feature_charge(
+            session,
+            organization_id=organization_id,
+            reference_id=reference_id,
+            actual_quantity=15,
+        )
+        repeated = settle_feature_charge(
+            session,
+            organization_id=organization_id,
+            reference_id=reference_id,
+            actual_quantity=15,
+        )
+
+        assert settled == {
+            "actual_quantity": 15,
+            "customer_charge_cents": 720,
+            "provider_cost_usd": 6.0,
+            "refunded_cents": 0,
+            "overage_charged_cents": 240,
+            "absorbed_customer_charge_cents": 0,
+        }
+        assert repeated["overage_charged_cents"] == 0
+        assert repeated["customer_charge_cents"] == 720
+        assert session.get(Wallet, organization_id).balance_cents == 280
+        assert outstanding_charge_cents(session, organization_id, reference_id) == 720
+        overages = list(
+            session.scalars(
+                select(CreditLedger).where(
+                    CreditLedger.organization_id == organization_id,
+                    CreditLedger.reference_id == reference_id,
+                    CreditLedger.description == "Actual Veo usage above generation reserve",
+                )
+            )
+        )
+        assert len(overages) == 1
 
 
 def test_monthly_project_budget_uses_net_ledger_spend_and_blocks_overage(client) -> None:

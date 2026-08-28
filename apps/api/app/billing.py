@@ -470,8 +470,8 @@ def settle_feature_charge(
 
     Generation reserves the most expensive allowed scene split before work starts.
     A successful render is charged only for the provider calls that actually ran.
-    Automatic retries can make the real provider cost exceed the approved reserve;
-    that overage is recorded for margin analytics but is absorbed by the platform.
+    If automatic retries make the real provider cost exceed the initial reserve,
+    record the overage exactly once so customer revenue keeps the configured markup.
     """
     charges = list(
         session.scalars(
@@ -490,6 +490,7 @@ def settle_feature_charge(
             "customer_charge_cents": 0,
             "provider_cost_usd": 0.0,
             "refunded_cents": 0,
+            "overage_charged_cents": 0,
             "absorbed_customer_charge_cents": 0,
         }
 
@@ -501,8 +502,8 @@ def settle_feature_charge(
         Decimal("0.0001"), rounding=ROUND_HALF_UP
     )
     authorized_cents = outstanding_charge_cents(session, organization_id, reference_id)
-    customer_charge_cents = min(authorized_cents, actual_customer_cents)
-    refund_cents = max(0, authorized_cents - customer_charge_cents)
+    refund_cents = max(0, authorized_cents - actual_customer_cents)
+    overage_cents = max(0, actual_customer_cents - authorized_cents)
 
     # Keep provider spend accurate at job level without counting it once per retry charge.
     for index, charge in enumerate(charges):
@@ -543,7 +544,43 @@ def settle_feature_charge(
                         metadata_json={
                             "actual_quantity": quantity,
                             "reserved_cents": authorized_cents,
-                            "settled_charge_cents": customer_charge_cents,
+                            "settled_charge_cents": actual_customer_cents,
+                            "currency": "USD",
+                        },
+                    ),
+                ]
+            )
+    if overage_cents:
+        overage_id = f"led_over_{hashlib.sha256(reference_id.encode()).hexdigest()[:23]}"
+        if not session.get(CreditLedger, overage_id):
+            wallet = session.scalar(
+                select(Wallet).where(Wallet.organization_id == organization_id).with_for_update()
+            )
+            if not wallet:
+                wallet = Wallet(organization_id=organization_id, balance_cents=0)
+                session.add(wallet)
+                session.flush()
+            wallet.balance_cents = int(wallet.balance_cents) - overage_cents
+            session.add_all(
+                [
+                    wallet,
+                    CreditLedger(
+                        id=overage_id,
+                        organization_id=organization_id,
+                        user_id=charges[-1].user_id,
+                        amount_cents=-overage_cents,
+                        event_type="ai_usage",
+                        feature_key=feature_key,
+                        reference_id=reference_id,
+                        monetary_amount_usd=0,
+                        description="Actual Veo usage above generation reserve",
+                        metadata_json={
+                            "actual_quantity": quantity,
+                            "reserved_cents": authorized_cents,
+                            "settled_charge_cents": actual_customer_cents,
+                            "overage_cents": overage_cents,
+                            "settled": True,
+                            "cost_basis": "actual_provider_billable_units",
                             "currency": "USD",
                         },
                     ),
@@ -552,10 +589,11 @@ def settle_feature_charge(
     session.commit()
     return {
         "actual_quantity": quantity,
-        "customer_charge_cents": customer_charge_cents,
+        "customer_charge_cents": actual_customer_cents,
         "provider_cost_usd": float(provider_cost),
         "refunded_cents": refund_cents,
-        "absorbed_customer_charge_cents": max(0, actual_customer_cents - authorized_cents),
+        "overage_charged_cents": overage_cents,
+        "absorbed_customer_charge_cents": 0,
     }
 
 

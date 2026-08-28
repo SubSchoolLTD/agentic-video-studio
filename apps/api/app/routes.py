@@ -29,7 +29,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -4416,7 +4416,7 @@ def youtube_callback(
     state_value: str = Query(..., alias="state"),
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-) -> dict[str, Any]:
+) -> HTMLResponse:
     state_record = session.scalar(
         select(Resource).where(
             Resource.kind == "oauth_state",
@@ -4461,14 +4461,29 @@ def youtube_callback(
     secret_ref = store_oauth_secret(settings, connection.id, token_data)
     repo.update(connection, data={"secret_ref": secret_ref})
     repo.update(state_record, status="consumed", data={"connection_id": connection.id})
-    return {
-        "connection_id": connection.id,
-        "status": connection.status,
-        "project_id": connection.project_id,
-        "channel_id": connection.data["external_account_id"],
-        "channel_title": connection.data["display_name"],
-        "message": "YouTube connected. You can close this tab and return to Agentic Video Studio.",
-    }
+    target_origin = settings.web_base_url.rstrip("/")
+    payload = json.dumps(
+        {
+            "type": "framewise-oauth-connected",
+            "provider": "youtube",
+            "connection_id": connection.id,
+            "status": connection.status,
+        }
+    ).replace("<", "\\u003c")
+    target = json.dumps(target_origin).replace("<", "\\u003c")
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YouTube connected — Framewise</title>
+<style>body{{margin:0;display:grid;min-height:100vh;place-items:center;background:#f7f5f4;color:#17131f;font:16px system-ui,sans-serif}}main{{max-width:420px;padding:36px;border:1px solid #e3dce6;border-radius:22px;background:white;text-align:center;box-shadow:0 24px 70px rgba(38,23,43,.1)}}h1{{margin:0 0 10px;font-size:28px}}p{{margin:0;color:#716979;line-height:1.55}}</style>
+</head><body><main><h1>YouTube connected</h1><p>This window will close automatically. Return to Framewise to continue setup.</p></main>
+<script>try{{if(window.opener)window.opener.postMessage({payload},{target});}}catch(error){{}}setTimeout(()=>window.close(),500);</script>
+</body></html>""",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+        },
+    )
 
 
 @router.get("/connections/{connection_id}/capabilities", tags=["connections"])

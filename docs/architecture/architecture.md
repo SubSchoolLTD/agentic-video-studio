@@ -19,7 +19,7 @@ flowchart LR
   GWF --> Metrics
   API --> PubSub[Pub/Sub domain events]
   WF --> Parallel[Parallel Search]
-  WF --> ADK[Google ADK + Gemini]
+  WF --> Gemini[Google Gen AI SDK + Gemini]
   WF --> Veo[Veo native audio / Google TTS]
   WF --> Render[FFmpeg renderer]
   Render --> Media[(Local / Cloud Storage)]
@@ -36,13 +36,15 @@ flowchart LR
 ## Component boundaries
 
 - `application`: tenant-aware use cases, idempotency, audit trail, resource transitions.
-- `providers`: replaceable Parallel, Gemini/ADK, Veo/TTS, publishing, metrics adapters.
+- `providers`: replaceable Parallel, Gemini, Veo/TTS, publishing, metrics adapters.
 - `workflow`: typed stages and retry-safe transitions; every stage output is persisted.
 - `rendering`: optional uploaded-logo and opt-in clean-caption overlays, downloadable subtitle assets, and final H.264/AAC output.
 - `web`: no provider secrets; consumes the public `/v1` contract and reflects partial states.
 - `mcp`: remote, bearer-protected thin wrapper over the same application API and project scopes; publication uses prepare/commit.
 
 ## Data flow
+
+The live orchestration is the application-managed durable state machine calling Google's Gen AI SDK. `agents.py` defines optional ADK roles; it is not wired to a live ADK Runner. Whole-script critique and regeneration are real Gemini calls inside the production loop, not separate autonomous chat sessions.
 
 ```mermaid
 sequenceDiagram

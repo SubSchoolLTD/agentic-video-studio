@@ -1,6 +1,6 @@
 # Live validation record
 
-Validated against the production deployment on 2026-08-09.
+Validated against the production deployment on 2026-08-09. This is a historical validation record; revisions, prices, and test totals below describe that date, not the current release. See the [current submission evidence map](../submission/runtime-evidence.md).
 
 ## Provider workflow after account migration
 
@@ -47,7 +47,7 @@ The upload remains private intentionally; the rendered proof link above is the j
 
 ## GitHub automation
 
-- Private source repository: [SubSchoolLTD/agentic-video-studio](https://github.com/SubSchoolLTD/agentic-video-studio).
+- Source repository (now public): [SubSchoolLTD/agentic-video-studio](https://github.com/SubSchoolLTD/agentic-video-studio).
 - The complete CI workflow [run 31316853362](https://github.com/SubSchoolLTD/agentic-video-studio/actions/runs/31316853362) passed backend, frontend, mock browser E2E, Terraform, secret scanning, and container build jobs.
 - The account migration [run 31316128598](https://github.com/SubSchoolLTD/agentic-video-studio/actions/runs/31316128598) copied durable data and media into the new project without storing a service-account key.
 - The final keyless production deployment [run 31316858226](https://github.com/SubSchoolLTD/agentic-video-studio/actions/runs/31316858226) passed from commit `b32525f` and produced the API and web revisions above.

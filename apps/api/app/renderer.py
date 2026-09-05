@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import textwrap
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -135,7 +137,7 @@ def prepare_veo_extension_input(
     video_path: Path,
     output_path: Path,
     *,
-    max_duration_seconds: float = 29.5,
+    max_duration_seconds: float = 29.0,
 ) -> Path:
     """Keep a rolling Veo-compatible conditioning window instead of an ever-growing movie.
 
@@ -144,27 +146,42 @@ def prepare_veo_extension_input(
     """
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RenderError("FFmpeg and ffprobe are required")
+    if not 1 <= max_duration_seconds <= 30:
+        raise RenderError("Veo conditioning window must be between 1 and 30 seconds")
     probe = probe_video(video_path)
-    duration = float(probe.get("format", {}).get("duration") or 0)
+    video = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), None)
+    if not video:
+        raise RenderError("Veo extension input has no video track")
+    # The audio/container can outlast the video. Seek from the actual video track,
+    # not from container EOF, and never accept an audio-only or sub-second file.
+    duration = float(video.get("duration") or 0)
+    if not math.isfinite(duration) or duration < 1:
+        raise RenderError("Veo extension input video track must be at least 1 second")
     has_audio = any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if 0 < duration <= max_duration_seconds:
+    if duration <= max_duration_seconds and veo_extension_input_compatible(probe):
         shutil.copyfile(video_path, output_path)
         return output_path
+    window = min(duration, max_duration_seconds)
+    frame_count = math.floor(window * 24 + 1e-6)
+    window = frame_count / 24
+    start = max(0, duration - window)
     command = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
-        "-sseof",
-        f"-{max_duration_seconds:.3f}",
         "-i",
         str(video_path),
         "-map",
         "0:v:0",
         "-vf",
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=24",
+        (
+            f"setpts=PTS-STARTPTS,trim=start={start:.6f},setpts=PTS-STARTPTS,"
+            f"fps=24,trim=end_frame={frame_count},setpts=N/(24*TB),"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+        ),
         "-c:v",
         "libx264",
         "-preset",
@@ -177,12 +194,43 @@ def prepare_veo_extension_input(
         "+faststart",
     ]
     if has_audio:
-        command.extend(["-map", "0:a:0", "-af", "aresample=48000", "-c:a", "aac", "-b:a", "192k"])
+        command.extend([
+            "-map", "0:a:0", "-af",
+            f"asetpts=PTS-STARTPTS,atrim=start={start:.6f}:duration={window:.6f},aresample=48000,asetpts=N/SR/TB",
+            "-c:a", "aac", "-b:a", "192k",
+        ])
     command.append(str(output_path))
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
         raise RenderError(completed.stderr.strip() or "Could not prepare the Veo extension input window")
+    if not veo_extension_input_compatible(probe_video(output_path)):
+        raise RenderError("Prepared Veo extension input failed duration/frame-rate/timestamp validation")
     return output_path
+
+
+def veo_extension_input_compatible(probe: dict[str, Any]) -> bool:
+    """Check the actual video track, including timestamps, before a paid extension.
+
+    A rolling trim used to leave a one-frame positive edit-list offset. Veo can
+    reject that MP4 as sub-second even when ffprobe reports a 29.5-second container.
+    Keep every conditioning clip on a zero-based, constant 24-fps timeline.
+    """
+    video = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), None)
+    if not video:
+        return False
+    try:
+        duration = float(video.get("duration") or 0)
+        start = float(video.get("start_time") or 0)
+        rate = Fraction(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0")
+        container_duration = float(probe.get("format", {}).get("duration") or 0)
+        return (
+            math.isfinite(duration) and 1 <= duration <= 30
+            and math.isfinite(start) and abs(start) < 0.001
+            and rate == 24
+            and math.isfinite(container_duration) and 1 <= container_duration <= 30
+        )
+    except (ValueError, TypeError, ZeroDivisionError):
+        return False
 
 
 def _font_path() -> str:
@@ -495,7 +543,8 @@ def probe_video(path: Path) -> dict[str, Any]:
         "-show_entries",
         (
             "format=duration,size:"
-            "stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,display_aspect_ratio"
+            "stream=index,codec_type,codec_name,width,height,sample_aspect_ratio,display_aspect_ratio,"
+            "duration,start_time,avg_frame_rate,r_frame_rate,nb_frames"
         ),
         "-of",
         "json",

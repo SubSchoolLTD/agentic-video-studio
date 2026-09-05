@@ -5,7 +5,16 @@ import subprocess
 from pathlib import Path
 from shutil import which
 
-from apps.api.app.renderer import prepare_veo_extension_input, probe_video, render_motion_video, technical_qa
+import pytest
+
+from apps.api.app.renderer import (
+    RenderError,
+    prepare_veo_extension_input,
+    probe_video,
+    render_motion_video,
+    technical_qa,
+    veo_extension_input_compatible,
+)
 
 
 def run_ffmpeg(arguments: list[str]) -> None:
@@ -264,4 +273,57 @@ def test_prepares_a_rolling_extension_window_without_requiring_audio(tmp_path: P
     prepare_veo_extension_input(source, conditioning)
 
     duration = float(probe_video(conditioning)["format"]["duration"])
-    assert 29.0 <= duration <= 29.6
+    assert duration == pytest.approx(29.0, abs=0.001)
+    assert veo_extension_input_compatible(probe_video(conditioning))
+
+
+def test_normalizes_a_legacy_conditioning_video_with_a_one_frame_offset(tmp_path: Path) -> None:
+    source = tmp_path / "legacy_conditioning.mp4"
+    run_ffmpeg([
+        "-f", "lavfi", "-i", "color=c=blue:s=96x96:r=24:d=29.5",
+        "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=29.6",
+        "-vf", "setpts=PTS+1/(24*TB)", "-fps_mode", "passthrough",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+    ])
+    before = probe_video(source)
+    assert not veo_extension_input_compatible(before)
+    assert float(before["streams"][0]["start_time"]) > 0.04
+    output = prepare_veo_extension_input(source, tmp_path / "repaired.mp4")
+    after = probe_video(output)
+    assert veo_extension_input_compatible(after)
+    assert float(after["streams"][0]["start_time"]) == 0
+    assert int(after["streams"][0]["nb_frames"]) == 29 * 24
+    assert all(float(s["duration"]) == pytest.approx(29, abs=0.03) for s in after["streams"])
+
+
+def test_does_not_mistake_long_audio_for_a_valid_video_track(tmp_path: Path) -> None:
+    source = tmp_path / "short_video_long_audio.mp4"
+    run_ffmpeg([
+        "-f", "lavfi", "-i", "color=c=blue:s=96x96:r=24:d=0.5",
+        "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=32",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+    ])
+    assert not veo_extension_input_compatible(probe_video(source))
+    with pytest.raises(RenderError, match="at least 1 second"):
+        prepare_veo_extension_input(source, tmp_path / "rejected.mp4")
+
+
+def test_extension_window_uses_video_end_not_longer_audio_eof(tmp_path: Path) -> None:
+    source = tmp_path / "long_audio.mp4"
+    run_ffmpeg([
+        "-f", "lavfi", "-i", "color=c=blue:s=96x96:r=30:d=4",
+        "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=40",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+    ])
+    output = prepare_veo_extension_input(source, tmp_path / "aligned.mp4")
+    after = probe_video(output)
+    assert veo_extension_input_compatible(after)
+    assert float(after["format"]["duration"]) == pytest.approx(4, abs=0.03)
+    assert int(after["streams"][0]["nb_frames"]) == 4 * 24
+
+
+def test_copies_valid_native_conditioning_without_reencoding(tmp_path: Path) -> None:
+    source = tmp_path / "valid.mp4"
+    run_ffmpeg(["-f", "lavfi", "-i", "color=c=blue:s=96x96:r=24:d=2", "-c:v", "libx264", str(source)])
+    output = prepare_veo_extension_input(source, tmp_path / "copy.mp4")
+    assert output.read_bytes() == source.read_bytes()

@@ -28,11 +28,14 @@ from .providers import (
     native_voice_profile,
 )
 from .renderer import (
+    RenderError,
     extract_last_frame,
     prepare_veo_extension_input,
+    probe_video,
     render_motion_video,
     render_scene_fixture,
     technical_qa,
+    veo_extension_input_compatible,
     write_srt,
     write_webvtt,
 )
@@ -506,7 +509,7 @@ class WorkflowManager:
             key=lambda item: int(item.data.get("position") or 0),
         )
 
-    def _scene_extension_input_uri(
+    async def _scene_extension_input_uri(
         self,
         repo: ResourceRepository,
         *,
@@ -528,7 +531,40 @@ class WorkflowManager:
         )
         if not attempt or attempt.status != "passed":
             return None
-        return str(attempt.data.get("continuation_storage_uri") or "") or None
+        storage_uri = str(attempt.data.get("continuation_storage_uri") or "")
+        if not storage_uri:
+            return None
+        conditioning_path = Path(str(
+            attempt.data.get("continuation_conditioning_uri")
+            or attempt.data.get("continuation_output_uri")
+            or attempt.data["output_uri"]
+        ))
+        await asyncio.to_thread(self.storage.materialize, storage_uri=storage_uri, local_path=conditioning_path)
+        try:
+            if await asyncio.to_thread(lambda: veo_extension_input_compatible(probe_video(conditioning_path))):
+                return storage_uri
+        except RenderError:
+            # Repair from the saved, accepted scene below if legacy context is corrupt.
+            pass
+        repaired_path = conditioning_path.with_name(f"{conditioning_path.stem}_normalized_v2.mp4")
+        try:
+            await asyncio.to_thread(prepare_veo_extension_input, conditioning_path, repaired_path)
+        except RenderError:
+            # The accepted scene is a valid same-speaker reference. Do not buy another
+            # Veo generation just to reconstruct a damaged private conditioning file.
+            source = Path(str(attempt.data["output_uri"]))
+            await asyncio.to_thread(self.storage.materialize, storage_uri=attempt.data.get("storage_uri"), local_path=source)
+            await asyncio.to_thread(prepare_veo_extension_input, source, repaired_path)
+        persisted = await asyncio.to_thread(self.storage.persist, repaired_path, content_type="video/mp4")
+        repo.update(attempt, data={
+            "continuation_conditioning_uri": str(repaired_path),
+            "continuation_storage_uri": persisted["storage_uri"],
+            "continuation_public_path": persisted["public_path"],
+            "continuation_repaired_from": storage_uri,
+            "continuation_contract_version": 2,
+        })
+        logger.info("veo_conditioning_repaired scene_id=%s attempt_id=%s aspect_ratio=%s", previous.id, attempt.id, aspect_ratio)
+        return persisted["storage_uri"]
 
     async def _generate_scene_with_qa(
         self,
@@ -579,7 +615,7 @@ class WorkflowManager:
                     / f"{scene.id}{suffix}_{ratio_slug}.mp4"
                 )
                 extension_video_uri = (
-                    self._scene_extension_input_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
+                    await self._scene_extension_input_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
                     if continue_scenes
                     else None
                 )
@@ -2186,7 +2222,10 @@ class WorkflowManager:
                             storage_uri=storage_uri,
                             local_path=Path(output_uri),
                         )
-                    continuation_output_uri = latest_attempt.data.get("continuation_output_uri")
+                    continuation_output_uri = (
+                        latest_attempt.data.get("continuation_conditioning_uri")
+                        or latest_attempt.data.get("continuation_output_uri")
+                    )
                     continuation_storage_uri = latest_attempt.data.get("continuation_storage_uri")
                     if continuation_output_uri and continuation_storage_uri:
                         await asyncio.to_thread(

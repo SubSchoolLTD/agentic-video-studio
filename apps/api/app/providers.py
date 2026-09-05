@@ -882,11 +882,7 @@ def apply_narration_to_scene(
                 "speaker is off camera, show no unrelated lip movement."
             )
         else:
-            extension_tail = (
-                "Keep speaking naturally through the final second so the next Veo extension inherits the same voice. "
-                if scene.get("continuous_extension_has_next")
-                else "Finish the final phrase cleanly before the end of the complete performance. "
-            )
+            extension_tail = "Finish the complete phrase naturally before the cut; do not stretch words or add filler to reach the boundary. "
             audio_direction = (
                 f'The creator says exactly in the narration language: "{narration}". '
                 "This is a new shot of the same creator anchored to their FIRST accepted Veo-native footage. Begin "
@@ -915,7 +911,7 @@ def apply_narration_to_scene(
 
 VISUAL_MODE_DIRECTIONS = {
     "ugc_creator": (
-        "Authentic creator-shot UGC mini-documentary built as one continuous physical performance. Use one recurring "
+        "Authentic creator-shot UGC mini-documentary built from individually authored shots of one recurring performance. Use one recurring "
         "adult creator in one coherent real-world location with connected zones: for example entering a classroom, "
         "walking between desks, demonstrating at a board, helping a learner, then reflecting at a worktable. Vary "
         "wide, medium, over-shoulder, moving follow and detail shots through motivated action, not arbitrary cuts. "
@@ -2123,8 +2119,8 @@ class EditorialProvider:
                     "Use one concretely described adult creator: fixed face shape, hair cut/color, distinguishing traits and exact wardrobe. "
                     "At least 60% of scenes must have speaker_kind on_camera and synchronized creator dialogue; voice_over is only motivated b-roll. "
                     "Treat scenes as separate authored shots anchored to the FIRST accepted performance, never an accumulated chain. Start the spoken "
-                    "hook in the first 0.25 seconds. When another fragment follows, keep the creator speaking naturally through "
-                    "the final second so voice identity can carry into the extension. Use one coherent location with connected "
+                    "hook in the first 0.25 seconds. Finish each complete spoken thought naturally; the private reference is trimmed "
+                    "after speech so no fragment needs stretched words or filler. Use one coherent location with connected "
                     "zones and a plausible continuous action chain, while varying shot scale, body movement and activity."
                     if visual_mode == "ugc_creator" and continue_scenes and native_audio
                     else None

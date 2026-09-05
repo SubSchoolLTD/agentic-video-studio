@@ -277,6 +277,21 @@ def test_prepares_a_rolling_extension_window_without_requiring_audio(tmp_path: P
     assert veo_extension_input_compatible(probe_video(conditioning))
 
 
+def test_private_voice_anchor_ends_just_after_speech_without_changing_original(tmp_path: Path) -> None:
+    source = tmp_path / "original.mp4"
+    run_ffmpeg([
+        "-f", "lavfi", "-i", "color=c=blue:s=96x96:r=24:d=6",
+        "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=6",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+    ])
+    before = source.read_bytes()
+    output = prepare_veo_extension_input(source, tmp_path / "anchor.mp4", speech_end_seconds=4.3)
+    probe = probe_video(output)
+    assert source.read_bytes() == before
+    assert veo_extension_input_compatible(probe)
+    assert 4.3 < float(probe["format"]["duration"]) < 4.5
+
+
 def test_normalizes_a_legacy_conditioning_video_with_a_one_frame_offset(tmp_path: Path) -> None:
     source = tmp_path / "legacy_conditioning.mp4"
     run_ffmpeg([

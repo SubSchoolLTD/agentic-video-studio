@@ -14,6 +14,7 @@ from apps.api.app.providers import (
     SceneSpeechAssessment,
     SpeechQAProvider,
     TopicCandidateProvider,
+    VoiceConsistencyAssessment,
     _rebalance_candidate_mix,
     _strip_prompt_tokens,
     apply_narration_to_scene,
@@ -30,6 +31,37 @@ from apps.api.app.workflow import (
     generation_retry_delay_seconds,
     retryable_generation_error,
 )
+
+
+def test_voice_review_is_audio_only_and_does_not_pass_uncertainty(monkeypatch) -> None:
+    captured = {}
+
+    def generate_content(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(parsed=VoiceConsistencyAssessment(
+            same_speaker=True, similarity=0.94, uncertain=True, evidence="Too little clear speech.",
+        ), response_id="test")
+
+    monkeypatch.setattr("apps.api.app.providers.google_genai_client", lambda _settings, **_kwargs: SimpleNamespace(
+        models=SimpleNamespace(generate_content=generate_content),
+    ))
+    result = SpeechQAProvider(Settings())._compare_voice_with_gemini(
+        "gs://private/original.wav", "gs://private/candidate.wav", "fixed voice",
+    )
+    assert captured["model"] == "gemini-2.5-pro"
+    media = [item for item in captured["contents"] if hasattr(item, "file_data")]
+    assert [item.file_data.mime_type for item in media] == ["audio/wav", "audio/wav"]
+    assert result["passed"] is False
+    assert result["score_kind"] == "uncalibrated_ai_judgment"
+
+
+def test_explicit_voice_over_does_not_get_conflicting_lip_sync_prompt() -> None:
+    scene = apply_narration_to_scene({"visual_mode": "ugc_creator", "speaker_kind": "voice_over",
+                                    "visual_prompt_base": "The creator sorts blank study cards."},
+                                   "I finally knew where to focus my time.", native_audio=True)
+    assert "off-camera speech" in scene["visual_prompt"]
+    assert "exact natural lip synchronization" not in scene["visual_prompt"]
+    assert "not recast the creator or switch to a narrator" not in scene["visual_prompt"]
 
 
 def editorial_payload() -> dict:

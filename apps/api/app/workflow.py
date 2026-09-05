@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from .billing import refund_feature_charges, settle_feature_charge, veo_request_duration
+from .billing import charge_feature, refund_feature_charges, settle_feature_charge, veo_request_duration
 from .config import Settings
 from .database import SessionLocal
 from .events import EventSink
@@ -22,6 +22,7 @@ from .providers import (
     MultimodalQAProvider,
     ParallelSearchProvider,
     ResearchPacket,
+    SceneVisualQAProvider,
     SpeechQAProvider,
     TextToSpeechProvider,
     VeoProvider,
@@ -30,6 +31,7 @@ from .providers import (
 from .renderer import (
     RenderError,
     extract_last_frame,
+    extract_voice_audio,
     prepare_veo_extension_input,
     probe_video,
     render_motion_video,
@@ -516,9 +518,9 @@ class WorkflowManager:
         scene: Resource,
         aspect_ratio: str,
     ) -> str | None:
-        """Return the rolling Veo context from the latest scene owned by the same role."""
+        """Branch from the first accepted take, never from a drifting extension."""
         earlier = self._earlier_continuation_scenes(repo, scene=scene)
-        previous = earlier[-1] if earlier else None
+        previous = earlier[0] if earlier else None
         if not previous:
             return None
         attempt_ids = dict(previous.data.get("latest_attempt_ids") or {})
@@ -531,40 +533,38 @@ class WorkflowManager:
         )
         if not attempt or attempt.status != "passed":
             return None
-        storage_uri = str(attempt.data.get("continuation_storage_uri") or "")
-        if not storage_uri:
-            return None
-        conditioning_path = Path(str(
-            attempt.data.get("continuation_conditioning_uri")
-            or attempt.data.get("continuation_output_uri")
-            or attempt.data["output_uri"]
-        ))
-        await asyncio.to_thread(self.storage.materialize, storage_uri=storage_uri, local_path=conditioning_path)
-        try:
-            if await asyncio.to_thread(lambda: veo_extension_input_compatible(probe_video(conditioning_path))):
-                return storage_uri
-        except RenderError:
-            # Repair from the saved, accepted scene below if legacy context is corrupt.
-            pass
-        repaired_path = conditioning_path.with_name(f"{conditioning_path.stem}_normalized_v2.mp4")
-        try:
-            await asyncio.to_thread(prepare_veo_extension_input, conditioning_path, repaired_path)
-        except RenderError:
-            # The accepted scene is a valid same-speaker reference. Do not buy another
-            # Veo generation just to reconstruct a damaged private conditioning file.
-            source = Path(str(attempt.data["output_uri"]))
-            await asyncio.to_thread(self.storage.materialize, storage_uri=attempt.data.get("storage_uri"), local_path=source)
-            await asyncio.to_thread(prepare_veo_extension_input, source, repaired_path)
-        persisted = await asyncio.to_thread(self.storage.persist, repaired_path, content_type="video/mp4")
+        source = Path(str(attempt.data["output_uri"]))
+        anchor_path = source.with_name(f"{source.stem}_identity_anchor_v1.mp4")
+        anchor_uri = attempt.data.get("identity_anchor_storage_uri")
+        if anchor_uri:
+            try:
+                await asyncio.to_thread(self.storage.materialize, storage_uri=anchor_uri, local_path=anchor_path)
+                if veo_extension_input_compatible(probe_video(anchor_path)):
+                    return str(anchor_uri)
+            except (RenderError, OSError):
+                pass
+        # Rebuild a missing/corrupt private anchor from the accepted original, not
+        # from an accumulated continuation. This never buys another root take.
+        await asyncio.to_thread(self.storage.materialize, storage_uri=attempt.data.get("storage_uri"), local_path=source)
+        await asyncio.to_thread(
+            prepare_veo_extension_input, source, anchor_path,
+            speech_end_seconds=(attempt.data.get("speech_qa") or {}).get("speech_end_seconds"),
+        )
+        persisted = await asyncio.to_thread(self.storage.persist, anchor_path, content_type="video/mp4")
         repo.update(attempt, data={
-            "continuation_conditioning_uri": str(repaired_path),
-            "continuation_storage_uri": persisted["storage_uri"],
-            "continuation_public_path": persisted["public_path"],
-            "continuation_repaired_from": storage_uri,
-            "continuation_contract_version": 2,
+            "identity_anchor_storage_uri": persisted["storage_uri"],
+            "identity_anchor_path": str(anchor_path),
+            "identity_anchor_source_attempt_id": attempt.id,
+            "identity_anchor_policy": "first_accepted_take_v1",
         })
-        logger.info("veo_conditioning_repaired scene_id=%s attempt_id=%s aspect_ratio=%s", previous.id, attempt.id, aspect_ratio)
+        logger.info("veo_identity_anchor_prepared scene_id=%s attempt_id=%s aspect_ratio=%s", previous.id, attempt.id, aspect_ratio)
         return persisted["storage_uri"]
+
+    async def _voice_audio_uri(self, video_uri: str, local_path: Path) -> str:
+        await asyncio.to_thread(self.storage.materialize, storage_uri=video_uri, local_path=local_path)
+        audio_path = local_path.with_suffix(".voice.wav")
+        await asyncio.to_thread(extract_voice_audio, local_path, audio_path)
+        return (await asyncio.to_thread(self.storage.persist, audio_path, content_type="audio/wav"))["storage_uri"]
 
     async def _generate_scene_with_qa(
         self,
@@ -582,7 +582,12 @@ class WorkflowManager:
     ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str | None]]:
         use_live_video = self.settings.uses_live_video and not bool(job.data.get("test_mode"))
         max_automatic_retries = 2 if native_audio else 0
-        attempt_number = initial_attempt_number
+        existing_attempts = [item for item in repo.list(
+            organization_id=job.organization_id, project_id=job.project_id, kind="scene_attempt", limit=5000,
+        ) if item.data.get("scene_id") == scene.id]
+        # A failed batch can already contain paid, rejected takes. Never overwrite
+        # their media when a later manual regeneration starts from an old checkpoint.
+        attempt_number = max(initial_attempt_number, max((int(item.data.get("attempt") or 0) for item in existing_attempts), default=0) + 1)
         voice_preset, locked_voice_profile = native_voice_profile(job.data.get("native_voice_preset"))
         veo_seed = int(job.data.get("veo_seed") or stable_veo_seed(job.id, voice_preset))
         continue_scenes = bool(
@@ -594,6 +599,16 @@ class WorkflowManager:
         continuation_track = self._continuation_track(scene)
         scene_voice_profile = str(scene.data.get("voice_direction") or locked_voice_profile)
         for automatic_retry in range(max_automatic_retries + 1):
+            if regeneration_id and automatic_retry and use_live_video:
+                regeneration = repo.get_any(regeneration_id, kind="scene_regeneration")
+                retry_units = (7 if continue_scenes and self._earlier_continuation_scenes(repo, scene=scene)
+                               else veo_request_duration(float(scene.data.get("duration_target") or 8))) * len(aspect_ratios)
+                # Reserve extra takes before calling Veo, not by driving the wallet
+                # negative at settlement. Initial requested takes are already reserved.
+                charge_feature(session, organization_id=job.organization_id,
+                               user_id=str((regeneration.data if regeneration else {}).get("requested_by_user_id") or "system"),
+                               feature_key="video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate",
+                               quantity=retry_units, reference_id=regeneration_id)
             prompt = str(scene.data.get("visual_prompt") or "").strip()
             if not prompt:
                 raise RuntimeError(f"Director returned no visual prompt for {scene.id}")
@@ -602,6 +617,7 @@ class WorkflowManager:
             output_uris: dict[str, str | None] = {}
             speech_passed = True
             voice_passed = True
+            visual_passed = True
             speech_needs_compression = False
             speech_prompt_corrections: list[str] = []
             for aspect_ratio in aspect_ratios:
@@ -626,6 +642,14 @@ class WorkflowManager:
                         f"for {scene.id} ({aspect_ratio})"
                     )
                 if extension_video_uri:
+                    prompt += (
+                        " IMMUTABLE REFERENCE CONTRACT: the input is the FIRST accepted performance of this role, "
+                        "not the preceding story scene. Preserve exactly that person's face, hair, wardrobe and audible "
+                        "voice identity. Perform ONLY the new action and new spoken line in this brief; never repeat "
+                        "reference dialogue. This is an independent shot, not the next step of an accumulated visual effect. "
+                        "Keep natural photographic skin and material textures, normal exposure and physical props. "
+                        "No posterization, solarization, edge outlines, pixelation, melting objects or artistic filter."
+                    )
                     input_uri, input_mime_type, input_kind = (
                         extension_video_uri,
                         "video/mp4",
@@ -731,9 +755,16 @@ class WorkflowManager:
                             scene=scene,
                             aspect_ratio=aspect_ratio,
                         )
+                        reference_audio_uri = voice_reference_uri
+                        candidate_audio_uri = persisted["storage_uri"]
+                        if use_live_video and voice_reference_uri:
+                            reference_audio_uri = await self._voice_audio_uri(
+                                voice_reference_uri, output_path.parent / f"voice_anchor_{hashlib.sha256(voice_reference_uri.encode()).hexdigest()[:16]}_{ratio_slug}.mp4"
+                            )
+                            candidate_audio_uri = await self._voice_audio_uri(persisted["storage_uri"], generated)
                         voice_qa = await self.speech_qa.compare_voice(
-                            reference_video_uri=voice_reference_uri,
-                            candidate_video_uri=persisted["storage_uri"],
+                            reference_video_uri=reference_audio_uri,
+                            candidate_video_uri=candidate_audio_uri,
                             voice_profile=scene_voice_profile,
                         )
                         voice_qa["generation_strategy"] = (
@@ -775,6 +806,17 @@ class WorkflowManager:
                         "provider": "internal",
                         "demo_data": not use_live_video,
                     }
+                visual_qa = (
+                    await SceneVisualQAProvider(self.settings).analyze(
+                        candidate_uri=persisted["storage_uri"],
+                        reference_uri=self._native_voice_reference_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
+                        if continue_scenes and scene.data.get("speaker_kind", "on_camera") == "on_camera" else None,
+                        scene=dict(scene.data),
+                    ) if use_live_video else {"passed": True, "issues": [], "demo_data": True}
+                )
+                visual_passed = visual_passed and bool(visual_qa.get("passed"))
+                if not visual_qa.get("passed"):
+                    speech_prompt_corrections.append("VISUAL CORRECTION: " + " ".join(visual_qa.get("issues") or []))
                 speech_passed = speech_passed and bool(speech_qa.get("passed"))
                 voice_passed = voice_passed and bool(voice_qa.get("passed"))
                 if not speech_qa.get("passed"):
@@ -817,7 +859,7 @@ class WorkflowManager:
                             "voice_qa_passed": voice_qa.get("passed"),
                         },
                     )
-                attempt_passed = bool(speech_qa.get("passed") and voice_qa.get("passed"))
+                attempt_passed = bool(speech_qa.get("passed") and voice_qa.get("passed") and visual_qa.get("passed"))
                 attempt = repo.add(
                     kind="scene_attempt",
                     organization_id=job.organization_id,
@@ -864,6 +906,8 @@ class WorkflowManager:
                         ),
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
+                        "visual_qa": visual_qa,
+                        "identity_anchor_policy": "first_accepted_take_v1",
                         "voice_reference_uri": voice_reference_uri,
                         "native_voice_preset": voice_preset,
                         "native_voice_profile": locked_voice_profile,
@@ -903,6 +947,7 @@ class WorkflowManager:
                         ),
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
+                        "visual_qa": visual_qa,
                         "voice_reference_uri": voice_reference_uri,
                         "native_voice_preset": voice_preset,
                         "veo_seed": veo_seed,
@@ -919,12 +964,12 @@ class WorkflowManager:
                         "billable_seconds": attempt.data["billable_seconds"],
                     }
                 )
-            if speech_passed and voice_passed:
+            if speech_passed and voice_passed and visual_passed:
                 return attempt_items, latest_attempt_ids, output_uris
             if automatic_retry >= max_automatic_retries:
                 failed_checks = " and ".join(
                     label
-                    for label, passed in (("speech", speech_passed), ("voice identity", voice_passed))
+                    for label, passed in (("speech", speech_passed), ("voice identity", voice_passed), ("visual identity/artifacts", visual_passed))
                     if not passed
                 )
                 raise RuntimeError(
@@ -1020,8 +1065,8 @@ class WorkflowManager:
                 repo.update(regeneration, status="running", data={"started_at": datetime.now(UTC).isoformat()})
                 native_audio = job.data.get("audio_mode") == "veo_native"
                 cascade_scenes = [scene]
-                if job.data.get("continue_scenes"):
-                    selected_track = self._continuation_track(scene)
+                if regeneration.data.get("cascade_scene_ids"):
+                    authorized_scene_ids = set(regeneration.data["cascade_scene_ids"])
                     cascade_scenes = sorted(
                         [
                             item
@@ -1032,8 +1077,7 @@ class WorkflowManager:
                                 limit=5000,
                             )
                             if str(item.data.get("storyboard_id") or "") == storyboard.id
-                            and int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
-                            and self._continuation_track(item) == selected_track
+                            and item.id in authorized_scene_ids
                         ],
                         key=lambda item: int(item.data.get("position") or 0),
                     )
@@ -2458,8 +2502,18 @@ class WorkflowManager:
             organization_id=job.organization_id,
             project_id=job.project_id,
             kind="scene_attempt",
-            limit=200,
+            limit=5000,
         )
+        # Regenerations have their own authorized ledger entry. Never settle their
+        # units a second time against the original generation reservation.
+        billing_groups: dict[str, int] = {job.id: 0}
+        for item in attempt_resources:
+            if item.data.get("generation_job_id") == job.id and use_live_video:
+                reference = str(item.data.get("regeneration_id") or job.id)
+                regeneration = repo.get_any(reference, kind="scene_regeneration") if reference != job.id else None
+                if regeneration and regeneration.status in {"failed", "cancelled"}:
+                    continue
+                billing_groups[reference] = billing_groups.get(reference, 0) + int(item.data.get("billable_seconds") or 0)
         actual_billable_units = (
             sum(
                 int(item.data.get("billable_seconds") or 0)
@@ -2469,12 +2523,13 @@ class WorkflowManager:
             if use_live_video
             else 0
         )
-        settlement = settle_feature_charge(
-            session,
-            organization_id=job.organization_id,
-            reference_id=job.id,
-            actual_quantity=actual_billable_units,
-        )
+        settlements = [settle_feature_charge(
+            session, organization_id=job.organization_id, reference_id=reference,
+            actual_quantity=units,
+        ) for reference, units in billing_groups.items()]
+        settlement = {key: sum(item[key] for item in settlements) for key in (
+            "customer_charge_cents", "provider_cost_usd", "refunded_cents", "absorbed_customer_charge_cents",
+        )}
         repo.update(
             job,
             data={
@@ -2505,13 +2560,18 @@ class WorkflowManager:
             and item.data.get("checksum")
             and item.data.get("generation_job_id") != job.id
         }
-        for index, aspect_ratio in enumerate(job.data.get("aspect_ratios", ["9:16"]), start=1):
+        existing_video_id = job.data.get("revision_of_video_id") or job.data.get("video_id")
+        existing_video = repo.get_any(str(existing_video_id), kind="video") if existing_video_id else None
+        first_render_version = max((int(item.get("version", 0)) for item in (existing_video.data.get("versions") or [])), default=0) + 1 if existing_video else 1
+        for index, aspect_ratio in enumerate(job.data.get("aspect_ratios", ["9:16"]), start=first_render_version):
             render_started = time.perf_counter()
             output_dir = self.settings.storage_root / (job.project_id or "unknown") / job.id / "renders"
             output_path = output_dir / f"version_{index}_{aspect_ratio.replace(':', 'x')}.mp4"
             matching_attempts = [
                 item for item in scene_attempts if item.get("aspect_ratio") in {None, aspect_ratio}
             ]
+            scene_order = {scene_id: position for position, scene_id in enumerate(scene_ids)}
+            matching_attempts.sort(key=lambda item: scene_order.get(str(item.get("scene_id")), len(scene_order)))
             # The final timeline is always made from the authored per-scene tails in storyboard
             # order. Cumulative/rolling videos are private conditioning context for their own role;
             # rendering one of those would reorder interleaved characters and reintroduce hidden

@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     gemini_model: str = "gemini-2.5-flash"
     gemini_editorial_model: str = "gemini-2.5-pro"
+    gemini_quality_model: str = "gemini-2.5-pro"
     google_image_model: str = "gemini-2.5-flash-image"
     veo_model: str = "veo-3.1-generate-001"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"

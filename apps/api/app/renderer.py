@@ -138,6 +138,7 @@ def prepare_veo_extension_input(
     output_path: Path,
     *,
     max_duration_seconds: float = 29.0,
+    speech_end_seconds: float | None = None,
 ) -> Path:
     """Keep a rolling Veo-compatible conditioning window instead of an ever-growing movie.
 
@@ -159,13 +160,18 @@ def prepare_veo_extension_input(
         raise RenderError("Veo extension input video track must be at least 1 second")
     has_audio = any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if duration <= max_duration_seconds and veo_extension_input_compatible(probe):
+    # Only the private reference is trimmed. Veo needs audible speech in its last
+    # second to inherit a voice; the published root scene remains untouched.
+    end = duration
+    if speech_end_seconds is not None and math.isfinite(speech_end_seconds) and speech_end_seconds >= 1:
+        end = min(duration, math.ceil((speech_end_seconds + 0.125) * 24) / 24)
+    if end == duration and duration <= max_duration_seconds and veo_extension_input_compatible(probe):
         shutil.copyfile(video_path, output_path)
         return output_path
-    window = min(duration, max_duration_seconds)
+    window = min(end, max_duration_seconds)
     frame_count = math.floor(window * 24 + 1e-6)
     window = frame_count / 24
-    start = max(0, duration - window)
+    start = max(0, end - window)
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -223,6 +229,21 @@ def prepare_veo_extension_input(
             "Prepared Veo extension input failed duration/frame-rate/timestamp validation: "
             + json.dumps({"tracks": tracks, "format": output_probe.get("format", {})}, sort_keys=True)
         )
+    return output_path
+
+
+def extract_voice_audio(video_path: Path, output_path: Path) -> Path:
+    """Remove visual identity cues from speaker comparison; preserve audible timbre."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RenderError("FFmpeg is required")
+    completed = subprocess.run([
+        ffmpeg, "-v", "error", "-y", "-i", str(video_path),
+        "-vn", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(output_path),
+    ], capture_output=True, text=True, check=False)
+    if completed.returncode or not output_path.exists():
+        raise RenderError(completed.stderr.strip() or "Could not extract voice QA audio")
     return output_path
 
 

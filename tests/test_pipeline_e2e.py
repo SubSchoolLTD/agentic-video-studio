@@ -708,6 +708,11 @@ def test_selective_scene_regeneration_executes_and_appends_video_version(client,
     assert job["status"] == "ready"
     original = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
     assert len(original["versions"]) == 1
+    with SessionLocal() as session:
+        original_version = session.get(Resource, original["latest_version_id"])
+        original_asset = session.get(Resource, original_version.data["render_asset_id"])
+        original_path = Path(original_asset.data["storage_uri"])
+        original_bytes = original_path.read_bytes()
     scene = original["scenes"][0]
     assert scene["locked"] is False
 
@@ -732,6 +737,11 @@ def test_selective_scene_regeneration_executes_and_appends_video_version(client,
     assert refreshed_job["status"] == "ready"
     assert len(refreshed_video["versions"]) == 2
     assert refreshed_video["latest_version_id"] != original["latest_version_id"]
+    assert original_path.read_bytes() == original_bytes
+    with SessionLocal() as session:
+        new_version = session.get(Resource, refreshed_video["latest_version_id"])
+        new_asset = session.get(Resource, new_version.data["render_asset_id"])
+        assert new_asset.data["storage_uri"] != str(original_path)
     refreshed_scene = next(item for item in refreshed_video["scenes"] if item["id"] == scene["id"])
     assert refreshed_scene["attempt"] == 2
     assert "authentic handheld" in refreshed_scene["visual_prompt"].lower()
@@ -776,7 +786,7 @@ def test_native_ugc_regeneration_cascades_through_following_extensions(client, a
     assert [item["attempt"] for item in refreshed_scenes] == [2, 2]
 
 
-def test_continuous_native_ugc_uses_a_rolling_window_beyond_36_seconds(client, auth_headers) -> None:
+def test_continuous_native_ugc_reuses_root_anchor_beyond_36_seconds(client, auth_headers) -> None:
     response = client.post(
         "/v1/projects/prj_subschool/generation-jobs",
         json={
@@ -796,6 +806,17 @@ def test_continuous_native_ugc_uses_a_rolling_window_beyond_36_seconds(client, a
     assert len(scenes) == 6
     assert all(scene["continuation_track"] == "creator" for scene in scenes)
     assert scenes[-1]["attempts"][0]["continuity_input_kind"] == "continuation_track:creator"
+    root_anchor = scenes[0]["attempts"][0]["identity_anchor_storage_uri"]
+    assert all(item["attempts"][0]["continuity_input_uri"] == root_anchor for item in scenes[1:])
+    retained_ids = [item["attempts"][0]["id"] for item in scenes]
+    queued = client.post(f"/v1/scenes/{scenes[2]['id']}/regenerate", json={"reason": "Fix only this independent anchored shot"}, headers=auth_headers)
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["cascade_scene_count"] == 1
+    regeneration = wait_for_scene_regeneration(client, queued.json()["regeneration_id"], auth_headers)
+    assert regeneration["status"] == "completed", regeneration.get("error")
+    refreshed = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    after = sorted(refreshed["scenes"], key=lambda item: item["position"])
+    assert all(item["attempts"][0]["id"] == retained_ids[index] for index, item in enumerate(after) if index != 2)
 
 
 def test_storytelling_continuation_uses_the_previous_scene_for_each_role(client, auth_headers) -> None:
@@ -824,8 +845,11 @@ def test_storytelling_continuation_uses_the_previous_scene_for_each_role(client,
     assert [item["continuation_track"] for item in scenes[:4]] == ["maya", "leo", "maya", "leo"]
     assert maya_one["attempts"][0]["continuity_input_kind"] == "continuation_track_root:maya"
     assert leo_one["attempts"][0]["continuity_input_kind"] == "continuation_track_root:leo"
-    assert maya_two["attempts"][0]["continuity_input_uri"] == maya_one["attempts"][0]["continuation_storage_uri"]
-    assert leo_two["attempts"][0]["continuity_input_uri"] == leo_one["attempts"][0]["continuation_storage_uri"]
+    assert maya_two["attempts"][0]["continuity_input_uri"] == maya_one["attempts"][0]["identity_anchor_storage_uri"]
+    assert leo_two["attempts"][0]["continuity_input_uri"] == leo_one["attempts"][0]["identity_anchor_storage_uri"]
+    for later in scenes[4:]:
+        root = maya_one if later["continuation_track"] == "maya" else leo_one
+        assert later["attempts"][0]["continuity_input_uri"] == root["attempts"][0]["identity_anchor_storage_uri"]
 
     queued = client.post(
         f"/v1/scenes/{maya_one['id']}/regenerate",
@@ -870,7 +894,7 @@ def test_retry_repairs_legacy_conditioning_without_regenerating_accepted_scenes(
         ).order_by(Resource.created_at)).all()
         assert len(attempts) == 2
         accepted_ids = [a.id for a in attempts]
-        conditioning = Path(attempts[-1].data["continuation_conditioning_uri"])
+        conditioning = Path(attempts[0].data["identity_anchor_path"])
         if legacy_fault == "offset":
             shifted = conditioning.with_name("shifted_test.mp4")
             ffmpeg = which("ffmpeg")
@@ -896,10 +920,10 @@ def test_retry_repairs_legacy_conditioning_without_regenerating_accepted_scenes(
         ).order_by(Resource.created_at)).all()
         assert [a.id for a in attempts[:2]] == accepted_ids
         assert len(attempts) == 3
-        repaired = attempts[1]
-        assert repaired.data["continuation_contract_version"] == 2
-        assert attempts[2].data["continuity_input_uri"] == repaired.data["continuation_storage_uri"]
-        assert veo_extension_input_compatible(probe_video(Path(repaired.data["continuation_conditioning_uri"])))
+        repaired = attempts[0]
+        assert repaired.data["identity_anchor_policy"] == "first_accepted_take_v1"
+        assert attempts[2].data["continuity_input_uri"] == repaired.data["identity_anchor_storage_uri"]
+        assert veo_extension_input_compatible(probe_video(Path(repaired.data["identity_anchor_path"])))
 
 
 def test_interrupted_job_resumes_from_scene_checkpoint_without_duplicate_provider_work(

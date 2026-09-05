@@ -46,6 +46,7 @@ from .billing import (
 )
 from .cloud_auth import require_google_service_identity
 from .config import Settings, get_settings
+from .content_planning import research_plan, select_content_candidates
 from .database import SessionLocal, get_db
 from .email_service import send_low_balance_email
 from .events import EventSink
@@ -2872,13 +2873,29 @@ def _enqueue_automatic_candidate_productions(
         return []
     settings_data = dict(project.data.get("settings") or {})
     weekly_target = max(1, int((settings_data.get("production") or {}).get("videos_per_week", 3)))
-    selection_count = min(weekly_target, max(1, len(candidate_ids) // 3))
+    history_jobs = list(session.scalars(select(Resource).where(
+        Resource.kind == "generation_job",
+        Resource.organization_id == run.organization_id,
+        Resource.project_id == run.project_id,
+        Resource.created_at >= datetime.now(UTC) - timedelta(days=28),
+        Resource.status.not_in(["cancelled", "superseded"]),
+    )))
+    history_jobs = [job for job in history_jobs if job.data.get("automatic")]
+    weekly_cutoff = datetime.now(UTC) - timedelta(days=7)
+    recent_jobs = [job for job in history_jobs if job.created_at.replace(tzinfo=UTC) >= weekly_cutoff]
+    existing_types = []
+    for job in history_jobs:
+        idea = repo.get_any(str(job.data.get("idea_id") or ""), kind="idea")
+        candidate = repo.get_any(str((idea.data if idea else {}).get("topic_candidate_id") or ""), kind="topic_candidate")
+        existing_types.append(str(job.data.get("candidate_type") or (idea.data if idea else {}).get("candidate_type")
+                                  or (candidate.data if candidate else {}).get("candidate_type") or "problem_solution"))
+    selection_count = min(max(0, weekly_target - len(recent_jobs)), max(1, len(candidate_ids) // 3))
     candidates = [repo.get_any(candidate_id, kind="topic_candidate") for candidate_id in candidate_ids]
-    selected = sorted(
-        (candidate for candidate in candidates if candidate),
-        key=lambda item: float(item.data.get("topic_opportunity_score") or 0),
-        reverse=True,
-    )[:selection_count]
+    selected = select_content_candidates(
+        [candidate for candidate in candidates if candidate and candidate.status == "candidate"
+         and candidate.project_id == run.project_id and candidate.organization_id == run.organization_id],
+        selection_count, settings_data.get("content_mix"), existing_types,
+    )
     job_ids: list[str] = []
     for candidate in selected:
         visual_mode = str(candidate.data.get("recommended_visual_mode") or "ugc_creator")
@@ -2890,7 +2907,10 @@ def _enqueue_automatic_candidate_productions(
             or (settings_data.get("production") or {}).get("average_duration_seconds")
             or 30
         )
-        scene_min = int(candidate.data.get("recommended_scene_count_min") or 4)
+        preferred_duration = int((settings_data.get("production") or {}).get("average_duration_seconds") or target_duration)
+        if not preferred_duration * 0.85 <= target_duration <= preferred_duration * 1.15:
+            target_duration = preferred_duration
+        scene_min = max(math.ceil(target_duration / 8), int(candidate.data.get("recommended_scene_count_min") or 4))
         scene_max = max(scene_min, int(candidate.data.get("recommended_scene_count_max") or 6))
         idea = repo.add(
             kind="idea",
@@ -2898,12 +2918,16 @@ def _enqueue_automatic_candidate_productions(
             project_id=run.project_id,
             status="planned",
             data={
+                **candidate.data,
                 "title": candidate.data.get("title"),
                 "hook": candidate.data.get("angle"),
                 "audience": candidate.data.get("audience"),
                 "objective": candidate.data.get("objective", "awareness"),
                 "format": candidate.data.get("format", "problem_solution"),
                 "visual_mode": visual_mode,
+                "target_duration_seconds": target_duration,
+                "scene_count_min": scene_min,
+                "scene_count_max": scene_max,
                 "audio_mode": audio_mode,
                 "native_voice_preset": defaults.get("native_voice_preset", "warm_conversational"),
                 "topic_candidate_id": candidate.id,
@@ -2930,6 +2954,7 @@ def _enqueue_automatic_candidate_productions(
             status="queued",
             data={
                 "idea_id": idea.id,
+                "candidate_type": candidate.data.get("candidate_type") or "problem_solution",
                 "title": candidate.data.get("title"),
                 "aspect_ratios": ["9:16"],
                 "target_duration_seconds": target_duration,
@@ -2943,6 +2968,11 @@ def _enqueue_automatic_candidate_productions(
                 "approval_mode": "final_only",
                 "generation_start_mode": "review_script" if mode == "scripts" else "immediate",
                 "automatic": True,
+                "content_plan_snapshot": {
+                    "content_mix": settings_data.get("content_mix"),
+                    "average_duration_seconds": preferred_duration,
+                    "selection_basis": "28_day_intent_deficit_then_opportunity_score",
+                },
                 "automatic_publish": mode == "publish",
                 "created_by_id": "automation_scheduler",
                 "stages": initial_stage_state(),
@@ -3039,7 +3069,11 @@ async def _run_research_task(run_id: str, settings: Settings) -> None:
                     or {"selling": 20, "viral": 30, "informative": 50}
                 )
                 project_context["website_url"] = project_resource.data.get("website_url")
+                project_context["average_duration_seconds"] = (
+                    ((project_resource.data.get("settings") or {}).get("production") or {}).get("average_duration_seconds") or 30
+                )
             brand["project_context"] = project_context
+            repo.update(run, data={"content_plan": research_plan(brand, int(run.data.get("max_candidates", 5)))})
             drafts = await TopicCandidateProvider(settings).propose(
                 objective=run.data["objective"],
                 brand=brand,

@@ -483,6 +483,41 @@ def test_onboarding_finishes_on_funding_and_payment_activation_starts_research(
     assert repeated.status_code == 202
     assert repeated.json()["research_run_id"] == activated.json()["research_run_id"]
 
+
+def test_onboarding_minute_duration_and_mix_reach_research_candidates(jwt_client):
+    from collections import Counter
+
+    account = register_and_verify(jwt_client, "minute-research")
+    project_id = account["default_project_id"]
+    saved = jwt_client.patch(
+        f"/v1/projects/{project_id}/onboarding/preferences", headers=headers(account),
+        json={"selling_percent": 10, "viral_percent": 20, "informative_percent": 70,
+              "videos_per_week": 3, "average_duration_seconds": 60,
+              "audio_quality": "premium", "automation_mode": "research_only"},
+    )
+    assert saved.status_code == 200, saved.text
+    with SessionLocal() as session:
+        wallet = session.get(Wallet, account["organization_id"])
+        wallet.balance_cents = 10_000
+        session.commit()
+    created = jwt_client.post(
+        f"/v1/projects/{project_id}/research-runs", headers=headers(account),
+        json={"objective": "Find specific useful topics for our audience", "max_candidates": 10},
+    )
+    assert created.status_code == 202, created.text
+    run = jwt_client.get(created.json()["status_url"], headers=headers(account)).json()
+    assert run["status"] == "completed", run
+    assert run["content_plan"]["average_duration_seconds"] == 60
+    with SessionLocal() as session:
+        candidates = list(session.scalars(select(Resource).where(
+            Resource.kind == "topic_candidate", Resource.project_id == project_id,
+        )))
+        assert len(candidates) == 10
+        assert {candidate.data["recommended_duration_seconds"] for candidate in candidates} == {60}
+        assert Counter(candidate.data["candidate_type"] for candidate in candidates) == {
+            "problem_solution": 1, "entertaining_viral": 2, "educational_value": 7,
+        }
+
     with SessionLocal() as session:
         project = session.get(Resource, project_id)
         assert project and project.status == "active"

@@ -828,7 +828,7 @@ def test_continuous_ugc_layout_uses_one_opening_and_seven_second_extensions() ->
     assert sum(layout) == 30
 
 
-def test_candidate_mix_covers_three_intents_and_four_video_formats() -> None:
+def test_visual_mix_does_not_relabel_authored_content_intents() -> None:
     candidates = [
         {
             "title": f"Candidate {index}",
@@ -843,8 +843,6 @@ def test_candidate_mix_covers_three_intents_and_four_video_formats() -> None:
 
     assert {item["candidate_type"] for item in balanced} == {
         "problem_solution",
-        "educational_value",
-        "entertaining_viral",
     }
     assert {item["recommended_visual_mode"] for item in balanced} == {
         "ugc_creator",
@@ -953,7 +951,7 @@ def test_live_candidate_generation_uses_json_mode_without_vertex_response_schema
             "angle": f"Filmable angle {index}",
             "audience": "Independent teachers",
             "source_ids": ["source_1"],
-            "candidate_type": ("problem_solution", "educational_value", "entertaining_viral")[index % 3],
+            "candidate_type": ("problem_solution", "educational_value", "entertaining_viral", "educational_value")[index],
             "recommended_visual_mode": ("ugc_creator", "storytelling", "cinematic", "motion_graphics")[index],
             "suitable_visual_modes": [("ugc_creator", "storytelling", "cinematic", "motion_graphics")[index]],
         }

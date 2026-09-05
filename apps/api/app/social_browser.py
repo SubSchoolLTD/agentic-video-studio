@@ -114,8 +114,7 @@ def _fill(page: Page, selectors: list[str], value: str, *, field: str) -> None:
         try:
             locator = page.locator(selector).first
             if locator.is_visible(timeout=1_500):
-                # TikTok's form also updates validity on keyboard events. Setting
-                # the DOM value with fill alone can leave its submit disabled.
+                # Exercise keyboard-driven validation as well as DOM input events.
                 locator.fill("", timeout=4_000)
                 locator.press_sequentially(value, timeout=8_000)
                 return
@@ -341,29 +340,37 @@ def connect_social_account(
             page.set_default_timeout(timeout_ms)
             page.goto(_login_url(settings, provider), wait_until="domcontentloaded", timeout=timeout_ms)
             _wait_for_sign_in_form(page, timeout_ms=timeout_ms)
-            _fill(
-                page,
-                [
+            username_selectors = [
                     '[data-testid="username"]',
                     'input[name="username"]',
                     'input[name="email"]',
                     'input[autocomplete="username"]',
                     'input[placeholder*="email" i]',
-                ],
-                username,
-                field="Username",
-            )
-            _fill(
-                page,
-                [
+            ]
+            password_selectors = [
                     '[data-testid="password"]',
                     'input[name="password"]',
                     'input[type="password"]',
                     'input[autocomplete="current-password"]',
-                ],
-                password,
-                field="Password",
-            )
+            ]
+            # TikTok can paint its form before hydration attaches input handlers.
+            # Check real form readiness and re-enter only locally if necessary;
+            # never force-enable the button or resubmit a login network request.
+            form_deadline = time.monotonic() + min(timeout_ms, 15_000) / 1_000
+            while True:
+                _fill(page, username_selectors, username, field="Username")
+                _fill(page, password_selectors, password, field="Password")
+                if _wait_for_any(page, [
+                    '[data-testid="login-submit"]:enabled', 'button[type="submit"]:enabled',
+                    'button:has-text("Log in"):enabled', 'button:has-text("Log In"):enabled',
+                ], timeout_ms=1_000):
+                    break
+                _raise_login_page_error(page)
+                if time.monotonic() >= form_deadline:
+                    raise SocialBrowserError(
+                        "The provider sign-in form did not become ready. No sign-in request was submitted. Try again later.",
+                        code="provider_form_not_ready", retryable=True,
+                    )
             _click(
                 page,
                 [

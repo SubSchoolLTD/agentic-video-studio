@@ -80,6 +80,19 @@ document.querySelector('#verify').addEventListener('submit', event => {
 });
 </script></body></html>"""
 
+DELAYED_HYDRATION_PAGE = b"""<!doctype html><html><body>
+<form id="login"><input name="username"><input type="password"><button type="submit" disabled>Log in</button></form>
+<script>
+setTimeout(() => {
+  document.querySelector('input[type=password]').addEventListener('keyup', () => {
+    document.querySelector('button').disabled = false;
+  });
+  document.querySelector('form').addEventListener('submit', event => {
+    event.preventDefault(); document.cookie = 'session=ready; path=/'; location.href = '/';
+  });
+}, 2200);
+</script></body></html>"""
+
 UPLOAD_PAGE = b"""<!doctype html><html><body>
 <div data-testid="account-ready">Signed in</div>
 <input data-testid="video-file" type="file" accept="video/mp4">
@@ -98,7 +111,7 @@ document.querySelector('[data-testid=publish-submit]').addEventListener('click',
 class FakeSocialHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path in {"/accounts/login/", "/login/phone-or-email/email"}:
-            payload = LOGIN_PAGE
+            payload = getattr(self.server, "login_page", LOGIN_PAGE)
         elif self.path == "/challenge":
             payload = CHALLENGE_PAGE
         elif "session=ready" in (self.headers.get("Cookie") or ""):
@@ -116,8 +129,9 @@ class FakeSocialHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def fake_social_server() -> Iterator[str]:
+def fake_social_server(*, login_page: bytes = LOGIN_PAGE) -> Iterator[str]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeSocialHandler)
+    server.login_page = login_page
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -194,6 +208,14 @@ def test_delayed_provider_sign_in_waits_for_authenticated_state() -> None:
     with fake_social_server() as base_url:
         result = connect_social_account(
             browser_settings(base_url), provider="tiktok", username="slow", password="transient-password"
+        )
+    assert result.status == "active"
+
+
+def test_rendered_form_waits_for_hydration_before_submitting() -> None:
+    with fake_social_server(login_page=DELAYED_HYDRATION_PAGE) as base_url:
+        result = connect_social_account(
+            browser_settings(base_url), provider="tiktok", username="creator", password="transient-password"
         )
     assert result.status == "active"
 

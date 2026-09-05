@@ -4490,6 +4490,11 @@ async def regenerate_scene(
         )
         if str(item.data.get("storyboard_id") or "") == str(scene.data.get("storyboard_id") or "")
     ]
+    is_track_root = not any(
+        _continuation_track(item.data) == selected_track
+        and int(item.data.get("position") or 0) < int(scene.data.get("position") or 0)
+        for item in storyboard_scenes
+    )
     cascade_scenes = (
         [
             item
@@ -4497,7 +4502,7 @@ async def regenerate_scene(
             if int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
             and _continuation_track(item.data) == selected_track
         ]
-        if continuous_scenes
+        if continuous_scenes and (is_track_root or payload.regenerate_following)
         else [scene]
     )
     attempt_no = int(scene.data.get("attempt", 0)) + 1
@@ -4518,6 +4523,7 @@ async def regenerate_scene(
             "character_id": parent_job.data.get("character_id") if parent_job else None,
             "selective": True,
             "cascade_scene_ids": [item.id for item in cascade_scenes],
+            "requested_by_user_id": principal.actor_id,
         },
     )
     try:

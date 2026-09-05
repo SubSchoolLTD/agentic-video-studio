@@ -258,6 +258,7 @@ class CharacterGenerate(BaseModel):
 class SceneRegenerate(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
     visual_prompt: str | None = Field(default=None, max_length=4_000)
+    regenerate_following: bool = False
 
 
 class ScriptPatch(BaseModel):

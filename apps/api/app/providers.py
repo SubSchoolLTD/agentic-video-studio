@@ -449,6 +449,12 @@ def editorial_quality_errors(
         return []
     characters = [dict(item) for item in storyboard.get("character_map") or []]
     spoken = [scene for scene in scenes if str(scene.get("narration") or "").strip()]
+    if visual_mode == "ugc_creator" and native_audio:
+        if sum(scene.get("speaker_kind") == "on_camera" for scene in spoken) < math.ceil(len(spoken) * 0.6):
+            errors.append("UGC must be primarily on-camera creator speech; voice-over is only for explicitly motivated b-roll")
+        for character in characters:
+            if len(str(character.get("appearance") or "").split()) < 18:
+                errors.append("UGC cast bible must fix concrete face, hair, apparent age and distinguishing visual traits, not just a generic student/creator")
     total_words = sum(len(str(scene.get("narration") or "").split()) for scene in spoken)
     incomplete_endings = (" and", " or", " but", " because", " to", " with", " into", " for")
     dangling_subordinate_clause = re.compile(
@@ -640,6 +646,56 @@ class VoiceConsistencyAssessment(BaseModel):
     same_speaker: bool
     similarity: float = Field(ge=0, le=1)
     issues: list[str] = Field(default_factory=list)
+    evidence: str = ""
+    uncertain: bool = False
+
+
+class SceneVisualAssessment(BaseModel):
+    same_character: bool
+    photographic_integrity: bool
+    physical_integrity: bool
+    lip_sync_acceptable: bool
+    issues: list[str] = Field(default_factory=list)
+    evidence: str
+
+
+class SceneVisualQAProvider:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def analyze(self, *, candidate_uri: str, reference_uri: str | None, scene: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(self._analyze, candidate_uri, reference_uri, scene)
+
+    def _analyze(self, candidate_uri: str, reference_uri: str | None, scene: dict[str, Any]) -> dict[str, Any]:
+        from google.genai import types
+
+        contents: list[Any] = []
+        if reference_uri:
+            contents.extend(["Original character reference, not a later take:", types.Part.from_uri(file_uri=reference_uri, mime_type="video/mp4")])
+        contents.extend([
+            "Candidate to accept or reject:", types.Part.from_uri(file_uri=candidate_uri, mime_type="video/mp4"),
+            json.dumps({
+                "task": "Act as a strict film continuity and image-integrity reviewer. Inspect the entire candidate, especially its last two seconds. Do not assume two clips contain the same character just because the setting or clothes are similar.",
+                "speaker_kind": scene.get("speaker_kind", "on_camera"),
+                "style": scene.get("visual_mode", "ugc_creator"),
+                "rules": [
+                    "Compare face structure, hairstyle, apparent age and wardrobe with the original. Reject material recasting, not ordinary expression, light or angle changes. If nobody is visible, same_character is not applicable and true.",
+                    "Reject posterized/solarized skin, thick drawn outlines, crushed blacks or clipped white patches and textures that become pixel art. Intentional motion graphics need not be photographic, but must remain coherent.",
+                    "Reject objects melting, disintegrating, floating unnaturally or changing geometry; inspect books, hands and props rather than just the face.",
+                    "For on_camera speech check visible mouth movement matches audible delivery; a silent actor with offscreen narration fails. For voice_over or silent delivery lip_sync_acceptable is true: no lip movement or audio is required (external TTS may be mixed later).",
+                    "Each failure needs a concrete observable issue and approximate candidate timestamp. Different dialogue, ordinary movement, camera angle and a new practical location alone are not errors.",
+                    "Judge this actual candidate, not the prompt's quality. Do not invent evidence. No reference means same_character is true, but artifact and lip-sync checks still apply.",
+                ],
+            }, ensure_ascii=False),
+        ])
+        with google_genai_client(self.settings, location="global") as client:
+            response = client.models.generate_content(
+                model=self.settings.gemini_quality_model, contents=contents,
+                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SceneVisualAssessment, temperature=0),
+            )
+        parsed = response.parsed if isinstance(response.parsed, SceneVisualAssessment) else SceneVisualAssessment.model_validate_json(response.text or "{}")
+        return {**parsed.model_dump(), "passed": all((parsed.same_character, parsed.photographic_integrity, parsed.physical_integrity, parsed.lip_sync_acceptable)),
+                "provider": "gemini", "model_id": self.settings.gemini_quality_model, "demo_data": False}
 
 
 class DialogueFitItem(BaseModel):
@@ -787,15 +843,22 @@ def apply_narration_to_scene(
         mode = str(scene.get("visual_mode") or "ugc_creator")
         continued = int(scene.get("continuation_track_position") or 1) > 1
         continuation_track = str(scene.get("continuation_track") or "creator")
-        if mode == "storytelling":
+        if scene.get("speaker_kind") == "voice_over":
+            audio_direction = (
+                f'The established speaker delivers this voice-over exactly: "{narration}". '
+                f"Voice identity: {_scene_voice_direction(scene, voice_lock)}. "
+                "This is explicitly off-camera speech; visible people perform the authored action with relaxed mouths, "
+                "not unrelated lip movement. No additional narrator or speaker. Finish the complete sentence before the cut."
+            )
+        elif mode == "storytelling":
             speaker = str(scene.get("speaker") or "the named speaking role").strip()
             audio_direction = (
                 f'{speaker} says exactly in the narration language: "{narration}". '
                 "This is a fully authored performance: only this named role speaks, with exact blocking "
                 "and actions from the director brief. Begin the line immediately and finish it cleanly before the cut. "
                 + (
-                    f"Continue only {continuation_track}'s inherited performance, wardrobe, voice, room geography "
-                    "and physical action, without borrowing identity from any intervening scene. "
+                    f"Use only {continuation_track}'s FIRST accepted performance as the identity and voice anchor. "
+                    "Perform this scene's new action without borrowing identity from any intervening scene. "
                     if continued
                     else "Treat this as a complete self-contained dramatic fragment. "
                 )
@@ -809,8 +872,8 @@ def apply_narration_to_scene(
             audio_direction = (
                 f'{speaker} delivers exactly this scene-local line in the narration language: "{narration}". '
                 + (
-                    f"Continue only continuation track {continuation_track}: inherit its cast or narrator, voice, "
-                    "environment, lighting and physical action without borrowing identity from another track. "
+                    f"Use the FIRST accepted scene of track {continuation_track} as its cast/narrator and voice anchor, "
+                    "not the most recent scene. Perform this scene's distinct action. "
                     if continued
                     else "Treat this clip as a self-contained vignette with its own person, place, ambience and voice. "
                 )
@@ -819,14 +882,10 @@ def apply_narration_to_scene(
                 "speaker is off camera, show no unrelated lip movement."
             )
         else:
-            extension_tail = (
-                "Keep speaking naturally through the final second so the next Veo extension inherits the same voice. "
-                if scene.get("continuous_extension_has_next")
-                else "Finish the final phrase cleanly before the end of the complete performance. "
-            )
+            extension_tail = "Finish the complete phrase naturally before the cut; do not stretch words or add filler to reach the boundary. "
             audio_direction = (
                 f'The creator says exactly in the narration language: "{narration}". '
-                "This is one continuous creator performance extended from the preceding Veo-native footage. Begin "
+                "This is a new shot of the same creator anchored to their FIRST accepted Veo-native footage. Begin "
                 "speaking within the first quarter-second with exact natural lip synchronization. "
                 f"{extension_tail}Locked voice identity: "
                 f"{voice_lock}. Reuse the same face, vocal age, pitch, timbre, accent, cadence and articulation; do "
@@ -852,7 +911,7 @@ def apply_narration_to_scene(
 
 VISUAL_MODE_DIRECTIONS = {
     "ugc_creator": (
-        "Authentic creator-shot UGC mini-documentary built as one continuous physical performance. Use one recurring "
+        "Authentic creator-shot UGC mini-documentary built from individually authored shots of one recurring performance. Use one recurring "
         "adult creator in one coherent real-world location with connected zones: for example entering a classroom, "
         "walking between desks, demonstrating at a board, helping a learner, then reflecting at a worktable. Vary "
         "wide, medium, over-shoulder, moving follow and detail shots through motivated action, not arbitrary cuts. "
@@ -2057,18 +2116,20 @@ class EditorialProvider:
                     else None
                 ),
                 "ugc_contract": (
-                    "Treat all scenes as consecutive portions of one continuously extended Veo performance. Start the spoken "
-                    "hook in the first 0.25 seconds. When another fragment follows, keep the creator speaking naturally through "
-                    "the final second so voice identity can carry into the extension. Use one coherent location with connected "
+                    "Use one concretely described adult creator: fixed face shape, hair cut/color, distinguishing traits and exact wardrobe. "
+                    "At least 60% of scenes must have speaker_kind on_camera and synchronized creator dialogue; voice_over is only motivated b-roll. "
+                    "Treat scenes as separate authored shots anchored to the FIRST accepted performance, never an accumulated chain. Start the spoken "
+                    "hook in the first 0.25 seconds. Finish each complete spoken thought naturally; the private reference is trimmed "
+                    "after speech so no fragment needs stretched words or filler. Use one coherent location with connected "
                     "zones and a plausible continuous action chain, while varying shot scale, body movement and activity."
                     if visual_mode == "ugc_creator" and continue_scenes and native_audio
                     else None
                 ),
                 "scene_continuation_contract": (
                     "Build parallel continuation branches, not one global chain. continuation_track identifies the "
-                    "character, narrator or silent visual world owned by a scene. A later scene extends the most recent "
-                    "earlier scene with the same continuation_track even when other characters appear between them. "
-                    "Reuse that track's face, voice, wardrobe, location state and physical action, and never inherit "
+                    "character, narrator or silent visual world owned by a scene. Every later scene extends the FIRST accepted "
+                    "scene with the same continuation_track, never the latest extension. "
+                    "Reuse that track's face, voice and wardrobe while staging the new authored action, and never inherit "
                     "another track's voice. Each track's first scene is a fresh root. Across final timeline order use "
                     "only instantaneous film-style hard cuts: no fade, dissolve, wipe, whip-pan, slide, morph, flash, "
                     "transition music, whoosh, riser, swish, impact sting, title card or border."
@@ -2269,7 +2330,7 @@ class EditorialProvider:
             visual_prompt_base = (
                 f"{VISUAL_MODE_DIRECTIONS[visual_mode]} "
                 f"{identity_label}: {creator_profile}. "
-                f"Current continuation-track identity: {json.dumps(track_character, ensure_ascii=False)}. "
+                f"Current continuation-track identity: {json.dumps({k: v for k, v in track_character.items() if k != 'speaker_kind'}, ensure_ascii=False)}. "
                 f"Continuity rules: {'; '.join(visual_bible)}. "
                 f"Subject: {scene['subject']}. {' '.join(detailed_parts)}. "
                 f"Dialogue speaker: {scene.get('speaker') or 'creator'}. Voice direction: {scene.get('voice_direction')}. "
@@ -2845,27 +2906,29 @@ class SpeechQAProvider:
     ) -> dict[str, Any]:
         from google.genai import types
 
-        client = google_genai_client(self.settings)
+        client = google_genai_client(self.settings, location="global")
         prompt = {
             "task": (
                 "Compare only the primary speaking voice in clip 2 with the primary speaking voice in clip 1. "
                 "Ignore the words, room tone, music, compression and loudness. Decide whether this sounds like "
-                "the same human speaker identity across two separately recorded shots."
+                "the same human speaker identity across two separately recorded shots. These are audio-only recordings; "
+                "do not infer identity from the words, topic, name or intended voice profile. Be critical: a shared accent alone is not sufficient."
             ),
             "locked_voice_profile": voice_profile,
             "rules": [
                 "same_speaker is false for a material change in apparent vocal age, pitch range, timbre, accent or cadence.",
                 "Do not reject ordinary changes in emotion, microphone distance or background ambience.",
-                "Use similarity below 0.78 when the speaker identity is not sufficiently consistent for one short-form video.",
+                "Use similarity below 0.85 when the speaker identity is not sufficiently consistent. Mark uncertain if evidence is insufficient; do not confidently pass ambiguous audio.",
+                "Describe concrete audible evidence comparing both recordings: register, resonance, timbre and articulation. The score is an uncalibrated AI judgment, not a measured biometric percentage.",
             ],
         }
         response = client.models.generate_content(
-            model=self.settings.gemini_model,
+            model=self.settings.gemini_quality_model,
             contents=[
                 "Reference clip (clip 1):",
-                types.Part.from_uri(file_uri=reference_video_uri, mime_type="video/mp4"),
+                types.Part.from_uri(file_uri=reference_video_uri, mime_type="audio/wav" if reference_video_uri.endswith(".wav") else "video/mp4"),
                 "Candidate clip (clip 2):",
-                types.Part.from_uri(file_uri=candidate_video_uri, mime_type="video/mp4"),
+                types.Part.from_uri(file_uri=candidate_video_uri, mime_type="audio/wav" if candidate_video_uri.endswith(".wav") else "video/mp4"),
                 json.dumps(prompt, ensure_ascii=False),
             ],
             config=types.GenerateContentConfig(
@@ -2879,7 +2942,7 @@ class SpeechQAProvider:
             if isinstance(response.parsed, VoiceConsistencyAssessment)
             else VoiceConsistencyAssessment.model_validate_json(response.text or "{}")
         )
-        passed = bool(parsed.same_speaker and parsed.similarity >= 0.78)
+        passed = bool(parsed.same_speaker and parsed.similarity >= 0.85 and not parsed.uncertain)
         return {
             "passed": passed,
             "same_speaker": parsed.same_speaker,
@@ -2887,7 +2950,10 @@ class SpeechQAProvider:
             "issues": parsed.issues,
             "mode": "voice_comparison",
             "provider": "gemini",
-            "model_id": self.settings.gemini_model,
+            "model_id": self.settings.gemini_quality_model,
+            "evidence": parsed.evidence,
+            "uncertain": parsed.uncertain,
+            "score_kind": "uncalibrated_ai_judgment",
             "provider_response_id": getattr(response, "response_id", None),
             "demo_data": False,
         }

@@ -16,6 +16,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .config import Settings
+from .content_planning import candidate_plan_errors, research_plan
 from .renderer import extract_video_tail
 
 logger = logging.getLogger("avs.providers")
@@ -946,9 +947,9 @@ class TopicCandidateDraft(BaseModel):
     suitable_visual_modes: list[
         Literal["ugc_creator", "storytelling", "cinematic", "motion_graphics"]
     ] = Field(default_factory=list, max_length=4)
-    recommended_duration_seconds: int = Field(default=30, ge=15, le=60)
-    recommended_scene_count_min: int = Field(default=4, ge=2, le=20)
-    recommended_scene_count_max: int = Field(default=6, ge=2, le=20)
+    recommended_duration_seconds: int = Field(default=30, ge=8, le=3_600)
+    recommended_scene_count_min: int = Field(default=4, ge=2, le=2_000)
+    recommended_scene_count_max: int = Field(default=6, ge=2, le=2_000)
     format_rationale: str = ""
 
 
@@ -958,10 +959,6 @@ class TopicCandidateSet(BaseModel):
 
 def _candidate_mix_errors(candidates: list[TopicCandidateDraft], requested_count: int) -> list[str]:
     errors: list[str] = []
-    if requested_count >= 3:
-        missing_types = set(RESEARCH_CANDIDATE_TYPES) - {item.candidate_type for item in candidates}
-        if missing_types:
-            errors.append(f"missing candidate types: {', '.join(sorted(missing_types))}")
     if requested_count >= 4:
         missing_modes = set(RESEARCH_VISUAL_MODES) - {item.recommended_visual_mode for item in candidates}
         if missing_modes:
@@ -1012,31 +1009,8 @@ def editorial_repair_prompt(
 
 
 def _rebalance_candidate_mix(candidates: list[dict[str, Any]], requested_count: int) -> list[dict[str, Any]]:
-    """Keep a content plan diverse even when the provider collapses onto one familiar format."""
+    """Diversify suitable visual formats without relabelling the authored content intent."""
     items = [{**item} for item in candidates[:requested_count]]
-    if requested_count >= 3 and len(items) >= 3:
-        type_counts = {
-            kind: sum(item.get("candidate_type") == kind for item in items)
-            for kind in RESEARCH_CANDIDATE_TYPES
-        }
-        for missing in (kind for kind, value in type_counts.items() if value == 0):
-            replace_index = next(
-                (
-                    index
-                    for index in range(len(items) - 1, -1, -1)
-                    if type_counts.get(str(items[index].get("candidate_type")), 0) > 1
-                ),
-                len(items) - 1,
-            )
-            previous = str(items[replace_index].get("candidate_type") or "problem_solution")
-            type_counts[previous] = max(0, type_counts.get(previous, 0) - 1)
-            items[replace_index]["candidate_type"] = missing
-            items[replace_index]["format"] = {
-                "problem_solution": "problem_solution",
-                "educational_value": "educational_explainer",
-                "entertaining_viral": "entertaining_story",
-            }[missing]
-            type_counts[missing] = 1
 
     for item in items:
         suitable = [
@@ -1484,12 +1458,13 @@ class TopicCandidateProvider:
         preference_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         count = min(max(1, max_candidates), 50)
+        plan = research_plan(brand, count)
         if not self.settings.uses_live_research:
             brand_name = brand.get("identity", {}).get("name", "Project")
             audience = (brand.get("audiences", {}).get("primary") or ["General audience"])[0]
             formats = ("problem_solution", "myth_fact", "how_to", "story", "comparison")
             visual_modes = ("ugc_creator", "storytelling", "cinematic", "motion_graphics")
-            candidate_types = ("problem_solution", "educational_value", "entertaining_viral")
+            candidate_types = [kind for kind, quota in plan["candidate_type_counts"].items() for _ in range(quota)]
             return _rebalance_candidate_mix([
                 {
                     "title": f"{brand_name}: {objective[:72]}",
@@ -1514,9 +1489,9 @@ class TopicCandidateProvider:
                         visual_modes[index % len(visual_modes)],
                         visual_modes[(index + 1) % len(visual_modes)],
                     ],
-                    "recommended_duration_seconds": 30 + (index % 2) * 5,
-                    "recommended_scene_count_min": 4,
-                    "recommended_scene_count_max": 6,
+                    "recommended_duration_seconds": plan["average_duration_seconds"],
+                    "recommended_scene_count_min": max(2, math.ceil(plan["average_duration_seconds"] / 8)),
+                    "recommended_scene_count_max": max(2, math.ceil(plan["average_duration_seconds"] / 5)),
                     "format_rationale": "The format matches the audience promise and can communicate it clearly in a short social video.",
                 }
                 for index in range(count)
@@ -1541,8 +1516,10 @@ class TopicCandidateProvider:
         from google.genai import types
 
         client = google_genai_client(self.settings)
+        plan = research_plan(brand, count)
         prompt = {
             "task": f"Propose {count} distinct short-form content candidates as JSON.",
+            "required_production_plan": plan,
             "objective": objective,
             "brand": brand,
             "evidence": {"sources": evidence.sources, "claims": evidence.claims},
@@ -1572,12 +1549,12 @@ class TopicCandidateProvider:
                 "Avoid repeating hidden patterns; propose meaningfully different themes or angles.",
                 "Treat published performance observations as low-confidence directional signals, never causal evidence.",
                 "Reserve at least 20 percent of the batch for genuinely new topics, formats or audience hypotheses.",
-                "Choose exactly one candidate_type. When three or more candidates are requested, cover problem_solution, educational_value and entertaining_viral before repeating a type.",
-                "Across the full batch approximate the requested content mix: selling maps to problem_solution, viral maps to entertaining_viral, and informative maps to educational_value.",
+                "Choose exactly one candidate_type. Match required_production_plan.candidate_type_counts exactly, including zero shares. Develop genuinely different selling, entertaining and educational ideas, not differently labelled versions of one idea.",
                 "For every candidate choose exactly one recommended_visual_mode from available_video_formats.",
                 "Also return suitable_visual_modes ranked from best to acceptable.",
                 "When four or more candidates are requested, cover all four available video formats once; shape the ideas so each assigned format is genuinely filmable and appropriate.",
-                "Recommend a realistic 15-60 second duration and a 2-20 scene range that fits the message.",
+                "Author each idea for the user's average_duration_seconds in required_production_plan. Every duration must fall within its min/max; batch average must be within 5% of the target. Longer videos need enough concrete examples, explanation or dramatic beats, never filler or merely a longer duration label.",
+                "Choose a scene range that can deliver that duration with 4-8 second Veo fragments. There is no 60-second video or 20-scene cap; a longer plan uses more fragments.",
                 "Explain the format choice briefly in format_rationale.",
             ],
             "response_shape": {
@@ -1602,9 +1579,9 @@ class TopicCandidateProvider:
                         "creative_direction": "string",
                         "recommended_visual_mode": "ugc_creator | storytelling | cinematic | motion_graphics",
                         "suitable_visual_modes": ["one or more available video formats"],
-                        "recommended_duration_seconds": 30,
-                        "recommended_scene_count_min": 4,
-                        "recommended_scene_count_max": 6,
+                        "recommended_duration_seconds": plan["average_duration_seconds"],
+                        "recommended_scene_count_min": max(2, math.ceil(plan["average_duration_seconds"] / 8)),
+                        "recommended_scene_count_max": max(2, math.ceil(plan["average_duration_seconds"] / 5)),
                         "format_rationale": "string",
                     }
                 ]
@@ -1640,6 +1617,7 @@ class TopicCandidateProvider:
                 continue
             last_valid = parsed
             mix_errors = _candidate_mix_errors(parsed.candidates, count)
+            mix_errors.extend(candidate_plan_errors([item.model_dump() for item in parsed.candidates], count, plan))
             if not mix_errors:
                 break
         parsed = parsed or last_valid
@@ -1648,6 +1626,9 @@ class TopicCandidateProvider:
                 "Candidate provider returned no usable JSON after three attempts"
                 + (f": {validation_error}" if validation_error else "")
             )
+        plan_errors = candidate_plan_errors([item.model_dump() for item in parsed.candidates], count, plan)
+        if plan_errors:
+            raise RuntimeError("Candidate provider did not satisfy the content plan after three attempts: " + "; ".join(plan_errors))
         valid_ids = {str(source["id"]) for source in evidence.sources}
         candidates = []
         for candidate in parsed.candidates[:count]:
@@ -1668,6 +1649,12 @@ class TopicCandidateProvider:
             item["suitable_visual_modes"] = item["suitable_visual_modes"] or [
                 item["recommended_visual_mode"]
             ]
+            item["recommended_scene_count_min"] = max(
+                item["recommended_scene_count_min"], math.ceil(item["recommended_duration_seconds"] / 8),
+            )
+            item["recommended_scene_count_max"] = max(
+                item["recommended_scene_count_max"], item["recommended_scene_count_min"],
+            )
             candidates.append(item)
         return _rebalance_candidate_mix(candidates, count)
 
@@ -1863,8 +1850,7 @@ class EditorialProvider:
                 "Regeneration feedback must identify exact scenes and concrete changes; do not ask for generic improvement.",
             ],
         }
-        response = google_genai_client(self.settings).models.generate_content(
-            model=self.settings.gemini_editorial_model,
+        response = self._generate_editorial_content(
             contents=json.dumps(prompt, ensure_ascii=False),
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -2341,6 +2327,8 @@ class EditorialProvider:
         locations = vertex_text_locations(self.settings)
         for index, location in enumerate(locations):
             try:
+                # Keep the owning Client alive throughout the request: its destructor
+                # closes HTTP transports, while the Models facade does not retain it.
                 client = google_genai_client(self.settings, location=location)
                 return client.models.generate_content(
                     model=self.settings.gemini_editorial_model,

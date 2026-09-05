@@ -136,6 +136,7 @@ async function submitCredentials() {
   try {
     const result = await api<any>(`/v1/projects/${projectId.value}/connections/${provider}/browser-login`, {
       method: 'POST',
+      retry: 0,
       body: { username: credentials.username, password: credentials.password },
     })
     credentials.password = ''
@@ -166,6 +167,7 @@ async function submitVerification() {
     const label = providerName(provider)
     await api(`/v1/connections/${verificationConnectionId.value}/browser-verify`, {
       method: 'POST',
+      retry: 0,
       body: { code: credentials.code },
     })
     closeLogin()

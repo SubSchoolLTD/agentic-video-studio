@@ -9,6 +9,7 @@ const selectedProvider = ref<any>(null)
 const loginStep = ref<'credentials' | 'verification'>('credentials')
 const verificationConnectionId = ref('')
 const credentials = reactive({ username: '', password: '', code: '' })
+const loginError = ref('')
 const { data, refresh } = await useAsyncData(
   'connections',
   () => api<any>(`/v1/projects/${projectId.value}/connections`),
@@ -44,6 +45,7 @@ onMounted(async () => {
 })
 
 function closeLogin() {
+  loginError.value = ''
   selectedProvider.value = null
   loginStep.value = 'credentials'
   verificationConnectionId.value = ''
@@ -53,6 +55,7 @@ function closeLogin() {
 }
 
 async function connect(item: any) {
+  loginError.value = ''
   if (item.provider === 'instagram' || item.provider === 'tiktok') {
     selectedProvider.value = item
     loginStep.value = item.status === 'verification_required' ? 'verification' : 'credentials'
@@ -85,10 +88,12 @@ async function connect(item: any) {
 
 async function submitCredentials() {
   if (!selectedProvider.value) return
+  loginError.value = ''
   busyProvider.value = selectedProvider.value.provider
   try {
     const result = await api<any>(`/v1/projects/${projectId.value}/connections/${selectedProvider.value.provider}/browser-login`, {
       method: 'POST',
+      retry: 0,
       body: { username: credentials.username, password: credentials.password },
     })
     credentials.password = ''
@@ -104,7 +109,7 @@ async function submitCredentials() {
   }
   catch (error: any) {
     credentials.password = ''
-    show('Could not sign in', error.message, 'error')
+    loginError.value = error.message
   }
   finally {
     busyProvider.value = ''
@@ -113,10 +118,12 @@ async function submitCredentials() {
 
 async function submitVerification() {
   if (!verificationConnectionId.value) return
+  loginError.value = ''
   busyProvider.value = selectedProvider.value?.provider || 'verification'
   try {
     await api(`/v1/connections/${verificationConnectionId.value}/browser-verify`, {
       method: 'POST',
+      retry: 0,
       body: { code: credentials.code },
     })
     credentials.code = ''
@@ -126,7 +133,7 @@ async function submitVerification() {
   }
   catch (error: any) {
     credentials.code = ''
-    show('Code was not accepted', error.message, 'error')
+    loginError.value = error.message
   }
   finally {
     busyProvider.value = ''
@@ -205,6 +212,7 @@ async function disconnect(item: any) {
             <div class="field field--full"><label for="social-password">Password</label><input id="social-password" v-model="credentials.password" type="password" autocomplete="current-password" required /></div>
           </div>
           <div v-else class="field"><label for="social-code">One-time verification code</label><input id="social-code" v-model="credentials.code" inputmode="numeric" autocomplete="one-time-code" minlength="4" maxlength="16" required /></div>
+          <p v-if="loginError" class="auth-error" role="alert">{{ loginError }}</p>
         </div>
         <div class="modal__footer">
           <button type="button" class="button" @click="closeLogin">Cancel</button>

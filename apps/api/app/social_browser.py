@@ -114,7 +114,10 @@ def _fill(page: Page, selectors: list[str], value: str, *, field: str) -> None:
         try:
             locator = page.locator(selector).first
             if locator.is_visible(timeout=1_500):
-                locator.fill(value)
+                # TikTok's form also updates validity on keyboard events. Setting
+                # the DOM value with fill alone can leave its submit disabled.
+                locator.fill("", timeout=4_000)
+                locator.press_sequentially(value, timeout=8_000)
                 return
         except Exception:  # noqa: S110 - provider UIs require selector fallbacks
             pass
@@ -125,12 +128,14 @@ def _fill(page: Page, selectors: list[str], value: str, *, field: str) -> None:
     )
 
 
-def _click(page: Page, selectors: list[str], *, action: str, required: bool = True) -> bool:
+def _click(
+    page: Page, selectors: list[str], *, action: str, required: bool = True, timeout_ms: int | None = None
+) -> bool:
     for selector in selectors:
         try:
             locator = page.locator(selector).first
             if locator.is_visible(timeout=1_500):
-                locator.click()
+                locator.click(timeout=timeout_ms, no_wait_after=timeout_ms is not None)
                 return True
         except Exception:  # noqa: S110 - provider UIs require selector fallbacks
             pass
@@ -165,7 +170,7 @@ def _dismiss_optional_prompts(page: Page) -> None:
         try:
             button = page.get_by_role("button", name=label, exact=True)
             if button.is_visible(timeout=250):
-                button.click()
+                button.click(timeout=2_000, no_wait_after=True)
         except Exception:  # noqa: S110 - optional provider prompts are best-effort
             pass
 
@@ -202,8 +207,7 @@ def _login_error_visible(page: Page) -> bool:
         page,
         [
             '[data-testid="login-error"]',
-            'text=/incorrect password|invalid password|couldn.t log in|credentials don.t match/i',
-            'text=/maximum number of attempts|too many attempts/i',
+            'text=/incorrect password|invalid password|username or password doesn.t match|credentials don.t match/i',
         ],
         timeout_ms=250,
     )
@@ -231,12 +235,74 @@ def _logged_in(page: Page, provider: SocialProvider) -> bool:
         page,
         [
             '[data-e2e="profile-icon"]',
-            '[data-e2e="top-login-button"]',
             'a[href*="/tiktokstudio/upload"]',
-            'text=/upload/i',
         ],
         timeout_ms=500,
-    ) and not _visible(page, ['button:has-text("Log in")'], timeout_ms=100)
+    ) and not _visible(
+        page, ['[data-e2e="top-login-button"]', 'button:has-text("Log in")'], timeout_ms=100
+    )
+
+
+def _raise_login_page_error(page: Page, *, verifying: bool = False) -> None:
+    """Only classify known visible messages; never return raw provider content."""
+    if _captcha_visible(page):
+        raise SocialBrowserError(
+            "The provider requires interactive human verification. This connection was not completed; "
+            "your Framewise session is unchanged.",
+            code="human_verification_required",
+        )
+    if _visible(page, ['text=/maximum number of attempts|too many attempts|try again in.*minutes/i']):
+        raise SocialBrowserError(
+            "The provider temporarily limited sign-in attempts. Wait before trying again; "
+            "your Framewise session is unchanged.",
+            code="provider_rate_limited",
+        )
+    if _login_error_visible(page) or (verifying and _visible(
+        page, ['text=/incorrect code|invalid code|code.*expired|code.*incorrect/i']
+    )):
+        raise SocialBrowserError(
+            "The provider rejected the verification code. Check the code and try again."
+            if verifying else "The provider rejected the email/username or password. Check your sign-in details.",
+            code="invalid_verification_code" if verifying else "invalid_credentials",
+        )
+    if _visible(page, ['text=/something went wrong|couldn.t log in|unable to log in|service unavailable/i']):
+        raise SocialBrowserError(
+            "The provider could not complete sign-in and asked to try again later. "
+            "This does not confirm that your password is incorrect. Your Framewise session is unchanged.",
+            code="provider_unavailable",
+            retryable=True,
+        )
+
+
+def _wait_for_sign_in_form(page: Page, *, timeout_ms: int, verifying: bool = False) -> None:
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while time.monotonic() < deadline:
+        _dismiss_optional_prompts(page)
+        _raise_login_page_error(page, verifying=verifying)
+        if _verification_visible(page) if verifying else _visible(page, ['input[type="password"]']):
+            return
+        page.wait_for_timeout(250)
+    raise SocialBrowserError("Provider sign-in form is unavailable", code="provider_ui_changed", retryable=True)
+
+
+def _wait_for_login_outcome(
+    page: Page, provider: SocialProvider, *, timeout_ms: int, verifying: bool = False
+) -> Literal["active", "verification_required"]:
+    """A still-visible form after 1.2s is not a rejected password or OTP."""
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while time.monotonic() < deadline:
+        _dismiss_optional_prompts(page)
+        _raise_login_page_error(page, verifying=verifying)
+        if _logged_in(page, provider):
+            return "active"
+        if not verifying and _verification_visible(page):
+            return "verification_required"
+        page.wait_for_timeout(250)
+    raise SocialBrowserError(
+        "The provider did not confirm sign-in in time. No connected session was saved. Please try again later.",
+        code="verification_not_confirmed" if verifying else "login_not_confirmed",
+        retryable=True,
+    )
 
 
 def _login_result(
@@ -274,7 +340,7 @@ def connect_social_account(
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             page.goto(_login_url(settings, provider), wait_until="domcontentloaded", timeout=timeout_ms)
-            _dismiss_optional_prompts(page)
+            _wait_for_sign_in_form(page, timeout_ms=timeout_ms)
             _fill(
                 page,
                 [
@@ -307,10 +373,10 @@ def connect_social_account(
                     'button:has-text("Log In")',
                 ],
                 action="Sign in",
+                timeout_ms=4_000,
             )
-            _wait_after_navigation(page, timeout_ms)
-            _dismiss_optional_prompts(page)
-            if _verification_visible(page):
+            outcome = _wait_for_login_outcome(page, provider, timeout_ms=timeout_ms)
+            if outcome == "verification_required":
                 safe_username = username.strip().lstrip("@")
                 account_hash = hashlib.sha256(f"{provider}:{safe_username.lower()}".encode()).hexdigest()[:20]
                 return BrowserLoginResult(
@@ -320,22 +386,6 @@ def connect_social_account(
                     storage_state=_storage_state(context),
                     page_url=page.url,
                     challenge_kind="one_time_code",
-                )
-            if _captcha_visible(page):
-                raise SocialBrowserError(
-                    "The provider requested a human verification. Retry the connection after completing the provider check.",
-                    code="human_verification_required",
-                )
-            if _login_error_visible(page):
-                raise SocialBrowserError(
-                    "The provider rejected the supplied sign-in details",
-                    code="invalid_credentials",
-                )
-            if not _logged_in(page, provider):
-                raise SocialBrowserError(
-                    "The provider did not confirm the sign-in",
-                    code="login_not_confirmed",
-                    retryable=True,
                 )
             return _login_result(context, page, provider=provider, username=username)
         except PlaywrightTimeoutError as exc:
@@ -365,6 +415,7 @@ def verify_social_account(
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             page.goto(page_url or _login_url(settings, provider), wait_until="domcontentloaded", timeout=timeout_ms)
+            _wait_for_sign_in_form(page, timeout_ms=timeout_ms, verifying=True)
             _fill(
                 page,
                 [
@@ -387,24 +438,9 @@ def verify_social_account(
                     'button:has-text("Next")',
                 ],
                 action="Verify",
+                timeout_ms=4_000,
             )
-            _wait_after_navigation(page, timeout_ms)
-            if _verification_visible(page) or _login_error_visible(page):
-                raise SocialBrowserError(
-                    "The provider rejected the verification code",
-                    code="invalid_verification_code",
-                )
-            if _captcha_visible(page):
-                raise SocialBrowserError(
-                    "The provider requested a human verification",
-                    code="human_verification_required",
-                )
-            if not _logged_in(page, provider):
-                raise SocialBrowserError(
-                    "The provider did not confirm the account after verification",
-                    code="verification_not_confirmed",
-                    retryable=True,
-                )
+            _wait_for_login_outcome(page, provider, timeout_ms=timeout_ms, verifying=True)
             return _login_result(context, page, provider=provider, username=username)
         except PlaywrightTimeoutError as exc:
             raise SocialBrowserError(

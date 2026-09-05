@@ -14,6 +14,7 @@ from apps.api.app.main import app
 from apps.api.app.models import AuthIdentity, PayPalTopup, Resource, User, Wallet
 from apps.api.app.paypal import PayPalClient, PayPalOrderState
 from apps.api.app.routes import _maybe_send_low_balance_email
+from apps.api.app.social_browser import BrowserLoginResult, SocialBrowserError
 
 
 @pytest.fixture
@@ -61,6 +62,44 @@ def register_and_verify(client: TestClient, label: str) -> dict:
 
 def headers(account: dict) -> dict[str, str]:
     return {"Authorization": f"Bearer {account['access_token']}"}
+
+
+@pytest.mark.parametrize("provider", ["tiktok", "instagram"])
+@pytest.mark.parametrize("verify", [False, True])
+def test_provider_rejected_credentials_do_not_revoke_studio_session(jwt_client, monkeypatch, provider, verify):
+    account = register_and_verify(jwt_client, "social-session")
+    configured = app.dependency_overrides[get_settings]().model_copy(update={"provider_mode": "live"})
+    app.dependency_overrides[get_settings] = lambda: configured
+    endpoint = f"/v1/projects/{account['default_project_id']}/connections/{provider}/browser-login"
+    payload = {"username": "demo@example.test", "password": "transient-social-password"}
+    code = "invalid_verification_code" if verify else "invalid_credentials"
+
+    def rejected(*_args, **_kwargs):
+        raise SocialBrowserError("Provider rejected sign-in", code=code)
+
+    if verify:
+        monkeypatch.setattr("apps.api.app.routes.connect_social_account", lambda *_args, **_kwargs: BrowserLoginResult(
+            status="verification_required", display_name="demo", external_account_id="demo",
+            storage_state={"cookies": [], "origins": []}, page_url=f"https://www.{provider}.com/challenge",
+            challenge_kind="one_time_code",
+        ))
+        pending = jwt_client.post(endpoint, headers=headers(account), json=payload)
+        assert pending.status_code == 200
+        endpoint = f"/v1/connections/{pending.json()['id']}/browser-verify"
+        payload = {"code": "000000"}
+        monkeypatch.setattr("apps.api.app.routes.verify_social_account", rejected)
+    else:
+        monkeypatch.setattr("apps.api.app.routes.connect_social_account", rejected)
+
+    response = jwt_client.post(endpoint, headers=headers(account), json=payload)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == code
+    assert response.json()["error"]["details"]["auth_scope"] == "provider"
+    assert response.json()["error"]["details"]["provider"] == provider
+    assert "transient-social-password" not in response.text
+    assert jwt_client.get("/v1/me", headers=headers(account)).status_code == 200
+    assert jwt_client.post("/v1/auth/refresh", json={"token": account["refresh_token"]}).status_code == 200
+    assert jwt_client.post(endpoint, json=payload).status_code == 401
 
 
 def test_minimal_registration_and_google_identity_share_one_account(jwt_client: TestClient, monkeypatch):

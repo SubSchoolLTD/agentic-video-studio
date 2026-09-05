@@ -180,3 +180,57 @@ test('social connection uses ordinary browser sign-in and export is not a connec
   await expect(tiktok).toContainText('@creator@example.test')
   await expect(page.getByRole('heading', { name: 'Connect TikTok' })).toHaveCount(0)
 })
+
+test('social errors stay in the modal, while a real expired Studio token still refreshes', async ({ page }) => {
+  await registerThroughUi(page, 'Social errors')
+  await page.goto('/connections')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
+  await page.locator('.connection-card').filter({ hasText: 'TikTok' }).getByRole('button', { name: 'Connect' }).click()
+  let refreshCalls = 0
+  let providerCalls = 0
+  page.on('request', request => { if (request.url().endsWith('/v1/auth/refresh')) refreshCalls++ })
+  for (const [status, code] of [[422, 'invalid_credentials'], [409, 'human_verification_required'], [503, 'provider_unavailable']] as const) {
+    await page.route('**/connections/tiktok/browser-login', route => {
+      providerCalls++
+      return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({
+        error: { code, message: `TikTok: ${code}`, details: { provider: 'tiktok', auth_scope: 'provider' } },
+      }) })
+    })
+    await page.getByLabel('Username or email').fill('demo@example.test')
+    await page.getByLabel('Password').fill('transient-provider-password')
+    await page.getByRole('button', { name: 'Sign in securely' }).click()
+    await expect(page.locator('.login-modal').getByRole('alert')).toHaveText(`TikTok: ${code}`)
+    await expect(page.getByLabel('Password')).toHaveValue('')
+    await expect(page).toHaveURL('/connections')
+    await page.unroute('**/connections/tiktok/browser-login')
+  }
+  expect(providerCalls).toBe(3)
+  expect(refreshCalls).toBe(0)
+
+  // Same endpoint, but a genuine Studio JWT failure must be recovered normally.
+  let attempt = 0
+  await page.route('**/connections/tiktok/browser-login', async route => {
+    attempt++
+    if (attempt === 1) return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({
+      error: { code: 'request_failed', message: 'Invalid or expired token' },
+    }) })
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      id: 'conne_demo_otp', verification_required: true,
+    }) })
+  })
+  await page.getByLabel('Password').fill('transient-provider-password')
+  await page.getByRole('button', { name: 'Sign in securely' }).click()
+  await expect(page.getByLabel('One-time verification code')).toBeVisible()
+  expect(refreshCalls).toBe(1)
+  expect(attempt).toBe(2)
+  await page.route('**/v1/connections/conne_demo_otp/browser-verify', route => route.fulfill({
+    status: 401, contentType: 'application/json', body: JSON.stringify({
+      error: { code: 'invalid_verification_code', message: 'TikTok rejected the verification code.', details: { provider: 'tiktok' } },
+    }),
+  }))
+  await page.getByLabel('One-time verification code').fill('000000')
+  await page.getByRole('button', { name: 'Verify account' }).click()
+  await expect(page.locator('.login-modal').getByRole('alert')).toContainText('TikTok rejected the verification code')
+  await expect(page).toHaveURL('/connections')
+  expect(refreshCalls).toBe(1)
+})

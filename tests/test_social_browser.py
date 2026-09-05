@@ -10,22 +10,44 @@ import pytest
 
 from apps.api.app.config import Settings
 from apps.api.app.social_browser import (
+    SocialBrowserError,
+    _logged_in,
     connect_social_account,
     publish_social_video,
     verify_social_account,
 )
 
-LOGIN_PAGE = b"""<!doctype html><html><body>
+LOGIN_PAGE = br"""<!doctype html><html><body>
 <form id="login">
   <input data-testid="username">
   <input data-testid="password" type="password">
-  <button data-testid="login-submit" type="submit">Log in</button>
+  <button data-testid="login-submit" type="submit" disabled>Log in</button>
 </form>
 <script>
+document.querySelector('[data-testid=password]').addEventListener('keyup', () => {
+  document.querySelector('[data-testid=login-submit]').disabled = false;
+});
 document.querySelector('#login').addEventListener('submit', event => {
   event.preventDefault();
   const username = document.querySelector('[data-testid=username]').value;
-  if (username === 'twofactor') {
+  const messages = {
+    invalid: 'Username or password doesn\u2019t match',
+    limited: 'Maximum number of attempts reached. Try again later.',
+    unavailable: 'Something went wrong. Please try again later.',
+    captcha: 'Verify you are human',
+  };
+  if (messages[username]) {
+    setTimeout(() => {
+      const error = document.createElement('p');
+      error.textContent = messages[username];
+      document.body.appendChild(error);
+    }, 1800);
+  } else if (username === 'slow') {
+    setTimeout(() => {
+      document.cookie = 'session=ready; path=/';
+      location.href = '/';
+    }, 2200);
+  } else if (username === 'twofactor') {
     document.cookie = 'pending=1; path=/';
     location.href = '/challenge';
   } else {
@@ -44,8 +66,16 @@ CHALLENGE_PAGE = b"""<!doctype html><html><body>
 document.querySelector('#verify').addEventListener('submit', event => {
   event.preventDefault();
   if (document.querySelector('[data-testid=verification-code]').value === '123456') {
-    document.cookie = 'session=ready; path=/';
-    location.href = '/';
+    setTimeout(() => {
+      document.cookie = 'session=ready; path=/';
+      location.href = '/';
+    }, 2200);
+  } else {
+    setTimeout(() => {
+      const error = document.createElement('p');
+      error.textContent = 'Incorrect code';
+      document.body.appendChild(error);
+    }, 1800);
   }
 });
 </script></body></html>"""
@@ -158,3 +188,51 @@ def test_real_playwright_two_factor_session_resume() -> None:
     assert pending.status == "verification_required"
     assert pending.challenge_kind == "one_time_code"
     assert verified.status == "active"
+
+
+def test_delayed_provider_sign_in_waits_for_authenticated_state() -> None:
+    with fake_social_server() as base_url:
+        result = connect_social_account(
+            browser_settings(base_url), provider="tiktok", username="slow", password="transient-password"
+        )
+    assert result.status == "active"
+
+
+@pytest.mark.parametrize(("username", "code"), [
+    ("invalid", "invalid_credentials"),
+    ("limited", "provider_rate_limited"),
+    ("unavailable", "provider_unavailable"),
+    ("captcha", "human_verification_required"),
+])
+def test_provider_rejection_is_classified_without_leaking_credentials(username: str, code: str) -> None:
+    with fake_social_server() as base_url, pytest.raises(SocialBrowserError) as caught:
+        connect_social_account(
+            browser_settings(base_url), provider="tiktok", username=username, password="transient-password"
+        )
+    assert caught.value.code == code
+    assert "transient-password" not in str(caught.value)
+
+
+def test_wrong_otp_reports_provider_error() -> None:
+    with fake_social_server() as base_url:
+        settings = browser_settings(base_url)
+        pending = connect_social_account(settings, provider="instagram", username="twofactor", password="temporary")
+        with pytest.raises(SocialBrowserError) as caught:
+            verify_social_account(
+                settings, provider="instagram", username="twofactor", code="000000",
+                storage_state=pending.storage_state, page_url=pending.page_url,
+            )
+    assert caught.value.code == "invalid_verification_code"
+
+
+def test_tiktok_upload_link_and_login_control_are_not_authenticated() -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.set_content('<a href="/tiktokstudio/upload">Upload</a><a data-e2e="top-login-button">Log in</a>')
+            assert not _logged_in(page, "tiktok")
+        finally:
+            browser.close()

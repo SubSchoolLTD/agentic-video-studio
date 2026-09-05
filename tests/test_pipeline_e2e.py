@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import subprocess
 import time
+from pathlib import Path
+from shutil import which
 
+import pytest
 from sqlalchemy import func, select
 
 from apps.api.app import workflow
 from apps.api.app.database import SessionLocal
 from apps.api.app.models import Resource
-from apps.api.app.renderer import RenderError
+from apps.api.app.renderer import RenderError, probe_video, veo_extension_input_compatible
 
 
 def wait_for_job(client, job_id: str, headers: dict[str, str], timeout: float = 35) -> dict:
@@ -832,6 +836,70 @@ def test_storytelling_continuation_uses_the_previous_scene_for_each_role(client,
     assert queued.json()["cascade_scene_count"] == len([item for item in scenes if item["continuation_track"] == "maya"])
     regeneration = wait_for_scene_regeneration(client, queued.json()["regeneration_id"], auth_headers)
     assert regeneration["status"] == "completed", regeneration.get("error")
+
+
+@pytest.mark.parametrize("legacy_fault", ["offset", "corrupt"])
+def test_retry_repairs_legacy_conditioning_without_regenerating_accepted_scenes(
+    client, auth_headers, monkeypatch, legacy_fault,
+) -> None:
+    original_render = workflow.render_scene_fixture
+    calls: dict[str, int] = {}
+
+    def fail_third_scene_once(**kwargs):
+        label = kwargs["label"]
+        calls[label] = calls.get(label, 0) + 1
+        if label == "Scene 3" and calls[label] == 1:
+            raise RuntimeError("Injected provider interruption")
+        return original_render(**kwargs)
+
+    monkeypatch.setattr(workflow, "render_scene_fixture", fail_third_scene_once)
+    response = client.post(
+        "/v1/projects/prj_subschool/generation-jobs",
+        json={"title": f"Legacy conditioning recovery {legacy_fault}", "target_duration_seconds": 20,
+              "visual_mode": "ugc_creator", "audio_mode": "veo_native", "continue_scenes": True,
+              "scene_count_min": 3, "scene_count_max": 3, "scene_count_flex": 0, "max_cost_usd": 20},
+        headers=auth_headers,
+    )
+    assert response.status_code == 202, response.text
+    job_id = response.json()["generation_job_id"]
+    failed = wait_for_job(client, job_id, auth_headers)
+    assert failed["status"] == "failed"
+    with SessionLocal() as session:
+        attempts = session.scalars(select(Resource).where(
+            Resource.kind == "scene_attempt", Resource.data["generation_job_id"].as_string() == job_id,
+        ).order_by(Resource.created_at)).all()
+        assert len(attempts) == 2
+        accepted_ids = [a.id for a in attempts]
+        conditioning = Path(attempts[-1].data["continuation_conditioning_uri"])
+        if legacy_fault == "offset":
+            shifted = conditioning.with_name("shifted_test.mp4")
+            ffmpeg = which("ffmpeg")
+            assert ffmpeg
+            subprocess.run([
+                ffmpeg, "-v", "error", "-y", "-i", str(conditioning),
+                "-vf", "setpts=PTS+1/(24*TB)", "-fps_mode", "passthrough",
+                "-c:v", "libx264", "-c:a", "copy", str(shifted),
+            ], check=True, capture_output=True)
+            conditioning.write_bytes(shifted.read_bytes())
+            assert not veo_extension_input_compatible(probe_video(conditioning))
+        else:
+            conditioning.write_bytes(b"corrupt legacy context")
+
+    retry = client.post(f"/v1/generation-jobs/{job_id}/retry", headers=auth_headers)
+    assert retry.status_code == 202, retry.text
+    ready = wait_for_job(client, job_id, auth_headers)
+    assert ready["status"] == "ready", ready.get("last_error")
+    assert calls == {"Scene 1": 1, "Scene 2": 1, "Scene 3": 2}
+    with SessionLocal() as session:
+        attempts = session.scalars(select(Resource).where(
+            Resource.kind == "scene_attempt", Resource.data["generation_job_id"].as_string() == job_id,
+        ).order_by(Resource.created_at)).all()
+        assert [a.id for a in attempts[:2]] == accepted_ids
+        assert len(attempts) == 3
+        repaired = attempts[1]
+        assert repaired.data["continuation_contract_version"] == 2
+        assert attempts[2].data["continuity_input_uri"] == repaired.data["continuation_storage_uri"]
+        assert veo_extension_input_compatible(probe_video(Path(repaired.data["continuation_conditioning_uri"])))
 
 
 def test_interrupted_job_resumes_from_scene_checkpoint_without_duplicate_provider_work(

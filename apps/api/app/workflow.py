@@ -84,6 +84,24 @@ def stable_veo_seed(job_id: str, voice_preset: str) -> int:
     return int.from_bytes(digest[:4], "big", signed=False)
 
 
+def generation_budget_assessment(
+    generation_id: str, max_cost_usd: float, settlements: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """The initial order cap does not include separately authorized scene repairs."""
+    original = settlements.get(generation_id)
+    original_cents = int(original["customer_charge_cents"]) if original is not None else None
+    regeneration_cents = sum(
+        int(item["customer_charge_cents"]) for reference, item in settlements.items() if reference != generation_id
+    )
+    return {
+        "passed": original_cents is not None and original_cents <= round(max_cost_usd * 100),
+        "scope": "initial_generation",
+        "limit_usd": max_cost_usd,
+        "generation_charge_usd": original_cents / 100 if original_cents is not None else None,
+        "separately_authorized_regeneration_charge_usd": regeneration_cents / 100,
+    }
+
+
 def retryable_generation_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(
@@ -2536,11 +2554,12 @@ class WorkflowManager:
             if use_live_video
             else 0
         )
-        settlements = [settle_feature_charge(
+        settlements = {reference: settle_feature_charge(
             session, organization_id=job.organization_id, reference_id=reference,
             actual_quantity=units,
-        ) for reference, units in billing_groups.items()]
-        settlement = {key: sum(item[key] for item in settlements) for key in (
+        ) for reference, units in billing_groups.items()}
+        budget_assessment = generation_budget_assessment(job.id, float(job.data.get("max_cost_usd", 10)), settlements)
+        settlement = {key: sum(item[key] for item in settlements.values()) for key in (
             "customer_charge_cents", "provider_cost_usd", "refunded_cents", "absorbed_customer_charge_cents",
         )}
         repo.update(
@@ -2735,11 +2754,6 @@ class WorkflowManager:
         script_payload = dict(script_resource.data.get("script") or {}) if script_resource else {}
         cta_present = bool(str(script_payload.get("cta") or "").strip())
         claim_map_current = bool(claims) and all(claim.get("status") == "supported" for claim in claims)
-        budget_cost = job.data.get("actual_cost_usd")
-        if budget_cost is None:
-            budget_cost = job.data.get("provider_cost_estimate_usd")
-        if budget_cost is None:
-            budget_cost = (job.data.get("estimated_cost") or {}).get("max")
         hard_gates = {
             "policy": policy.get("decision") == "pass",
             "factual_confidence": claim_map_current,
@@ -2751,13 +2765,14 @@ class WorkflowManager:
             "brand": brand_pass,
             "platform": platform_pass,
             "rights_provenance": rights_pass,
-            "budget": budget_cost is not None and float(job.data.get("max_cost_usd", 10)) >= float(budget_cost),
+            "budget": budget_assessment["passed"],
             "duplicate": duplicate_pass,
             "platform_consent": job.data.get("approval_mode") != "auto_low_risk",
         }
         qa_report_data = {
             "hard_gate_passed": all(hard_gates.values()),
             "hard_gates": hard_gates,
+            "budget": budget_assessment,
             "technical": [item["technical_qa"] for item in output_versions],
             "visual": {
                 "passed": multimodal_pass,

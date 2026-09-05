@@ -182,6 +182,16 @@ def prepare_veo_extension_input(
             f"fps=24,trim=end_frame={frame_count},setpts=N/(24*TB),"
             "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
         ),
+        # FFmpeg 7 can otherwise mux the final filtered frame with zero duration,
+        # yielding a non-24 average rate despite the fps filter and correct PTS.
+        "-r",
+        "24",
+        "-fps_mode",
+        "cfr",
+        "-enc_time_base:v",
+        "1:24",
+        "-video_track_timescale",
+        "24000",
         "-c:v",
         "libx264",
         "-preset",
@@ -203,8 +213,16 @@ def prepare_veo_extension_input(
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
         raise RenderError(completed.stderr.strip() or "Could not prepare the Veo extension input window")
-    if not veo_extension_input_compatible(probe_video(output_path)):
-        raise RenderError("Prepared Veo extension input failed duration/frame-rate/timestamp validation")
+    output_probe = probe_video(output_path)
+    if not veo_extension_input_compatible(output_probe):
+        tracks = [
+            {key: stream.get(key) for key in ("codec_type", "duration", "start_time", "avg_frame_rate", "r_frame_rate")}
+            for stream in output_probe.get("streams", [])
+        ]
+        raise RenderError(
+            "Prepared Veo extension input failed duration/frame-rate/timestamp validation: "
+            + json.dumps({"tracks": tracks, "format": output_probe.get("format", {})}, sort_keys=True)
+        )
     return output_path
 
 

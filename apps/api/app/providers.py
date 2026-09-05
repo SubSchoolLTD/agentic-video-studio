@@ -682,7 +682,7 @@ class SceneVisualQAProvider:
                     "Compare face structure, hairstyle, apparent age and wardrobe with the original. Reject material recasting, not ordinary expression, light or angle changes. If nobody is visible, same_character is not applicable and true.",
                     "Reject posterized/solarized skin, thick drawn outlines, crushed blacks or clipped white patches and textures that become pixel art. Intentional motion graphics need not be photographic, but must remain coherent.",
                     "Reject objects melting, disintegrating, floating unnaturally or changing geometry; inspect books, hands and props rather than just the face.",
-                    "For on_camera speech check visible mouth movement matches audible delivery; a silent actor with offscreen narration fails. For voice_over do not require lip movement.",
+                    "For on_camera speech check visible mouth movement matches audible delivery; a silent actor with offscreen narration fails. For voice_over or silent delivery lip_sync_acceptable is true: no lip movement or audio is required (external TTS may be mixed later).",
                     "Each failure needs a concrete observable issue and approximate candidate timestamp. Different dialogue, ordinary movement, camera angle and a new practical location alone are not errors.",
                     "Judge this actual candidate, not the prompt's quality. Do not invent evidence. No reference means same_character is true, but artifact and lip-sync checks still apply.",
                 ],

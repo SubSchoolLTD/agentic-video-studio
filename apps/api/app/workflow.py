@@ -811,12 +811,12 @@ class WorkflowManager:
                         candidate_uri=persisted["storage_uri"],
                         reference_uri=self._native_voice_reference_uri(repo, scene=scene, aspect_ratio=aspect_ratio)
                         if continue_scenes and scene.data.get("speaker_kind", "on_camera") == "on_camera" else None,
-                        scene=dict(scene.data),
+                        scene={**scene.data, "speaker_kind": scene.data.get("speaker_kind", "on_camera") if native_audio else "silent"},
                     ) if use_live_video else {"passed": True, "issues": [], "demo_data": True}
                 )
                 visual_passed = visual_passed and bool(visual_qa.get("passed"))
                 if not visual_qa.get("passed"):
-                    speech_prompt_corrections.append("VISUAL CORRECTION: " + " ".join(visual_qa.get("issues") or []))
+                    speech_prompt_corrections.append("VISUAL CORRECTION: " + " ".join(visual_qa.get("issues") or []) + " " + str(visual_qa.get("evidence") or ""))
                 speech_passed = speech_passed and bool(speech_qa.get("passed"))
                 voice_passed = voice_passed and bool(voice_qa.get("passed"))
                 if not speech_qa.get("passed"):

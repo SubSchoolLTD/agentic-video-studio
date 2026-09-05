@@ -292,6 +292,20 @@ def test_private_voice_anchor_ends_just_after_speech_without_changing_original(t
     assert 4.3 < float(probe["format"]["duration"]) < 4.5
 
 
+def test_acoustic_tail_overrides_inaccurate_model_speech_timestamp(tmp_path: Path) -> None:
+    source = tmp_path / "speech_then_silence.mp4"
+    run_ffmpeg([
+        "-f", "lavfi", "-i", "color=c=blue:s=96x96:r=24:d=6",
+        "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=4",
+        "-af", "apad=whole_dur=6", "-c:v", "libx264", "-c:a", "aac", str(source),
+    ])
+    original = source.read_bytes()
+    output = prepare_veo_extension_input(source, tmp_path / "acoustic.mp4", speech_end_seconds=5.01, trim_silent_tail=True)
+    assert source.read_bytes() == original
+    assert veo_extension_input_compatible(probe_video(output))
+    assert 4 <= float(probe_video(output)["format"]["duration"]) < 4.3
+
+
 def test_normalizes_a_legacy_conditioning_video_with_a_one_frame_offset(tmp_path: Path) -> None:
     source = tmp_path / "legacy_conditioning.mp4"
     run_ffmpeg([

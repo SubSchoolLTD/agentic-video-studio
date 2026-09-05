@@ -534,8 +534,8 @@ class WorkflowManager:
         if not attempt or attempt.status != "passed":
             return None
         source = Path(str(attempt.data["output_uri"]))
-        anchor_path = source.with_name(f"{source.stem}_identity_anchor_v1.mp4")
-        anchor_uri = attempt.data.get("identity_anchor_storage_uri")
+        anchor_path = source.with_name(f"{source.stem}_identity_anchor_v2.mp4")
+        anchor_uri = attempt.data.get("identity_anchor_storage_uri") if attempt.data.get("identity_anchor_policy") == "first_accepted_take_acoustic_v2" else None
         if anchor_uri:
             try:
                 await asyncio.to_thread(self.storage.materialize, storage_uri=anchor_uri, local_path=anchor_path)
@@ -549,13 +549,14 @@ class WorkflowManager:
         await asyncio.to_thread(
             prepare_veo_extension_input, source, anchor_path,
             speech_end_seconds=(attempt.data.get("speech_qa") or {}).get("speech_end_seconds"),
+            trim_silent_tail=True,
         )
         persisted = await asyncio.to_thread(self.storage.persist, anchor_path, content_type="video/mp4")
         repo.update(attempt, data={
             "identity_anchor_storage_uri": persisted["storage_uri"],
             "identity_anchor_path": str(anchor_path),
             "identity_anchor_source_attempt_id": attempt.id,
-            "identity_anchor_policy": "first_accepted_take_v1",
+            "identity_anchor_policy": "first_accepted_take_acoustic_v2",
         })
         logger.info("veo_identity_anchor_prepared scene_id=%s attempt_id=%s aspect_ratio=%s", previous.id, attempt.id, aspect_ratio)
         return persisted["storage_uri"]
@@ -907,7 +908,7 @@ class WorkflowManager:
                         "speech_qa": speech_qa,
                         "voice_qa": voice_qa,
                         "visual_qa": visual_qa,
-                        "identity_anchor_policy": "first_accepted_take_v1",
+                        "identity_anchor_policy": "first_accepted_take_acoustic_v2",
                         "voice_reference_uri": voice_reference_uri,
                         "native_voice_preset": voice_preset,
                         "native_voice_profile": locked_voice_profile,
@@ -1060,6 +1061,7 @@ class WorkflowManager:
                 "progress": job.data.get("progress"),
                 "stages": job.data.get("stages"),
             }
+            active_scene = scene
             try:
                 repo.update(scene, status="regenerating", data={"visual_prompt": prompt})
                 repo.update(regeneration, status="running", data={"started_at": datetime.now(UTC).isoformat()})
@@ -1081,8 +1083,8 @@ class WorkflowManager:
                         ],
                         key=lambda item: int(item.data.get("position") or 0),
                     )
-                affected_scene_ids = {item.id for item in cascade_scenes}
                 for cascade_index, target_scene in enumerate(cascade_scenes):
+                    active_scene = target_scene
                     target_attempt = int(target_scene.data.get("attempt", 0)) + 1
                     generated, generated_ids, generated_uris = await self._generate_scene_with_qa(
                         session=session,
@@ -1115,13 +1117,24 @@ class WorkflowManager:
                         output_uris = generated_uris
                         attempt_number = resolved_attempt
 
-                generation_output = self._completed_stage_output(job, "scene_generation")
-                retained_attempts = [
-                    item
-                    for item in list(generation_output.get("attempts") or [])
-                    if item.get("scene_id") not in affected_scene_ids
-                ]
-                updated_generation_output = {"attempts": [*retained_attempts, *replacement_attempts]}
+                # Reconstruct from accepted per-scene checkpoints, not a stale stage
+                # output from before an interrupted/partially failed regeneration.
+                checkpoint_attempts = []
+                all_scenes = sorted([item for item in repo.list(
+                    organization_id=job.organization_id, project_id=job.project_id, kind="scene", limit=5000,
+                ) if item.data.get("storyboard_id") == storyboard.id], key=lambda item: int(item.data.get("position") or 0))
+                for checkpoint in all_scenes:
+                    for ratio in aspect_ratios:
+                        accepted_id = (checkpoint.data.get("latest_attempt_ids") or {}).get(ratio) or checkpoint.data.get("latest_attempt_id")
+                        accepted = repo.get_any(str(accepted_id or ""), kind="scene_attempt")
+                        if not accepted or accepted.status != "passed":
+                            raise RuntimeError(f"Accepted checkpoint missing for {checkpoint.id} ({ratio})")
+                        checkpoint_attempts.append({**accepted.data, "attempt_id": accepted.id})
+                        if checkpoint.status == "regeneration_failed" and accepted.data.get("regeneration_id") in {
+                            checkpoint.data.get("pending_regeneration_id"), checkpoint.data.get("cascade_regeneration_id"),
+                        } and accepted.data.get("regeneration_id"):
+                            repo.update(checkpoint, status="generated", data={"regeneration_error": None})
+                updated_generation_output = {"attempts": checkpoint_attempts}
                 stages = [dict(item) for item in job.data.get("stages", [])]
                 completed_count = 0
                 for stage in stages:
@@ -1196,7 +1209,7 @@ class WorkflowManager:
                     status="failed",
                     data={"error": str(exc), "failed_at": datetime.now(UTC).isoformat()},
                 )
-                repo.update(scene, status="regeneration_failed", data={"regeneration_error": str(exc)})
+                repo.update(active_scene, status="regeneration_failed", data={"regeneration_error": str(exc)})
                 repo.update(
                     job,
                     status=str(previous_job_state["status"]),

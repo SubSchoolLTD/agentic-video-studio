@@ -786,7 +786,7 @@ def test_native_ugc_regeneration_cascades_through_following_extensions(client, a
     assert [item["attempt"] for item in refreshed_scenes] == [2, 2]
 
 
-def test_continuous_native_ugc_reuses_root_anchor_beyond_36_seconds(client, auth_headers) -> None:
+def test_continuous_native_ugc_reuses_root_anchor_beyond_36_seconds(client, auth_headers, monkeypatch) -> None:
     response = client.post(
         "/v1/projects/prj_subschool/generation-jobs",
         json={
@@ -817,6 +817,32 @@ def test_continuous_native_ugc_reuses_root_anchor_beyond_36_seconds(client, auth
     refreshed = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
     after = sorted(refreshed["scenes"], key=lambda item: item["position"])
     assert all(item["attempts"][0]["id"] == retained_ids[index] for index, item in enumerate(after) if index != 2)
+    original_render = workflow.render_scene_fixture
+    failed_once = False
+
+    def interrupt_fourth(**kwargs):
+        nonlocal failed_once
+        if kwargs["label"] == "Scene 4" and not failed_once:
+            failed_once = True
+            raise RuntimeError("Interrupt a partially completed regeneration")
+        return original_render(**kwargs)
+
+    monkeypatch.setattr(workflow, "render_scene_fixture", interrupt_fourth)
+    batch = client.post(f"/v1/scenes/{scenes[2]['id']}/regenerate", json={"reason": "Repair the later shots", "regenerate_following": True}, headers=auth_headers)
+    assert batch.status_code == 202, batch.text
+    interrupted = wait_for_scene_regeneration(client, batch.json()["regeneration_id"], auth_headers)
+    assert interrupted["status"] == "failed"
+    partial = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    accepted = next(item for item in partial["scenes"] if item["id"] == scenes[2]["id"])
+    assert accepted["status"] == "generated"
+    accepted_id = accepted["attempts"][0]["id"]
+    resume = client.post(f"/v1/scenes/{scenes[3]['id']}/regenerate", json={"reason": "Continue remaining shots without buying the accepted third shot again", "regenerate_following": True}, headers=auth_headers)
+    assert resume.status_code == 202, resume.text
+    resumed = wait_for_scene_regeneration(client, resume.json()["regeneration_id"], auth_headers)
+    assert resumed["status"] == "completed", resumed.get("error")
+    current_job = client.get(f"/v1/generation-jobs/{job['id']}", headers=auth_headers).json()
+    outputs = next(item["output"]["attempts"] for item in current_job["stages"] if item["name"] == "scene_generation")
+    assert next(item for item in outputs if item["scene_id"] == scenes[2]["id"])["attempt_id"] == accepted_id
 
 
 def test_storytelling_continuation_uses_the_previous_scene_for_each_role(client, auth_headers) -> None:
@@ -921,7 +947,7 @@ def test_retry_repairs_legacy_conditioning_without_regenerating_accepted_scenes(
         assert [a.id for a in attempts[:2]] == accepted_ids
         assert len(attempts) == 3
         repaired = attempts[0]
-        assert repaired.data["identity_anchor_policy"] == "first_accepted_take_v1"
+        assert repaired.data["identity_anchor_policy"] == "first_accepted_take_acoustic_v2"
         assert attempts[2].data["continuity_input_uri"] == repaired.data["identity_anchor_storage_uri"]
         assert veo_extension_input_compatible(probe_video(Path(repaired.data["identity_anchor_path"])))
 

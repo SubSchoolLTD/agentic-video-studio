@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import textwrap
@@ -133,12 +134,37 @@ def extract_video_tail(video_path: Path, output_path: Path, *, duration_seconds:
     return output_path
 
 
+def trailing_silence_start(video_path: Path, duration: float) -> float | None:
+    """Detect a quiet tail acoustically; model-provided timestamps can be wrong.
+
+    This is a conservative silence detector, not speaker recognition/VAD. Music
+    can mask silence, so absence of a quiet tail is not proof of ongoing speech.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RenderError("FFmpeg is required")
+    result = subprocess.run([
+        ffmpeg, "-hide_banner", "-i", str(video_path), "-vn",
+        "-af", "silencedetect=noise=-40dB:d=0.3", "-f", "null", "-",
+    ], capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise RenderError(result.stderr.strip() or "Could not inspect reference audio")
+    starts = re.findall(r"silence_start: ([0-9.]+)", result.stderr)
+    ends = re.findall(r"silence_end: ([0-9.]+)", result.stderr)
+    if starts and (not ends or float(ends[-1]) >= duration - 0.05):
+        start = float(starts[-1])
+        if 1 <= start <= duration - 0.3:
+            return start
+    return None
+
+
 def prepare_veo_extension_input(
     video_path: Path,
     output_path: Path,
     *,
     max_duration_seconds: float = 29.0,
     speech_end_seconds: float | None = None,
+    trim_silent_tail: bool = False,
 ) -> Path:
     """Keep a rolling Veo-compatible conditioning window instead of an ever-growing movie.
 
@@ -163,8 +189,10 @@ def prepare_veo_extension_input(
     # Only the private reference is trimmed. Veo needs audible speech in its last
     # second to inherit a voice; the published root scene remains untouched.
     end = duration
-    if speech_end_seconds is not None and math.isfinite(speech_end_seconds) and speech_end_seconds >= 1:
-        end = min(duration, math.ceil((speech_end_seconds + 0.125) * 24) / 24)
+    acoustic_end = trailing_silence_start(video_path, duration) if trim_silent_tail and has_audio else None
+    speech_end = acoustic_end if acoustic_end is not None else speech_end_seconds
+    if speech_end is not None and math.isfinite(speech_end) and speech_end >= 1:
+        end = min(duration, math.ceil((speech_end + 0.125) * 24) / 24)
     if end == duration and duration <= max_duration_seconds and veo_extension_input_compatible(probe):
         shutil.copyfile(video_path, output_path)
         return output_path

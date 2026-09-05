@@ -62,6 +62,10 @@ test('separate admin UI manages analytics, prices, balance promo codes and admin
   await expect(page.getByText('Administrator added')).toBeVisible()
   const removable = page.locator('.admin-list .app-card').filter({ hasText: futureAdmin.email })
   await expect(removable).toBeVisible()
+  const cardBounds = await removable.boundingBox()
+  const buttonBounds = await removable.getByRole('button', { name: 'Revoke' }).boundingBox()
+  expect(cardBounds).not.toBeNull()
+  expect(buttonBounds!.x + buttonBounds!.width).toBeLessThanOrEqual(cardBounds!.x + cardBounds!.width)
   await removable.getByRole('button', { name: 'Revoke' }).click()
   await expect(page.getByText('Administrator removed')).toBeVisible()
 

@@ -483,6 +483,20 @@ def test_onboarding_finishes_on_funding_and_payment_activation_starts_research(
     assert repeated.status_code == 202
     assert repeated.json()["research_run_id"] == activated.json()["research_run_id"]
 
+    with SessionLocal() as session:
+        project = session.get(Resource, project_id)
+        assert project and project.status == "active"
+        runs = list(
+            session.scalars(
+                select(Resource).where(
+                    Resource.kind == "research_run",
+                    Resource.project_id == project_id,
+                    Resource.data["trigger_type"].as_string() == "funding_activation",
+                )
+            )
+        )
+        assert len(runs) == 1
+
 
 def test_onboarding_minute_duration_and_mix_reach_research_candidates(jwt_client):
     from collections import Counter
@@ -517,21 +531,6 @@ def test_onboarding_minute_duration_and_mix_reach_research_candidates(jwt_client
         assert Counter(candidate.data["candidate_type"] for candidate in candidates) == {
             "problem_solution": 1, "entertaining_viral": 2, "educational_value": 7,
         }
-
-    with SessionLocal() as session:
-        project = session.get(Resource, project_id)
-        assert project and project.status == "active"
-        runs = list(
-            session.scalars(
-                select(Resource).where(
-                    Resource.kind == "research_run",
-                    Resource.project_id == project_id,
-                    Resource.data["trigger_type"].as_string() == "funding_activation",
-                )
-            )
-        )
-        assert len(runs) == 1
-
 
 def test_low_balance_email_is_sent_once_per_captured_topup(jwt_client: TestClient, monkeypatch):
     account = register_and_verify(jwt_client, "low-balance-email")

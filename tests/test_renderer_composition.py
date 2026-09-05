@@ -327,3 +327,25 @@ def test_copies_valid_native_conditioning_without_reencoding(tmp_path: Path) -> 
     run_ffmpeg(["-f", "lavfi", "-i", "color=c=blue:s=96x96:r=24:d=2", "-c:v", "libx264", str(source)])
     output = prepare_veo_extension_input(source, tmp_path / "copy.mp4")
     assert output.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize(("rate", "frames"), [(24, 707), (30, 209)])
+def test_extension_reencode_has_a_full_last_frame_duration(tmp_path: Path, rate: int, frames: int) -> None:
+    source = tmp_path / "fractional_tail.mp4"
+    run_ffmpeg([
+        "-f", "lavfi", "-i", f"testsrc2=s=96x96:r={rate}",
+        "-frames:v", str(frames), "-vf", f"setpts=PTS+1/({rate}*TB)",
+        "-fps_mode", "passthrough", "-c:v", "libx264", str(source),
+    ])
+    output = prepare_veo_extension_input(source, tmp_path / "normalized.mp4")
+    probe = probe_video(output)
+    assert veo_extension_input_compatible(probe)
+    video = next(s for s in probe["streams"] if s["codec_type"] == "video")
+    assert float(video["duration"]) == pytest.approx(int(video["nb_frames"]) / 24, abs=0.000001)
+    ffprobe = which("ffprobe")
+    assert ffprobe
+    packets = subprocess.run([
+        ffprobe, "-v", "error", "-select_streams", "v:0", "-show_packets",
+        "-show_entries", "packet=duration_time", "-of", "csv=p=0", str(output),
+    ], capture_output=True, text=True, check=True)
+    assert all(float(line) == pytest.approx(1 / 24, abs=0.000001) for line in packets.stdout.splitlines())

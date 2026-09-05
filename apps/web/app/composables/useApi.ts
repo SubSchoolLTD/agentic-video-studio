@@ -29,13 +29,18 @@ export function useApi() {
       })
     }
     catch (error: any) {
-      if (error?.response?.status === 401 && !path.startsWith('/v1/auth/')) {
+      const payload = error?.data as ApiError | undefined
+      // Older API revisions used 401 for a rejected social password/code too.
+      // Never replay those credentials or revoke a valid Framewise session.
+      const providerFailure = payload?.error?.details?.auth_scope === 'provider'
+        || (['instagram', 'tiktok'].includes(String(payload?.error?.details?.provider || ''))
+          && /\/connections\/(?:[^/]+\/)?browser-(?:login|verify)$/.test(path))
+      if (error?.response?.status === 401 && !providerFailure && !path.startsWith('/v1/auth/')) {
         if (!alreadyRefreshed && await auth.refresh()) return api<T>(path, options, true)
         auth.clearSession()
         const redirect = route.fullPath && !route.path.startsWith('/login') ? `?redirect=${encodeURIComponent(route.fullPath)}` : ''
         await nuxtApp.runWithContext(() => navigateTo(`/login${redirect}`))
       }
-      const payload = error?.data as ApiError | undefined
       const message = payload?.error?.message || error?.message || 'The request could not be completed.'
       throw Object.assign(new Error(message), {
         requestId: payload?.error?.request_id,

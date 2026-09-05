@@ -45,6 +45,7 @@ export async function registerThroughUi(page: Page, label = 'E2E') {
   expect((await page.request.post(`${apiBase}/v1/projects/${projectId}/onboarding/complete`, { headers })).status()).toBe(200)
   await page.goto('/app')
   await expect(page).toHaveURL('/app')
+  await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
   return { email, password, projectName, projectId: projectId! }
 }
 

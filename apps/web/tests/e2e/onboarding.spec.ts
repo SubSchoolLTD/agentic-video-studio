@@ -30,6 +30,29 @@ test('new email account completes guided website and automation onboarding', asy
   await expect(page.getByRole('heading', { name: 'Connect channels now or later.' })).toBeVisible()
   await page.getByTestId('onboarding-connect-tiktok').click()
   await expect(page.getByRole('heading', { name: 'Connect TikTok' })).toBeVisible()
+  // Include the legacy provider 401: rolling API deployments must not log out
+  // the owner or silently submit the same TikTok password twice.
+  const sessionBefore = await page.context().cookies()
+  let refreshCalls = 0
+  let providerCalls = 0
+  page.on('request', request => { if (request.url().endsWith('/v1/auth/refresh')) refreshCalls++ })
+  await page.route('**/connections/tiktok/browser-login', route => {
+    providerCalls++
+    return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({
+      error: { code: 'invalid_credentials', message: 'TikTok rejected these sign-in details.', details: { provider: 'tiktok' } },
+    }) })
+  })
+  await page.getByLabel('Username or email').fill('onboarding-creator@example.test')
+  await page.getByLabel('Password').fill('wrong-test-password')
+  await page.getByRole('button', { name: 'Sign in securely' }).click()
+  await expect(page.getByTestId('onboarding-social-login').getByRole('alert')).toContainText('TikTok rejected')
+  await expect(page).toHaveURL('/onboarding')
+  await expect(page.getByLabel('Password')).toHaveValue('')
+  expect(providerCalls).toBe(1)
+  expect(refreshCalls).toBe(0)
+  expect((await page.context().cookies()).filter(cookie => cookie.name.startsWith('avs_')))
+    .toEqual(sessionBefore.filter(cookie => cookie.name.startsWith('avs_')))
+  await page.unroute('**/connections/tiktok/browser-login')
   await page.getByLabel('Username or email').fill('onboarding-creator@example.test')
   await page.getByLabel('Password').fill('transient-provider-password')
   const [socialLogin] = await Promise.all([

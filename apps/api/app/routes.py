@@ -4749,13 +4749,16 @@ def _social_connection_for_project(
 def _social_login_http_error(provider: str, exc: SocialBrowserError) -> HTTPException:
     status_code = 503 if exc.retryable else 409
     if exc.code in {"invalid_credentials", "invalid_verification_code"}:
-        status_code = 401
+        # A provider rejected its own credentials, not the caller's Framewise JWT.
+        # 401 is reserved for our authentication middleware.
+        status_code = 422
     return HTTPException(
         status_code,
         detail={
             "code": exc.code,
             "message": str(exc),
             "provider": provider,
+            "auth_scope": "provider",
             "retryable": exc.retryable,
         },
     )

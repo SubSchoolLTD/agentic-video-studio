@@ -16,6 +16,18 @@ from apps.api.app.models import Resource
 from apps.api.app.renderer import RenderError, probe_video, veo_extension_input_compatible
 
 
+@pytest.mark.parametrize("initial_cents,repair_cents,expected", [(2928, 1344, True), (3001, 0, False), (3001, 1344, False), (0, 0, True)])
+def test_initial_budget_excludes_separately_authorized_scene_repairs(initial_cents, repair_cents, expected):
+    assessment = workflow.generation_budget_assessment("job", 30, {
+        "job": {"customer_charge_cents": initial_cents},
+        "repair": {"customer_charge_cents": repair_cents},
+    })
+    assert assessment["passed"] is expected
+    assert assessment["generation_charge_usd"] == initial_cents / 100
+    assert assessment["separately_authorized_regeneration_charge_usd"] == repair_cents / 100
+    assert not workflow.generation_budget_assessment("missing", 30, {})["passed"]
+
+
 def wait_for_job(client, job_id: str, headers: dict[str, str], timeout: float = 35) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

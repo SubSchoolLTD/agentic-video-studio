@@ -265,7 +265,7 @@ class WorkflowManager:
             if not job:
                 return False
             interrupted = job.status == "running" and bool(job.data.get("interrupted_at"))
-            if job.status != "queued" and not interrupted:
+            if job.data.get("active_regeneration_id") or (job.status != "queued" and not interrupted):
                 return False
             job.status = "running"
             job.data = {
@@ -290,7 +290,8 @@ class WorkflowManager:
             )
         loop = asyncio.get_running_loop()
         for job in jobs:
-            loop.call_later(RESUME_GRACE_SECONDS, self.schedule, job.id)
+            if not job.data.get("active_regeneration_id"):
+                loop.call_later(RESUME_GRACE_SECONDS, self.schedule, job.id)
         repaired_job_ids: list[str] = []
         with SessionLocal() as session:
             failed_jobs = list(
@@ -504,6 +505,15 @@ class WorkflowManager:
         raw = explicit or (speaker or "voice_over_narrator" if speaker_kind == "voice_over" else speaker) or "creator"
         return "_".join(part for part in "".join(char.lower() if char.isalnum() else " " for char in raw).split()) or "creator"
 
+    @staticmethod
+    def _storyboard_scenes(repo: ResourceRepository, scene: Resource) -> list[Resource]:
+        # Scope before retrieval: the generic library list is capped at 200 rows.
+        return list(repo.session.scalars(select(Resource).where(
+            Resource.kind == "scene", Resource.organization_id == scene.organization_id,
+            Resource.project_id == scene.project_id,
+            Resource.data["storyboard_id"].as_string() == str(scene.data.get("storyboard_id") or ""),
+        )).all())
+
     def _earlier_continuation_scenes(
         self,
         repo: ResourceRepository,
@@ -516,12 +526,7 @@ class WorkflowManager:
         return sorted(
             [
                 item
-                for item in repo.list(
-                    organization_id=scene.organization_id,
-                    project_id=scene.project_id,
-                    kind="scene",
-                    limit=5000,
-                )
+                for item in self._storyboard_scenes(repo, scene)
                 if str(item.data.get("storyboard_id") or "") == storyboard_id
                 and int(item.data.get("position") or 0) < position
                 and self._continuation_track(item) == track
@@ -665,6 +670,7 @@ class WorkflowManager:
                         " IMMUTABLE REFERENCE CONTRACT: the input is the FIRST accepted performance of this role, "
                         "not the preceding story scene. Preserve exactly that person's face, hair, wardrobe and audible "
                         "voice identity. Perform ONLY the new action and new spoken line in this brief; never repeat "
+                        "the reference room, pose or framing when this shot specifies a new location or activity. Do not repeat "
                         "reference dialogue. This is an independent shot, not the next step of an accumulated visual effect. "
                         "Keep natural photographic skin and material textures, normal exposure and physical props. "
                         "No posterization, solarization, edge outlines, pixelation, melting objects or artistic filter."
@@ -1058,31 +1064,21 @@ class WorkflowManager:
                 repo.update(regeneration, status="failed", data={"error": "Parent production checkpoint not found"})
                 repo.update(scene, status="regeneration_failed")
                 return
-            if scene.data.get("locked"):
-                repo.update(regeneration, status="failed", data={"error": "Scene is locked by approval"})
-                repo.update(scene, status="generated")
-                return
-
             prompt = str(regeneration.data.get("visual_prompt") or scene.data.get("visual_prompt") or "").strip()
-            if not prompt:
-                repo.update(regeneration, status="failed", data={"error": "Scene visual prompt is empty"})
-                repo.update(scene, status="regeneration_failed")
-                return
             aspect_ratios = list(job.data.get("aspect_ratios") or ["9:16"])
             attempt_number = int(scene.data.get("attempt", 0)) + 1
             replacement_attempts: list[dict[str, Any]] = []
             latest_attempt_ids: dict[str, str] = {}
             output_uris: dict[str, str | None] = {}
-            previous_job_state = {
-                "status": job.status,
-                "current_stage": job.data.get("current_stage"),
-                "progress": job.data.get("progress"),
-                "stages": job.data.get("stages"),
-            }
             active_scene = scene
             try:
+                if scene.data.get("locked"):
+                    raise RuntimeError("Scene is locked by approval")
+                if not prompt:
+                    raise RuntimeError("Scene visual prompt is empty")
                 repo.update(scene, status="regenerating", data={"visual_prompt": prompt})
                 repo.update(regeneration, status="running", data={"started_at": datetime.now(UTC).isoformat()})
+                self._set_stage(repo, job, "scene_generation", "running")
                 native_audio = job.data.get("audio_mode") == "veo_native"
                 cascade_scenes = [scene]
                 if regeneration.data.get("cascade_scene_ids"):
@@ -1090,12 +1086,7 @@ class WorkflowManager:
                     cascade_scenes = sorted(
                         [
                             item
-                            for item in repo.list(
-                                organization_id=job.organization_id,
-                                project_id=job.project_id,
-                                kind="scene",
-                                limit=5000,
-                            )
+                            for item in self._storyboard_scenes(repo, scene)
                             if str(item.data.get("storyboard_id") or "") == storyboard.id
                             and item.id in authorized_scene_ids
                         ],
@@ -1127,6 +1118,9 @@ class WorkflowManager:
                             "output_uri": generated_uris.get(aspect_ratios[0]),
                             "output_uris": generated_uris,
                             "cascade_regeneration_id": regeneration.id if cascade_index else None,
+                            "pending_regeneration_id": None,
+                            "regeneration_error": None,
+                            "prompt_edit_pending": False,
                         },
                     )
                     replacement_attempts.extend(generated)
@@ -1138,9 +1132,7 @@ class WorkflowManager:
                 # Reconstruct from accepted per-scene checkpoints, not a stale stage
                 # output from before an interrupted/partially failed regeneration.
                 checkpoint_attempts = []
-                all_scenes = sorted([item for item in repo.list(
-                    organization_id=job.organization_id, project_id=job.project_id, kind="scene", limit=5000,
-                ) if item.data.get("storyboard_id") == storyboard.id], key=lambda item: int(item.data.get("position") or 0))
+                all_scenes = sorted(self._storyboard_scenes(repo, scene), key=lambda item: int(item.data.get("position") or 0))
                 for checkpoint in all_scenes:
                     for ratio in aspect_ratios:
                         accepted_id = (checkpoint.data.get("latest_attempt_ids") or {}).get(ratio) or checkpoint.data.get("latest_attempt_id")
@@ -1210,6 +1202,7 @@ class WorkflowManager:
                     },
                 )
                 await self._resume_from_render(session, repo, job)
+                repo.update(job, data={"active_regeneration_id": None, "last_regeneration_error": None, "last_error": None})
                 repo.update(
                     regeneration,
                     status="completed",
@@ -1228,16 +1221,15 @@ class WorkflowManager:
                     data={"error": str(exc), "failed_at": datetime.now(UTC).isoformat()},
                 )
                 repo.update(active_scene, status="regeneration_failed", data={"regeneration_error": str(exc)})
-                repo.update(
-                    job,
-                    status=str(previous_job_state["status"]),
-                    data={
-                        "current_stage": previous_job_state["current_stage"],
-                        "progress": previous_job_state["progress"],
-                        "stages": previous_job_state["stages"],
-                        "last_regeneration_error": str(exc),
-                    },
-                )
+                self._set_stage(repo, job, str(job.data.get("current_stage") or "scene_generation"), "failed", error=str(exc))
+                repo.update(job, status="failed", data={
+                    "active_regeneration_id": None, "last_regeneration_error": str(exc), "last_error": str(exc),
+                    "last_failed_regeneration_id": regeneration.id,
+                })
+                for pending_id in regeneration.data.get("cascade_scene_ids") or []:
+                    pending_scene = repo.get_any(pending_id, kind="scene")
+                    if pending_scene and pending_scene.status == "regenerating":
+                        repo.update(pending_scene, status="regeneration_failed", data={"pending_regeneration_id": None, "regeneration_error": "Regeneration interrupted; previous accepted take retained"})
                 refund_feature_charges(
                     session,
                     organization_id=regeneration.organization_id,

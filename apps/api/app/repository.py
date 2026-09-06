@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
+from .idea_lifecycle import sync_idea_lifecycle
 from .models import ApiKeyRecord, IdempotencyRecord, Resource
 
 
@@ -46,6 +47,7 @@ class ResourceRepository:
             version=version,
         )
         self.session.add(resource)
+        sync_idea_lifecycle(self.session, resource)
         self.session.commit()
         self.session.refresh(resource)
         return resource
@@ -111,6 +113,7 @@ class ResourceRepository:
             resource.version += 1
         resource.updated_at = datetime.now(UTC)
         self.session.add(resource)
+        sync_idea_lifecycle(self.session, resource)
         self.session.commit()
         self.session.refresh(resource)
         return resource

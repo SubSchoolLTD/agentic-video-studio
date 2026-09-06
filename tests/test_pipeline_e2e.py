@@ -757,6 +757,12 @@ def test_selective_scene_regeneration_executes_and_appends_video_version(client,
     refreshed_scene = next(item for item in refreshed_video["scenes"] if item["id"] == scene["id"])
     assert refreshed_scene["attempt"] == 2
     assert "authentic handheld" in refreshed_scene["visual_prompt"].lower()
+    # Reviewing history must not approve or lock a newer replacement.
+    approved_history = client.post(f"/v1/video-versions/{original['latest_version_id']}/approve", json={"comment": "Keep this earlier version approved"}, headers=auth_headers)
+    assert approved_history.status_code == 200
+    after_history_review = client.get(f"/v1/videos/{job['video_id']}", headers=auth_headers).json()
+    assert after_history_review["status"] == "approval_required"
+    assert all(not item["locked"] for item in after_history_review["scenes"])
 
 
 def test_native_ugc_regeneration_cascades_through_following_extensions(client, auth_headers) -> None:

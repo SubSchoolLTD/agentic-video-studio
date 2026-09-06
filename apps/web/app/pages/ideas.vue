@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowRight, Check, Columns3, GripVertical, List, Plus, Search, Sparkles, Video, WandSparkles, X } from 'lucide-vue-next'
+import { ArrowRight, Check, Columns3, List, Plus, Search, Sparkles, Video, WandSparkles, X } from 'lucide-vue-next'
 
 const { api, projectId } = useApi()
 const { show } = useToast()
@@ -17,8 +17,6 @@ const search = ref('')
 const audienceFilter = ref('')
 const objectiveFilter = ref('')
 const selectedIdea = ref<any>(null)
-const draggingId = ref('')
-const dragTarget = ref('')
 const form = reactive({ title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', audio_mode: 'veo_native', native_voice_preset: 'warm_conversational', character_id: '' })
 const generation = reactive({ visual_mode: 'ugc_creator', audio_mode: 'veo_native', continue_scenes: true, native_voice_preset: 'warm_conversational', character_id: '', aspect_ratios: ['9:16'] as string[], target_duration_seconds: 30, approval_mode: 'final_only', variants: 1, burn_in_captions: false, generation_start_mode: 'review_script', max_cost_usd: 30 })
 const sceneRange = ref('4-6')
@@ -56,12 +54,16 @@ const filteredIdeas = computed(() => ideas.value.filter((item: any) => {
   const matchesQuery = !query || [item.title, item.hook, item.audience].some(value => String(value || '').toLowerCase().includes(query))
   return matchesQuery && (!audienceFilter.value || item.audience === audienceFilter.value) && (!objectiveFilter.value || item.objective === objectiveFilter.value)
 }))
-const columns = computed(() => [
-  { key: 'draft', label: 'Draft', items: filteredIdeas.value.filter((item: any) => ['draft', 'candidate'].includes(item.status)) },
-  { key: 'researching', label: 'Researching', items: filteredIdeas.value.filter((item: any) => item.status === 'researching') },
-  { key: 'ready', label: 'Ready', items: filteredIdeas.value.filter((item: any) => ['ready', 'selected'].includes(item.status)) },
-  { key: 'planned', label: 'Planned / production', items: filteredIdeas.value.filter((item: any) => item.status === 'planned') },
-])
+const lifecycleColumns = [
+  { key: 'selected', label: 'Selected ideas' },
+  { key: 'script_generation', label: 'Script generation' },
+  { key: 'video_generation', label: 'Video generation' },
+  { key: 'video_ready', label: 'Video ready' },
+  { key: 'published', label: 'Published' },
+]
+const columns = computed(() => lifecycleColumns.map(column => ({
+  ...column, items: filteredIdeas.value.filter((item: any) => item.status === column.key),
+})))
 const parsedSceneRange = computed(() => {
   const match = sceneRange.value.trim().match(/^(\d{1,4})(?:\s*[-–]\s*(\d{1,4}))?$/)
   if (!match) return null
@@ -145,8 +147,8 @@ watch(() => generation.visual_mode, value => {
 let poller: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   poller = setInterval(() => {
-    if (ideas.value.some((item: any) => item.production && !['ready', 'failed', 'blocked', 'cancelled'].includes(item.production.status))) void refresh()
-  }, 1800)
+    void refresh()
+  }, 4000)
   if (route.query.idea) nextTick(() => document.querySelector(`[data-idea-id="${route.query.idea}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
 })
 onBeforeUnmount(() => { if (poller) clearInterval(poller) })
@@ -155,7 +157,7 @@ async function saveIdea() {
   saving.value = true
   try {
     await api(`/v1/projects/${projectId.value}/ideas`, { method: 'POST', body: form })
-    show('Idea added', 'Move it across the board or configure a production when it is ready.', 'success')
+    show('Idea added', 'Configure production when you are ready. Its status will follow progress automatically.', 'success')
     ideaModalOpen.value = false
     Object.assign(form, { title: '', hook: '', audience: '', objective: 'awareness', visual_mode: 'ugc_creator', audio_mode: 'veo_native', native_voice_preset: 'warm_conversational', character_id: '' })
     await router.replace({ query: {} })
@@ -248,41 +250,10 @@ async function startGeneration() {
   finally { starting.value = false }
 }
 
-function startDrag(event: DragEvent, idea: any) {
-  draggingId.value = idea.id
-  event.dataTransfer?.setData('text/plain', idea.id)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
-}
-
-function columnStatus(status: string) {
-  if (status === 'candidate') return 'draft'
-  if (status === 'selected') return 'ready'
-  return status
-}
-
-async function moveIdeaTo(idea: any, status: string) {
-  draggingId.value = ''
-  dragTarget.value = ''
-  if (!idea || columnStatus(idea.status) === status) return
-  try {
-    await api(`/v1/ideas/${idea.id}`, { method: 'PATCH', body: { status } })
-    await refresh()
-    show('Idea moved', `${idea.title} → ${status}`, 'success')
-  }
-  catch (error: any) { show('Could not move idea', error.message, 'error') }
-}
-
-async function moveIdea(status: string) {
-  const idea = ideas.value.find((item: any) => item.id === draggingId.value)
-  await moveIdeaTo(idea, status)
-}
-
-function chooseIdeaStatus(event: Event, idea: any) {
-  void moveIdeaTo(idea, (event.target as HTMLSelectElement).value)
-}
-
 function productionLabel(idea: any) {
   if (!idea.production) return ''
+  if (idea.status === 'published') return 'Published'
+  if (idea.production.status === 'awaiting_script_review') return 'Awaiting script review'
   if (idea.production.status === 'ready') return 'Video ready'
   if (idea.production.status === 'failed') return 'Generation failed'
   if (idea.production.status === 'blocked' || idea.production.status === 'budget_blocked') return 'Action required'
@@ -292,7 +263,7 @@ function productionLabel(idea: any) {
 
 <template>
   <div>
-    <UiPageHeader eyebrow="Editorial backlog" title="Ideas" description="Move ideas through the workflow, configure production deliberately, and follow generation without losing the originating card.">
+    <UiPageHeader eyebrow="Editorial backlog" title="Ideas" description="Your selected ideas, from script to published video. Stages update automatically as production progresses.">
       <div class="segmented"><button :class="{ active: view === 'board' }" aria-label="Board view" @click="view = 'board'"><Columns3 :size="14" /></button><button :class="{ active: view === 'table' }" aria-label="Table view" @click="view = 'table'"><List :size="14" /></button></div>
       <button class="button button--primary" data-testid="new-idea" @click="ideaModalOpen = true"><Plus :size="15" /> New idea</button>
     </UiPageHeader>
@@ -300,18 +271,18 @@ function productionLabel(idea: any) {
     <div class="ideas-toolbar"><label class="ideas-search"><Search :size="15" /><input v-model="search" aria-label="Search ideas" placeholder="Search ideas…"></label><select v-model="audienceFilter" class="toolbar-chip" aria-label="Filter by audience"><option value="">All audiences</option><option v-for="audience in audiences" :key="audience" :value="audience">{{ audience }}</option></select><select v-model="objectiveFilter" class="toolbar-chip" aria-label="Filter by objective"><option value="">All objectives</option><option v-for="objective in ['awareness','education','traffic','lead','install','purchase']" :key="objective" :value="objective">{{ objective }}</option></select><span class="toolbar-count">{{ filteredIdeas.length }} ideas</span></div>
 
     <div v-if="view === 'board'" class="idea-board">
-      <section v-for="column in columns" :key="column.key" class="idea-column" :class="{ 'idea-column--target': dragTarget === column.key }" @dragover.prevent="dragTarget = column.key" @dragleave="dragTarget = ''" @drop.prevent="moveIdea(column.key)">
+      <section v-for="column in columns" :key="column.key" class="idea-column">
         <header><span>{{ column.label }}</span><small>{{ column.items.length }}</small></header>
-        <article v-for="idea in column.items" :key="idea.id" class="idea-card" :class="{ 'idea-card--linked': route.query.idea === idea.id, 'idea-card--dragging': draggingId === idea.id }" :data-idea-id="idea.id" draggable="true" @dragstart="startDrag($event, idea)" @dragend="draggingId = ''; dragTarget = ''">
-          <div class="idea-card__top"><UiStatusBadge :status="idea.status" /><div class="idea-card__move"><select :value="columnStatus(idea.status)" :aria-label="`Move idea: ${idea.title}`" @pointerdown.stop @click.stop @change="chooseIdeaStatus($event, idea)"><option value="draft">Draft</option><option value="researching">Researching</option><option value="ready">Ready</option><option value="planned">Planned / production</option></select><span class="drag-handle" title="Drag to move"><GripVertical :size="15" /></span></div></div>
+        <article v-for="idea in column.items" :key="idea.id" class="idea-card" :class="{ 'idea-card--linked': route.query.idea === idea.id }" :data-idea-id="idea.id">
+          <div class="idea-card__top"><UiStatusBadge :status="idea.status" /></div>
           <h3>{{ idea.title }}</h3><p>{{ idea.hook || 'Add a sharper first-two-second hook.' }}</p>
-          <div class="idea-card__tags"><span>{{ idea.audience || 'General audience' }}</span><span>{{ idea.objective || 'awareness' }}</span><span>{{ (idea.visual_mode || 'ugc_creator').replaceAll('_', ' ') }}</span><span>{{ idea.audio_mode === 'veo_native' ? 'Veo native voice' : 'Google TTS' }}</span></div>
+          <div class="idea-card__tags"><span>{{ idea.audience || 'General audience' }}</span><span>{{ idea.objective || 'awareness' }}</span><span>{{ (idea.production?.visual_mode || idea.visual_mode || 'ugc_creator').replaceAll('_', ' ') }}</span><span>{{ (idea.production?.audio_mode || idea.audio_mode) === 'veo_native' ? 'Veo native voice' : 'Google TTS' }}</span></div>
           <div class="idea-card__score"><div><strong>{{ idea.topic_opportunity_score || '—' }}</strong><span>Opportunity</span></div><div><strong>{{ idea.score_confidence ? `${Math.round(idea.score_confidence * 100)}%` : 'Pending' }}</strong><span>Confidence</span></div></div>
           <div v-if="idea.production" class="idea-production"><div><Video :size="13" /><strong>{{ productionLabel(idea) }}</strong></div><UiProgressBar :value="idea.production.progress || 0" /></div>
           <NuxtLink v-if="idea.production" class="idea-card__action" :to="`/productions/${idea.production.generation_job_id}`"><Video :size="14" /> Open production <ArrowRight :size="13" /></NuxtLink>
           <button v-else class="idea-card__action" @click="openGeneration(idea)"><WandSparkles :size="14" /> Configure video <ArrowRight :size="13" /></button>
         </article>
-        <button class="column-add" @click="ideaModalOpen = true"><Plus :size="14" /> Add idea</button>
+        <button v-if="column.key === 'selected'" class="column-add" @click="ideaModalOpen = true"><Plus :size="14" /> Add idea</button>
       </section>
     </div>
 
@@ -340,7 +311,7 @@ function productionLabel(idea: any) {
 
 <style scoped>
 .idea-card__move{display:flex;align-items:center;gap:4px}.idea-card__move select{width:76px;padding:3px 17px 3px 5px;border:1px solid var(--border);border-radius:6px;background:white;color:var(--muted);font-size:7px}
-.segmented{display:flex;padding:3px;border:1px solid var(--border);border-radius:9px;background:white}.segmented button{display:grid;width:29px;height:27px;place-items:center;border-radius:6px;background:transparent;color:var(--muted)}.segmented button.active{background:var(--primary-100);color:var(--primary-700)}.ideas-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:15px}.ideas-search{display:flex;min-width:210px;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:white;color:var(--muted);font-size:10px}.ideas-search input{min-width:0;border:0;outline:0}.toolbar-chip{padding:7px 9px;border:1px solid var(--border);border-radius:9px;background:white;color:var(--muted-strong);font-size:9px}.toolbar-count{margin-left:auto;color:var(--muted);font-size:9px}.idea-board{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:12px;overflow-x:auto;padding-bottom:12px}.idea-column{min-width:220px;padding:3px;border:1px solid transparent;border-radius:13px;transition:.15s}.idea-column--target{border-color:var(--primary-300);background:var(--primary-50)}.idea-column>header{display:flex;align-items:center;gap:7px;padding:0 3px 10px;color:var(--muted-strong);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em}.idea-column>header small{display:grid;min-width:19px;height:19px;place-items:center;border-radius:6px;background:#eae6ec;color:var(--muted);font-size:8px}.idea-card{margin-bottom:9px;padding:14px;border:1px solid var(--border);border-radius:12px;background:white;box-shadow:var(--shadow-sm);transition:.15s}.idea-card--linked{border-color:var(--primary-400);box-shadow:0 0 0 3px var(--primary-100)}.idea-card--dragging{opacity:.45}.idea-card__top{display:flex;align-items:center;justify-content:space-between}.drag-handle{display:grid;place-items:center;color:var(--muted);cursor:grab}.idea-card h3{margin:11px 0 5px;font-family:var(--font-display);font-size:12px;line-height:1.4}.idea-card>p{min-height:31px;margin:0;color:var(--muted);font-size:9px;line-height:1.55}.idea-card__tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}.idea-card__tags span{padding:4px 6px;border-radius:6px;background:var(--surface-soft);color:var(--muted-strong);font-size:7px}.idea-card__score{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:11px;padding-top:10px;border-top:1px solid #efecf0}.idea-card__score div{display:grid;gap:1px}.idea-card__score strong{font-family:var(--font-display);font-size:13px}.idea-card__score span{color:var(--muted);font-size:7px;text-transform:uppercase}.idea-production{display:grid;gap:6px;margin-top:10px}.idea-production>div{display:flex;align-items:center;gap:6px;color:var(--primary-700);font-size:8px;text-transform:capitalize}.idea-card__action{display:flex;width:100%;align-items:center;gap:6px;margin-top:11px;padding:7px 8px;border-radius:8px;background:var(--primary-50);color:var(--primary-700);font-size:9px;font-weight:800}.idea-card__action svg:last-child{margin-left:auto}.column-add{display:flex;width:100%;align-items:center;justify-content:center;gap:6px;padding:9px;border:1px dashed var(--border-strong);border-radius:10px;background:transparent;color:var(--muted);font-size:9px}.generation-modal{width:min(720px,calc(100vw - 32px))}.choice-row{display:flex;gap:8px}.choice-button{display:flex;flex:1;align-items:center;justify-content:center;gap:6px;padding:10px;border:1px solid var(--border-strong);border-radius:9px;background:white;color:var(--muted-strong);font-size:9px}.choice-button.active{border-color:var(--primary-400);background:var(--primary-50);color:var(--primary-700);font-weight:800}.input-with-unit{display:flex;align-items:center;border:1px solid var(--border-strong);border-radius:9px;background:white}.input-with-unit input{min-width:0;flex:1;border:0!important}.input-with-unit span{padding:0 9px;color:var(--muted);font-size:8px}.field input.invalid{border-color:var(--red)!important}.token-quote{display:flex;align-items:center;gap:24px;margin-top:15px;padding:11px 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface-soft)}.token-quote span{display:grid;gap:2px}.token-quote small{color:var(--muted);font-size:7px;text-transform:uppercase}.token-quote strong{font-size:10px}.token-quote a{margin-left:auto;color:var(--primary-700);font-size:8px;font-weight:800}.token-quote--insufficient{border-color:#ebc5c5;background:#fff5f5}.token-quote--insufficient strong{color:var(--red)}.generation-error{margin-top:8px;color:var(--red);font-size:9px}.generation-note{display:flex;align-items:flex-start;gap:8px;margin-top:15px;padding:10px;border-radius:9px;background:var(--primary-50);color:var(--primary-700);font-size:9px;line-height:1.5}@media(max-width:700px){.ideas-toolbar{overflow-x:auto}.toolbar-count{display:none}.idea-board{grid-template-columns:repeat(4,250px)}.token-quote{align-items:flex-start;flex-direction:column;gap:8px}.token-quote a{margin-left:0}}
+.segmented{display:flex;padding:3px;border:1px solid var(--border);border-radius:9px;background:white}.segmented button{display:grid;width:29px;height:27px;place-items:center;border-radius:6px;background:transparent;color:var(--muted)}.segmented button.active{background:var(--primary-100);color:var(--primary-700)}.ideas-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:15px}.ideas-search{display:flex;min-width:210px;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:white;color:var(--muted);font-size:10px}.ideas-search input{min-width:0;border:0;outline:0}.toolbar-chip{padding:7px 9px;border:1px solid var(--border);border-radius:9px;background:white;color:var(--muted-strong);font-size:9px}.toolbar-count{margin-left:auto;color:var(--muted);font-size:9px}.idea-board{display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:12px;overflow-x:auto;padding-bottom:12px}.idea-column{min-width:220px;padding:3px;border:1px solid transparent;border-radius:13px;transition:.15s}.idea-column--target{border-color:var(--primary-300);background:var(--primary-50)}.idea-column>header{display:flex;align-items:center;gap:7px;padding:0 3px 10px;color:var(--muted-strong);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.07em}.idea-column>header small{display:grid;min-width:19px;height:19px;place-items:center;border-radius:6px;background:#eae6ec;color:var(--muted);font-size:8px}.idea-card{margin-bottom:9px;padding:14px;border:1px solid var(--border);border-radius:12px;background:white;box-shadow:var(--shadow-sm);transition:.15s}.idea-card--linked{border-color:var(--primary-400);box-shadow:0 0 0 3px var(--primary-100)}.idea-card--dragging{opacity:.45}.idea-card__top{display:flex;align-items:center;justify-content:space-between}.drag-handle{display:grid;place-items:center;color:var(--muted);cursor:grab}.idea-card h3{margin:11px 0 5px;font-family:var(--font-display);font-size:12px;line-height:1.4}.idea-card>p{min-height:31px;margin:0;color:var(--muted);font-size:9px;line-height:1.55}.idea-card__tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}.idea-card__tags span{padding:4px 6px;border-radius:6px;background:var(--surface-soft);color:var(--muted-strong);font-size:7px}.idea-card__score{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:11px;padding-top:10px;border-top:1px solid #efecf0}.idea-card__score div{display:grid;gap:1px}.idea-card__score strong{font-family:var(--font-display);font-size:13px}.idea-card__score span{color:var(--muted);font-size:7px;text-transform:uppercase}.idea-production{display:grid;gap:6px;margin-top:10px}.idea-production>div{display:flex;align-items:center;gap:6px;color:var(--primary-700);font-size:8px;text-transform:capitalize}.idea-card__action{display:flex;width:100%;align-items:center;gap:6px;margin-top:11px;padding:7px 8px;border-radius:8px;background:var(--primary-50);color:var(--primary-700);font-size:9px;font-weight:800}.idea-card__action svg:last-child{margin-left:auto}.column-add{display:flex;width:100%;align-items:center;justify-content:center;gap:6px;padding:9px;border:1px dashed var(--border-strong);border-radius:10px;background:transparent;color:var(--muted);font-size:9px}.generation-modal{width:min(720px,calc(100vw - 32px))}.choice-row{display:flex;gap:8px}.choice-button{display:flex;flex:1;align-items:center;justify-content:center;gap:6px;padding:10px;border:1px solid var(--border-strong);border-radius:9px;background:white;color:var(--muted-strong);font-size:9px}.choice-button.active{border-color:var(--primary-400);background:var(--primary-50);color:var(--primary-700);font-weight:800}.input-with-unit{display:flex;align-items:center;border:1px solid var(--border-strong);border-radius:9px;background:white}.input-with-unit input{min-width:0;flex:1;border:0!important}.input-with-unit span{padding:0 9px;color:var(--muted);font-size:8px}.field input.invalid{border-color:var(--red)!important}.token-quote{display:flex;align-items:center;gap:24px;margin-top:15px;padding:11px 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface-soft)}.token-quote span{display:grid;gap:2px}.token-quote small{color:var(--muted);font-size:7px;text-transform:uppercase}.token-quote strong{font-size:10px}.token-quote a{margin-left:auto;color:var(--primary-700);font-size:8px;font-weight:800}.token-quote--insufficient{border-color:#ebc5c5;background:#fff5f5}.token-quote--insufficient strong{color:var(--red)}.generation-error{margin-top:8px;color:var(--red);font-size:9px}.generation-note{display:flex;align-items:flex-start;gap:8px;margin-top:15px;padding:10px;border-radius:9px;background:var(--primary-50);color:var(--primary-700);font-size:9px;line-height:1.5}@media(max-width:700px){.ideas-toolbar{overflow-x:auto}.toolbar-count{display:none}.idea-board{grid-template-columns:repeat(5,250px)}.token-quote{align-items:flex-start;flex-direction:column;gap:8px}.token-quote a{margin-left:0}}
 .video-type-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.video-type-grid>label{display:grid;gap:5px;padding:11px;border:1px solid var(--border-strong);border-radius:10px;background:white;cursor:pointer}.video-type-grid>label.active{border-color:var(--primary-400);background:var(--primary-50)}.video-type-grid input,.audio-mode-switch input{position:absolute;opacity:0;pointer-events:none}.video-type-grid span{display:flex;align-items:center}.video-type-grid strong{font-size:9px}.video-type-grid small{color:var(--muted);font-size:8px;line-height:1.45}.audio-mode-switch{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:4px;border:1px solid var(--border);border-radius:10px;background:var(--surface-soft)}.audio-mode-switch>label{display:flex;align-items:center;justify-content:center;padding:9px;border-radius:7px;color:var(--muted);cursor:pointer;font-size:9px;font-weight:700}.audio-mode-switch>label.active{background:white;color:var(--primary-700);box-shadow:var(--shadow-sm)}.audio-mode-switch span{display:flex;align-items:center}@media(max-width:600px){.video-type-grid,.audio-mode-switch{grid-template-columns:1fr}}
 .production-start-choice{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 20px 14px}.production-start-choice label{display:flex;align-items:center;gap:9px;padding:10px;border:1px solid var(--border);border-radius:10px;background:white;cursor:pointer}.production-start-choice label.active{border-color:var(--primary-400);background:var(--primary-50)}.production-start-choice input{accent-color:var(--primary-600)}.production-start-choice span{display:grid;gap:2px}.production-start-choice strong{font-size:9px}.production-start-choice small{color:var(--muted);font-size:7px}
 </style>

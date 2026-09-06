@@ -31,7 +31,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, HTMLResponse
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from .billing import (
@@ -50,6 +50,7 @@ from .content_planning import research_plan, select_content_candidates
 from .database import SessionLocal, get_db
 from .email_service import send_low_balance_email
 from .events import EventSink
+from .idea_lifecycle import idea_status
 from .ingestion import extract_article, fetch_public_text, prompt_injection_score
 from .metrics import collect_youtube_metrics, mock_youtube_metrics, observed_performance
 from .models import ApiKeyRecord, PayPalTopup, Resource, User
@@ -102,6 +103,8 @@ from .schemas import (
     ResearchProfilePatch,
     ResearchRunCreate,
     ReviewAction,
+    ScenePromptPatch,
+    ScenePromptRewrite,
     SceneRegenerate,
     ScoreOverride,
     ScriptPatch,
@@ -234,6 +237,7 @@ def serialize_brand_profile(resource: Resource) -> dict[str, Any]:
 
 def serialize_idea(repo: ResourceRepository, idea: Resource, *, organization_id: str) -> dict[str, Any]:
     payload = ResourceRepository.serialize(idea)
+    payload["status"] = idea_status(repo.session, idea)
     job_id = str(idea.data.get("generation_job_id") or "")
     job = repo.get(job_id, organization_id=organization_id, kind="generation_job") if job_id else None
     if job:
@@ -244,6 +248,8 @@ def serialize_idea(repo: ResourceRepository, idea: Resource, *, organization_id:
             "current_stage": job.data.get("current_stage"),
             "progress": float(job.data.get("progress") or 0),
             "last_error": job.data.get("last_error"),
+            "audio_mode": job.data.get("audio_mode"),
+            "visual_mode": job.data.get("visual_mode"),
         }
     else:
         payload["production"] = None
@@ -4034,7 +4040,11 @@ def edit_generation_scene(
         f"Conflict: {edits['dramatic_conflict']}. Audience value: {edits['audience_value']}. "
         "No text, UI, logo or transition effect. End on a clean hard-cut edit point."
     )
-    updated_scene = {**dict(scene.data), **edits, "visual_prompt_base": base}
+    return _save_scene_prompt(repo, job, scene, {**edits, "visual_prompt_base": base})
+
+
+def _save_scene_prompt(repo: ResourceRepository, job: Resource, scene: Resource, edits: dict[str, Any]) -> dict[str, Any]:
+    updated_scene = {**dict(scene.data), **edits, "prompt_edit_pending": True}
     updated_scene.update(
         apply_narration_to_scene(
             updated_scene,
@@ -4044,14 +4054,15 @@ def edit_generation_scene(
         )
     )
     repo.update(scene, data=updated_scene)
-    storyboard = repo.get_any(str(job.data.get("storyboard_id") or ""), kind="storyboard")
+    storyboard = repo.get_any(str(scene.data.get("storyboard_id") or ""), kind="storyboard")
     if storyboard:
         storyboard_scenes = [
             updated_scene if str(item.get("id")) == str(scene.data.get("id")) else item
             for item in storyboard.data.get("scenes") or []
         ]
         repo.update(storyboard, data={"scenes": storyboard_scenes})
-    script = repo.get_any(str(job.data.get("script_id") or ""), kind="script")
+    script_id = job.data.get("script_id") or next((stage.get("output", {}).get("script_id") for stage in job.data.get("stages", []) if stage.get("name") == "script"), None)
+    script = repo.get_any(str(script_id or ""), kind="script")
     if script:
         script_data = dict(script.data.get("script") or {})
         beats = [
@@ -4087,6 +4098,54 @@ def edit_generation_scene(
         stage["output"] = stage_output
     repo.update(job, data={"stages": stages, "script_last_edited_at": datetime.now(UTC).isoformat()})
     return ResourceRepository.serialize(scene)
+
+
+def _active_storyboard_id(job: Resource) -> str | None:
+    return job.data.get("storyboard_id") or next((stage.get("output", {}).get("storyboard_id") for stage in job.data.get("stages", []) if stage.get("name") == "storyboard"), None)
+
+
+def _editable_scene(repo: ResourceRepository, scene_id: str, principal: Principal) -> tuple[Resource, Resource]:
+    scene = require_resource(repo, scene_id, principal, kind="scene")
+    storyboard = require_resource(repo, str(scene.data.get("storyboard_id") or ""), principal, kind="storyboard", project_id=scene.project_id)
+    job = require_resource(repo, str(storyboard.data.get("generation_job_id") or ""), principal, kind="generation_job", project_id=scene.project_id)
+    if _active_storyboard_id(job) != storyboard.id:
+        raise HTTPException(409, "This scene belongs to an older script version")
+    if job.status not in {"ready", "failed", "awaiting_script_review", "blocked"}:
+        raise HTTPException(409, "Wait for the current production operation to finish")
+    return scene, job
+
+
+@router.patch("/scenes/{scene_id}/prompt", tags=["videos"])
+def edit_scene_prompt(scene_id: str, payload: ScenePromptPatch, principal: Principal = Depends(get_principal), session: Session = Depends(get_db)) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    scene, job = _editable_scene(repo, scene_id, principal)
+    edits = payload.model_dump()
+    edits["visual_prompt_base"] = edits.pop("visual_prompt").strip()
+    if payload.speaker_kind != "silent" and not payload.narration.strip():
+        raise HTTPException(422, "A speaking scene needs a complete narration line")
+    return _save_scene_prompt(repo, job, scene, edits)
+
+
+@router.post("/scenes/{scene_id}/rewrite-prompt", tags=["videos"])
+async def rewrite_scene_prompt(scene_id: str, payload: ScenePromptRewrite, request: Request, principal: Principal = Depends(get_principal), session: Session = Depends(get_db)) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    scene, job = _editable_scene(repo, scene_id, principal)
+    project = require_resource(repo, str(job.project_id), principal, kind="project")
+    package = next((stage.get("output", {}).get("package", {}) for stage in job.data.get("stages", []) if stage.get("name") == "editorial_strategy"), {})
+    return await request.app.state.workflow.editorial.rewrite_scene_prompt(
+        draft=payload.model_dump(),
+        context={
+            "scene": scene.data,
+            "storyboard": package.get("storyboard", {}),
+            "production_brief": package.get("production_brief", {}),
+            "project_brief": project.data.get("brief", {}),
+            "website_url": project.data.get("website_url"),
+            "duration_seconds": scene.data.get("duration_target"),
+            "audio_mode": job.data.get("audio_mode"),
+        },
+    )
 
 
 @router.post("/generation-jobs/{job_id}/script/regenerate", status_code=202, tags=["generations"])
@@ -4162,6 +4221,8 @@ async def retry_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.data.get("last_regeneration_error") or job.data.get("active_regeneration_id"):
+        raise HTTPException(409, "Use the scene regeneration action and confirm its cost; the existing video is preserved")
     if job.status not in {"failed", "blocked", "cancelled"}:
         raise HTTPException(409, f"Job cannot be retried from {job.status}")
     if not job.data.get("test_mode") and outstanding_charge_cents(session, principal.organization_id, job.id) == 0:
@@ -4207,6 +4268,8 @@ async def retry_generation_stage(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.data.get("last_regeneration_error") or job.data.get("active_regeneration_id"):
+        raise HTTPException(409, "Use the scene regeneration action and confirm its cost; the existing video is preserved")
     stages = [dict(item) for item in job.data.get("stages", [])]
     stage_index = next((index for index, item in enumerate(stages) if item.get("name") == stage_name), None)
     if stage_index is None:
@@ -4397,6 +4460,11 @@ def _review_video_version(
     principal.require("videos:approve")
     repo = ResourceRepository(session)
     version = require_resource(repo, version_id, principal, kind="video_version")
+    video = repo.get_any(version.data["video_id"], kind="video")
+    job = repo.get_any(str(video.data.get("generation_job_id") or ""), kind="generation_job") if video else None
+    current_version = bool(video and (version.id == video.data.get("latest_version_id") or (job and version.id in (job.data.get("video_version_ids") or []))))
+    if current_version and job and job.data.get("active_regeneration_id"):
+        raise HTTPException(409, "Wait for scene regeneration to finish before approving this production")
     approval = repo.add(
         kind="approval",
         organization_id=principal.organization_id,
@@ -4410,8 +4478,7 @@ def _review_video_version(
         },
     )
     repo.update(version, status=review_status, data={"approval_id": approval.id})
-    video = repo.get_any(version.data["video_id"], kind="video")
-    if video:
+    if video and current_version:
         repo.update(video, status=review_status)
         if review_status == "approved":
             for scene_id in video.data.get("scene_ids", []):
@@ -4457,39 +4524,26 @@ def request_video_changes(
     )
 
 
-@router.post("/scenes/{scene_id}/regenerate", status_code=202, tags=["videos"])
-async def regenerate_scene(
-    scene_id: str,
-    payload: SceneRegenerate,
-    request: Request,
-    principal: Principal = Depends(get_principal),
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-) -> dict[str, Any]:
-    principal.require("generations:write")
-    repo = ResourceRepository(session)
-    scene = require_resource(repo, scene_id, principal, kind="scene")
-    if scene.data.get("locked"):
-        raise HTTPException(409, "Locked scenes cannot be regenerated until explicitly unlocked")
+def _scene_regeneration_plan(repo: ResourceRepository, scene: Resource, regenerate_following: bool) -> tuple[Resource, list[Resource], dict[str, Any]]:
     storyboard = repo.get_any(str(scene.data.get("storyboard_id") or ""), kind="storyboard")
     parent_job = (
         repo.get_any(str(storyboard.data.get("generation_job_id") or ""), kind="generation_job")
         if storyboard
         else None
     )
+    if not parent_job or parent_job.organization_id != scene.organization_id or parent_job.project_id != scene.project_id:
+        raise HTTPException(409, "Parent production checkpoint not found")
+    if _active_storyboard_id(parent_job) != scene.data.get("storyboard_id"):
+        raise HTTPException(409, "This scene belongs to an older script version")
+    if parent_job.status not in {"ready", "failed"} or not parent_job.data.get("video_id"):
+        raise HTTPException(409, "Wait for this production to finish before replacing scenes")
     native_audio = bool(parent_job and parent_job.data.get("audio_mode") == "veo_native")
     continuous_scenes = bool(parent_job and parent_job.data.get("continue_scenes"))
     selected_track = _continuation_track(scene.data)
-    storyboard_scenes = [
-        item
-        for item in repo.list(
-            organization_id=principal.organization_id,
-            project_id=scene.project_id,
-            kind="scene",
-            limit=5000,
-        )
-        if str(item.data.get("storyboard_id") or "") == str(scene.data.get("storyboard_id") or "")
-    ]
+    storyboard_scenes = list(repo.session.scalars(select(Resource).where(
+        Resource.organization_id == scene.organization_id, Resource.project_id == scene.project_id,
+        Resource.kind == "scene", Resource.data["storyboard_id"].as_string() == str(scene.data.get("storyboard_id") or ""),
+    )).all())
     is_track_root = not any(
         _continuation_track(item.data) == selected_track
         and int(item.data.get("position") or 0) < int(scene.data.get("position") or 0)
@@ -4502,13 +4556,70 @@ async def regenerate_scene(
             if int(item.data.get("position") or 0) >= int(scene.data.get("position") or 0)
             and _continuation_track(item.data) == selected_track
         ]
-        if continuous_scenes and (is_track_root or payload.regenerate_following)
+        if continuous_scenes and (is_track_root or regenerate_following)
         else [scene]
     )
+    cascade_scenes.sort(key=lambda item: int(item.data.get("position") or 0))
+    ratios = list(parent_job.data.get("aspect_ratios") or ["9:16"])
+    quantity = sum(
+        7 if continuous_scenes and any(
+            _continuation_track(previous.data) == _continuation_track(item.data)
+            and int(previous.data.get("position") or 0) < int(item.data.get("position") or 0)
+            for previous in storyboard_scenes
+        ) else veo_request_duration(float(item.data.get("duration_target") or 8))
+        for item in cascade_scenes
+    ) * len(ratios)
+    feature = "video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate"
+    quote = quote_feature(repo.session, feature, quantity)
+    if parent_job.data.get("test_mode"):
+        quote.update(charge_cents=0, charge_usd=0, provider_cost_usd=0)
+    quote.update(
+        scene_ids=[item.id for item in cascade_scenes],
+        scene_positions=[item.data.get("position") for item in cascade_scenes],
+        aspect_ratios=ratios, test_mode=bool(parent_job.data.get("test_mode")),
+        unlock_required=any(item.data.get("locked") for item in cascade_scenes),
+    )
+    fingerprint_data = {**quote, "scene_revisions": [item.updated_at.isoformat() for item in cascade_scenes], "job_revision": parent_job.updated_at.isoformat()}
+    quote["fingerprint"] = hashlib.sha256(json.dumps(fingerprint_data, sort_keys=True).encode()).hexdigest()
+    quote["balance_cents"] = ensure_wallet(repo.session, scene.organization_id).balance_cents
+    return parent_job, cascade_scenes, quote
+
+
+@router.post("/scenes/{scene_id}/regenerate/quote", tags=["videos"])
+def quote_scene_regeneration(scene_id: str, payload: SceneRegenerate, principal: Principal = Depends(get_principal), session: Session = Depends(get_db)) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    scene = require_resource(repo, scene_id, principal, kind="scene")
+    return _scene_regeneration_plan(repo, scene, payload.regenerate_following)[2]
+
+
+@router.post("/scenes/{scene_id}/regenerate", status_code=202, tags=["videos"])
+async def regenerate_scene(
+    scene_id: str, payload: SceneRegenerate, request: Request,
+    principal: Principal = Depends(get_principal), session: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    scene = require_resource(repo, scene_id, principal, kind="scene")
+    parent_job, cascade_scenes, quote = _scene_regeneration_plan(repo, scene, payload.regenerate_following)
+    if quote["unlock_required"] and not payload.unlock_approved:
+        raise HTTPException(409, "Locked scenes cannot be regenerated until explicitly unlocked")
+    if payload.quote_fingerprint and payload.quote_fingerprint != quote["fingerprint"]:
+        raise HTTPException(409, "The scene or price changed. Request a fresh estimate before confirming.")
+    native_audio = parent_job.data.get("audio_mode") == "veo_native"
+    previous_job_state = {"status": parent_job.status, **{key: parent_job.data.get(key) for key in ("current_stage", "progress", "stages")}}
+    regeneration_id = repo.new_id("scene")
+    claimed = session.execute(update(Resource).where(
+        Resource.id == parent_job.id, Resource.status == parent_job.status, Resource.updated_at == parent_job.updated_at,
+    ).values(status="queued", data={**parent_job.data, "active_regeneration_id": regeneration_id}, updated_at=datetime.now(UTC)))
+    if claimed.rowcount != 1:
+        session.rollback()
+        raise HTTPException(409, "Another operation changed this production. Refresh and request a new estimate.")
     attempt_no = int(scene.data.get("attempt", 0)) + 1
     prompt = payload.visual_prompt or scene.data.get("visual_prompt")
     regeneration = repo.add(
         kind="scene_regeneration",
+        resource_id=regeneration_id,
         organization_id=principal.organization_id,
         project_id=scene.project_id,
         status="queued",
@@ -4524,39 +4635,36 @@ async def regenerate_scene(
             "selective": True,
             "cascade_scene_ids": [item.id for item in cascade_scenes],
             "requested_by_user_id": principal.actor_id,
+            "previous_job_state": previous_job_state,
+            "confirmed_quote": quote,
         },
     )
     try:
-        charge_feature(
-            session,
-            organization_id=principal.organization_id,
-            user_id=principal.actor_id,
-            feature_key=(
-                "video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate"
-            ),
-            quantity=(
-                sum(
-                    veo_request_duration(float(item.data.get("duration_target") or 8))
-                    if not any(
-                        _continuation_track(previous.data) == _continuation_track(item.data)
-                        and int(previous.data.get("position") or 0) < int(item.data.get("position") or 0)
-                        for previous in storyboard_scenes
-                    )
-                    else 7
-                    for item in cascade_scenes
-                )
-                if continuous_scenes
-                else veo_request_duration(
-                    float(scene.data.get("duration_target") or 0)
-                    or max(1.0, float(scene.data.get("end_sec") or 0) - float(scene.data.get("start_sec") or 0))
-                )
-            ),
-            reference_id=regeneration.id,
-        )
+        if not parent_job.data.get("test_mode"):
+            charge_feature(
+                session,
+                organization_id=principal.organization_id,
+                user_id=principal.actor_id,
+                feature_key=(
+                    "video.scene_regenerate_native_audio" if native_audio else "video.scene_regenerate"
+                ),
+                quantity=quote["quantity"],
+                reference_id=regeneration.id,
+            )
     except HTTPException:
         session.delete(regeneration)
-        session.commit()
+        repo.update(parent_job, status=previous_job_state["status"], data={"active_regeneration_id": None})
         raise
+    for target in cascade_scenes:
+        repo.update(target, status="regenerating", data={"locked": False, "pending_regeneration_id": regeneration.id})
+    stages = [dict(item) for item in parent_job.data.get("stages", [])]
+    for stage in stages:
+        if stage.get("name") in {"scene_generation", "render", "qa", "scoring"}:
+            stage.update(status="queued" if stage["name"] == "scene_generation" else "pending", error=None)
+    repo.update(parent_job, status="queued", data={
+        "stages": stages, "current_stage": "scene_generation", "progress": 6 / 11,
+        "active_regeneration_id": regeneration.id, "last_regeneration_error": None, "last_error": None,
+    })
     repo.update(
         scene,
         status="regenerating",

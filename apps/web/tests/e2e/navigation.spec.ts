@@ -23,15 +23,16 @@ test('public landing page explains the product, pricing and account entry points
   expect(response?.status()).toBe(200)
   await expect(page.getByRole('heading', { name: /self-running video channel/i })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'From your website to an always-on content engine.' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Made without a human in the production loop.' })).toBeVisible()
-  await expect(page.locator('.showcase-player video')).toHaveCount(3)
+  await expect(page.getByRole('heading', { name: 'From an idea to a video worth watching.' })).toBeVisible()
+  await expect(page.locator('.showcase-player video')).toHaveCount(4)
   await expect(page.locator('.showcase-player video').first()).toHaveAttribute('src', '/showcase/framewise-example-01.mp4')
-  for (const source of ['01', '02', '03']) {
+  for (const source of ['01', '02', '03', '04']) {
     const media = await page.request.get(`/showcase/framewise-example-${source}.mp4`)
     expect(media.ok()).toBe(true)
     expect(media.headers()['content-type']).toContain('video/mp4')
   }
-  await expect(page.getByText('without manual editing, prompt rewrites or any other human intervention', { exact: false })).toBeVisible()
+  await expect(page.getByText('both fully autonomous productions and a creator-led video refined with scene-level regeneration', { exact: false })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Watch on YouTube' }).last()).toHaveAttribute('href', 'https://youtube.com/shorts/emNzYSO0NeM')
   await expect(page.getByRole('heading', { name: 'Pay as you generate' })).toBeVisible()
   await expect(page.locator('.pricing-value strong')).toHaveText('$12')
   await expect(page.getByText('No subscription or monthly platform fee')).toBeVisible()

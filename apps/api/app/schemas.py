@@ -263,6 +263,17 @@ class SceneRegenerate(BaseModel):
     quote_fingerprint: str | None = None
 
 
+class SceneTakeSelection(BaseModel):
+    scene_id: str
+    attempt_id: str
+
+
+class VideoReassemble(BaseModel):
+    base_version_id: str
+    aspect_ratio: Literal["9:16", "16:9"]
+    selections: list[SceneTakeSelection] = Field(min_length=1, max_length=1000)
+
+
 class ScenePromptPatch(BaseModel):
     narration: str = Field(max_length=2_000)
     visual_prompt: str = Field(min_length=8, max_length=20_000)

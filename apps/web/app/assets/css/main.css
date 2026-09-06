@@ -131,8 +131,8 @@ svg { flex: none; }
 
 .status-badge { display: inline-flex; width: fit-content; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 99px; background: var(--surface-soft); color: var(--muted-strong); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .07em; }
 .status-badge__dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.status-badge--active, .status-badge--ready, .status-badge--healthy, .status-badge--approved, .status-badge--published, .status-badge--completed, .status-badge--passed { border-color: #c9e8d6; background: var(--green-soft); color: var(--green); }
-.status-badge--queued, .status-badge--running, .status-badge--researching, .status-badge--generating, .status-badge--processing { border-color: #cae2f2; background: var(--blue-soft); color: var(--blue); }
+.status-badge--active, .status-badge--ready, .status-badge--video_ready, .status-badge--healthy, .status-badge--approved, .status-badge--published, .status-badge--completed, .status-badge--passed { border-color: #c9e8d6; background: var(--green-soft); color: var(--green); }
+.status-badge--queued, .status-badge--running, .status-badge--script_generation, .status-badge--video_generation, .status-badge--regenerating, .status-badge--researching, .status-badge--generating, .status-badge--processing { border-color: #cae2f2; background: var(--blue-soft); color: var(--blue); }
 .status-badge--approval_required, .status-badge--review_required, .status-badge--limited, .status-badge--awaiting_consent { border-color: #eedda9; background: var(--amber-soft); color: #a06b06; }
 .status-badge--failed, .status-badge--blocked, .status-badge--rejected, .status-badge--revoked { border-color: #efcdd0; background: var(--red-soft); color: var(--red); }
 

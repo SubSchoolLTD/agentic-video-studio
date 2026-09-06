@@ -62,6 +62,10 @@ async def test_publish_automation_sends_every_connected_channel_without_an_extra
                 "aspect_ratio": "9:16",
             },
         )
+        # Match the render checkpoint: approval applies only to the current
+        # version group, never to a superseded render of the same video.
+        repo.update(video, data={"latest_version_id": version.id, "generation_job_id": job.id})
+        repo.update(job, data={"video_id": video.id, "video_version_ids": [version.id]})
         repo.add(
             kind="connection",
             organization_id="org_demo",

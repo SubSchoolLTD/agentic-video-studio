@@ -183,7 +183,7 @@ class IdeaPatch(BaseModel):
         "warm_conversational", "calm_expert", "bright_creator", "grounded_storyteller"
     ] | None = None
     character_id: str | None = Field(default=None, max_length=64)
-    status: Literal["draft", "researching", "ready", "planned"] | None = None
+    status: Literal["draft", "researching", "ready", "planned", "selected", "script_generation", "video_generation", "video_ready", "published"] | None = None
 
 
 class GenerationCreate(BaseModel):
@@ -257,8 +257,26 @@ class CharacterGenerate(BaseModel):
 
 class SceneRegenerate(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
-    visual_prompt: str | None = Field(default=None, max_length=4_000)
+    visual_prompt: str | None = Field(default=None, max_length=20_000)
     regenerate_following: bool = False
+    unlock_approved: bool = False
+    quote_fingerprint: str | None = None
+
+
+class ScenePromptPatch(BaseModel):
+    narration: str = Field(max_length=2_000)
+    visual_prompt: str = Field(min_length=8, max_length=20_000)
+    speaker_kind: Literal["on_camera", "voice_over", "silent"] = "on_camera"
+
+
+class ScenePromptRewrite(ScenePromptPatch):
+    feedback: str = Field(min_length=3, max_length=4_000)
+
+
+class ScenePromptRevision(BaseModel):
+    narration: str = Field(max_length=2_000)
+    visual_prompt: str = Field(min_length=8, max_length=20_000)
+    change_summary: str
 
 
 class ScriptPatch(BaseModel):

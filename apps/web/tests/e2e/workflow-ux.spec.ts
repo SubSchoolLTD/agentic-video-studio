@@ -93,7 +93,7 @@ test('research keeps action candidates focused and exposes created and hidden hi
   await expect(page).toHaveURL(/\/ideas\?idea=/)
 })
 
-test('ideas move between kanban columns and settings require explicit edit mode', async ({ page }, testInfo) => {
+test('ideas start selected in the automatic lifecycle and settings require explicit edit mode', async ({ page }) => {
   const account = await registerThroughUi(page, 'Workflow UX')
   await page.goto('/ideas')
   await expect(page.locator('.app-shell')).toHaveAttribute('data-hydrated', 'true')
@@ -105,15 +105,12 @@ test('ideas move between kanban columns and settings require explicit edit mode'
   await expect(page.getByText('Idea added')).toBeVisible()
 
   const card = page.locator('.idea-card').filter({ hasText: title })
-  const readyColumn = page.locator('.idea-column').nth(2)
-  if (testInfo.project.name.includes('mobile')) {
-    await card.getByLabel(`Move idea: ${title}`).selectOption('ready')
-  }
-  else {
-    await card.dragTo(readyColumn)
-  }
-  await expect(page.getByText('Idea moved')).toBeVisible()
-  await expect(readyColumn.locator('.idea-card').filter({ hasText: title })).toBeVisible()
+  const selectedColumn = page.locator('.idea-column').first()
+  await expect(page.locator('.idea-column')).toHaveCount(5)
+  await expect(selectedColumn.locator('header')).toContainText('Selected ideas')
+  await expect(selectedColumn.locator('.idea-card').filter({ hasText: title })).toBeVisible()
+  await expect(card.getByLabel(`Move idea: ${title}`)).toHaveCount(0)
+  await expect(card).not.toHaveAttribute('draggable', 'true')
 
   await page.goto('/app')
   await page.getByRole('link', { name: 'Open monthly budget settings' }).click()

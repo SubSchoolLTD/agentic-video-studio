@@ -4141,6 +4141,7 @@ async def rewrite_scene_prompt(scene_id: str, payload: ScenePromptRewrite, reque
             "storyboard": package.get("storyboard", {}),
             "production_brief": package.get("production_brief", {}),
             "project_brief": project.data.get("brief", {}),
+            "project_context": project.data.get("context", {}),
             "website_url": project.data.get("website_url"),
             "duration_seconds": scene.data.get("duration_target"),
             "audio_mode": job.data.get("audio_mode"),
@@ -4196,6 +4197,8 @@ def cancel_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.data.get("active_regeneration_id"):
+        raise HTTPException(409, "A selective scene regeneration is active; the original production cannot be cancelled or refunded")
     if job.status not in {"queued", "running", "awaiting_script_review"}:
         raise HTTPException(409, f"Job cannot be cancelled from {job.status}")
     task = request.app.state.workflow.tasks.get(job_id)

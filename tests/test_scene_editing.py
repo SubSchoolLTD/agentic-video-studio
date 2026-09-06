@@ -133,6 +133,11 @@ def test_quote_confirmation_test_mode_and_duplicate_guard(client, auth_headers, 
     assert job["current_stage"] == "scene_generation"
     assert next(s for s in job["stages"] if s["name"] == "render")["status"] == "pending"
     assert client.post(url, headers=auth_headers, json=confirmed).status_code == 409
+    # A selective take has its own task and charge. The original production's
+    # cancellation endpoint must not refund it while the take keeps running.
+    assert client.post(
+        f"/v1/generation-jobs/{production['job']}/cancel", headers=auth_headers,
+    ).status_code == 409
     assert (
         client.patch(
             f"/v1/scenes/{production['scenes'][0]}/prompt",

@@ -1152,7 +1152,7 @@ class WorkflowManager:
                         stage["status"] = "completed"
                         stage["output"] = updated_generation_output
                         stage["completed_at"] = datetime.now(UTC).isoformat()
-                    elif stage.get("name") in {"render", "qa", "scoring"}:
+                    elif stage.get("name") in {"voice_audio", "render", "qa", "scoring"}:
                         stage["status"] = "pending"
                         stage.pop("output", None)
                         stage.pop("error", None)
@@ -1196,11 +1196,39 @@ class WorkflowManager:
                     status="running",
                     data={
                         "stages": stages,
-                        "current_stage": "render",
+                        "current_stage": "voice_audio",
                         "progress": round(completed_count / len(stages), 2),
                         "last_error": None,
                     },
                 )
+                # The edited line must also replace captions and optional TTS.
+                # Use a private artifact namespace for this take so old versions
+                # keep their original subtitle/audio files.
+                self._set_stage(repo, job, "voice_audio", "running")
+                audio_path = None
+                audio_storage_uri = None
+                if self.settings.uses_live_video and not native_audio and not job.data.get("test_mode"):
+                    voiceover = " ".join(
+                        str(item.get("narration") or "").strip()
+                        for item in storyboard_scenes if item.get("speaker_kind") != "silent"
+                    ).strip()
+                    if voiceover:
+                        audio_path = await self.tts.synthesize(
+                            voiceover,
+                            output_path=self.settings.storage_root / str(job.project_id) / job.id / "audio" / regeneration.id / "voiceover.wav",
+                        )
+                        persisted_audio = await asyncio.to_thread(self.storage.persist, audio_path, content_type="audio/wav")
+                        audio_storage_uri = persisted_audio["storage_uri"]
+                caption_ids = await self._persist_caption_assets(
+                    repo=repo, job=job, scenes=storyboard_scenes, artifact_key=regeneration.id,
+                )
+                self._set_stage(repo, job, "voice_audio", "completed", output={
+                    "provider": "veo_native_audio" if native_audio else "google_tts" if audio_path else "deterministic_audio_bed",
+                    "audio_path": str(audio_path) if audio_path else None,
+                    "audio_storage_uri": audio_storage_uri,
+                    "caption_asset_id": caption_ids["vtt"], "caption_srt_asset_id": caption_ids["srt"],
+                    "timestamps": True,
+                })
                 await self._resume_from_render(session, repo, job)
                 repo.update(job, data={"active_regeneration_id": None, "last_regeneration_error": None, "last_error": None})
                 repo.update(
@@ -2130,9 +2158,12 @@ class WorkflowManager:
         repo: ResourceRepository,
         job: Resource,
         scenes: list[dict[str, Any]],
+        artifact_key: str | None = None,
     ) -> dict[str, str]:
         duration_seconds = int(job.data.get("target_duration_seconds", 30))
         caption_root = self.settings.storage_root / str(job.project_id) / job.id / "captions"
+        if artifact_key:
+            caption_root = caption_root / artifact_key
         outputs = (
             (
                 "vtt",

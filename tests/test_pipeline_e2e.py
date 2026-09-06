@@ -728,6 +728,18 @@ def test_selective_scene_regeneration_executes_and_appends_video_version(client,
     scene = original["scenes"][0]
     assert scene["locked"] is False
 
+    old_voice = next(stage for stage in job["stages"] if stage["name"] == "voice_audio")["output"]
+    with SessionLocal() as session:
+        old_captions = session.get(Resource, old_voice["caption_asset_id"])
+        old_caption_path = Path(old_captions.data["storage_uri"])
+        old_caption_bytes = old_caption_path.read_bytes()
+    edited = client.patch(f"/v1/scenes/{scene['id']}/prompt", headers=auth_headers, json={
+        "narration": "I test recall outside.",
+        "visual_prompt": "Authentic handheld creator walks across a quiet courtyard with a notebook.",
+        "speaker_kind": "voice_over",
+    })
+    assert edited.status_code == 200, edited.text
+
     queued = client.post(
         f"/v1/scenes/{scene['id']}/regenerate",
         json={
@@ -750,7 +762,14 @@ def test_selective_scene_regeneration_executes_and_appends_video_version(client,
     assert len(refreshed_video["versions"]) == 2
     assert refreshed_video["latest_version_id"] != original["latest_version_id"]
     assert original_path.read_bytes() == original_bytes
+    new_voice = next(stage for stage in refreshed_job["stages"] if stage["name"] == "voice_audio")
+    assert new_voice["status"] == "completed"
+    assert new_voice["attempt"] == 2
+    assert old_caption_path.read_bytes() == old_caption_bytes
     with SessionLocal() as session:
+        new_caption = session.get(Resource, new_voice["output"]["caption_asset_id"])
+        assert new_caption.data["storage_uri"] != str(old_caption_path)
+        assert "I test recall outside." in Path(new_caption.data["storage_uri"]).read_text()
         new_version = session.get(Resource, refreshed_video["latest_version_id"])
         new_asset = session.get(Resource, new_version.data["render_asset_id"])
         assert new_asset.data["storage_uri"] != str(original_path)

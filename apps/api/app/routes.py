@@ -4466,7 +4466,7 @@ def _review_video_version(
     video = repo.get_any(version.data["video_id"], kind="video")
     job = repo.get_any(str(video.data.get("generation_job_id") or ""), kind="generation_job") if video else None
     current_version = bool(video and (version.id == video.data.get("latest_version_id") or (job and version.id in (job.data.get("video_version_ids") or []))))
-    if current_version and job and job.data.get("active_regeneration_id"):
+    if current_version and job and job.data.get("active_regeneration_id") and job.status != "ready":
         raise HTTPException(409, "Wait for scene regeneration to finish before approving this production")
     approval = repo.add(
         kind="approval",
@@ -4662,7 +4662,7 @@ async def regenerate_scene(
         repo.update(target, status="regenerating", data={"locked": False, "pending_regeneration_id": regeneration.id})
     stages = [dict(item) for item in parent_job.data.get("stages", [])]
     for stage in stages:
-        if stage.get("name") in {"scene_generation", "render", "qa", "scoring"}:
+        if stage.get("name") in {"scene_generation", "voice_audio", "render", "qa", "scoring"}:
             stage.update(status="queued" if stage["name"] == "scene_generation" else "pending", error=None)
     repo.update(parent_job, status="queued", data={
         "stages": stages, "current_stage": "scene_generation", "progress": 6 / 11,

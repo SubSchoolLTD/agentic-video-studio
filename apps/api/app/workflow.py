@@ -244,6 +244,16 @@ class WorkflowManager:
         self.tasks[task_key] = task
         task.add_done_callback(lambda _: self.tasks.pop(task_key, None))
 
+    def schedule_reassembly(self, operation_id: str) -> None:
+        from .reassembly import run_reassembly
+
+        task_key = f"reassembly:{operation_id}"
+        if task_key in self.tasks and not self.tasks[task_key].done():
+            return
+        task = asyncio.create_task(run_reassembly(self, operation_id), name=task_key)
+        self.tasks[task_key] = task
+        task.add_done_callback(lambda _: self.tasks.pop(task_key, None))
+
     def schedule_character_generation(self, character_id: str) -> None:
         task_key = f"character-generation:{character_id}"
         existing = self.tasks.get(task_key)
@@ -265,7 +275,7 @@ class WorkflowManager:
             if not job:
                 return False
             interrupted = job.status == "running" and bool(job.data.get("interrupted_at"))
-            if job.data.get("active_regeneration_id") or (job.status != "queued" and not interrupted):
+            if job.data.get("active_regeneration_id") or job.data.get("active_reassembly_id") or (job.status != "queued" and not interrupted):
                 return False
             job.status = "running"
             job.data = {
@@ -290,7 +300,7 @@ class WorkflowManager:
             )
         loop = asyncio.get_running_loop()
         for job in jobs:
-            if not job.data.get("active_regeneration_id"):
+            if not job.data.get("active_regeneration_id") and not job.data.get("active_reassembly_id"):
                 loop.call_later(RESUME_GRACE_SECONDS, self.schedule, job.id)
         repaired_job_ids: list[str] = []
         with SessionLocal() as session:
@@ -341,6 +351,11 @@ class WorkflowManager:
                 self.schedule_scene_regeneration,
                 regeneration.id,
             )
+        with SessionLocal() as session:
+            assemblies = session.scalars(select(Resource).where(Resource.kind == "video_reassembly", Resource.status.in_(["queued", "running"]))).all()
+        for assembly in assemblies:
+            delay = max(RESUME_GRACE_SECONDS, 901 - (datetime.now(UTC) - assembly.updated_at.replace(tzinfo=UTC)).total_seconds()) if assembly.status == "running" else RESUME_GRACE_SECONDS
+            loop.call_later(delay, self.schedule_reassembly, assembly.id)
         with SessionLocal() as session:
             characters = list(
                 session.scalars(
@@ -906,6 +921,9 @@ class WorkflowManager:
                         "prompt_version": "editorial-director-v7-pro-quality-gate",
                         "visual_prompt": prompt,
                         "narration": scene.data.get("narration"),
+                        "scene_snapshot": {key: value for key, value in scene.data.items() if key not in {
+                            "latest_attempt_ids", "latest_attempt_id", "output_uris", "output_uri", "attempts", "attempt_history",
+                        }},
                         "output_uri": str(generated),
                         "storage_uri": persisted["storage_uri"],
                         "public_path": persisted["public_path"],
@@ -2161,9 +2179,8 @@ class WorkflowManager:
         artifact_key: str | None = None,
     ) -> dict[str, str]:
         duration_seconds = int(job.data.get("target_duration_seconds", 30))
-        caption_root = self.settings.storage_root / str(job.project_id) / job.id / "captions"
-        if artifact_key:
-            caption_root = caption_root / artifact_key
+        # Every caption revision is immutable, just like the rendered video.
+        caption_root = self.settings.storage_root / str(job.project_id) / job.id / "captions" / (artifact_key or repo.new_id("captions"))
         outputs = (
             (
                 "vtt",
@@ -2550,6 +2567,7 @@ class WorkflowManager:
         caption_asset_id: str,
         caption_srt_asset_id: str | None,
         research_run_id: str,
+        reassembly: Resource | None = None,
     ) -> None:
         use_live_video = self.settings.uses_live_video and not bool(job.data.get("test_mode"))
         attempt_resources = repo.list(
@@ -2577,11 +2595,12 @@ class WorkflowManager:
             if use_live_video
             else 0
         )
-        settlements = {reference: settle_feature_charge(
+        settlements = {} if reassembly else {reference: settle_feature_charge(
             session, organization_id=job.organization_id, reference_id=reference,
             actual_quantity=units,
         ) for reference, units in billing_groups.items()}
-        budget_assessment = generation_budget_assessment(job.id, float(job.data.get("max_cost_usd", 10)), settlements)
+        budget_assessment = ({"passed": True, "mode": "existing_media_reassembly", "additional_veo_charge_usd": 0}
+                             if reassembly else generation_budget_assessment(job.id, float(job.data.get("max_cost_usd", 10)), settlements))
         settlement = {key: sum(item[key] for item in settlements.values()) for key in (
             "customer_charge_cents", "provider_cost_usd", "refunded_cents", "absorbed_customer_charge_cents",
         )}
@@ -2595,7 +2614,7 @@ class WorkflowManager:
                 "platform_absorbed_customer_charge_usd": round(
                     settlement["absorbed_customer_charge_cents"] / 100, 2
                 ),
-            },
+            } if not reassembly else {},
         )
         self._set_stage(repo, job, "render", "running")
         output_versions: list[dict[str, Any]] = []
@@ -2618,7 +2637,8 @@ class WorkflowManager:
         existing_video_id = job.data.get("revision_of_video_id") or job.data.get("video_id")
         existing_video = repo.get_any(str(existing_video_id), kind="video") if existing_video_id else None
         first_render_version = max((int(item.get("version", 0)) for item in (existing_video.data.get("versions") or [])), default=0) + 1 if existing_video else 1
-        for index, aspect_ratio in enumerate(job.data.get("aspect_ratios", ["9:16"]), start=first_render_version):
+        render_ratios = [reassembly.data["aspect_ratio"]] if reassembly else job.data.get("aspect_ratios", ["9:16"])
+        for index, aspect_ratio in enumerate(render_ratios, start=first_render_version):
             render_started = time.perf_counter()
             output_dir = self.settings.storage_root / (job.project_id or "unknown") / job.id / "renders"
             output_path = output_dir / f"version_{index}_{aspect_ratio.replace(':', 'x')}.mp4"
@@ -2950,6 +2970,11 @@ class WorkflowManager:
                     "script_id": script_id,
                     "storyboard_id": storyboard_id,
                     "supersedes_script_id": job.data.get("supersedes_script_id"),
+                    "scene_attempt_ids": {attempt["scene_id"]: attempt["attempt_id"] for attempt in scene_attempts if attempt.get("aspect_ratio") == item["aspect_ratio"]},
+                    "scene_snapshots": scenes,
+                    "caption_asset_id": caption_asset_id,
+                    "caption_srt_asset_id": caption_srt_asset_id,
+                    "reassembly_id": reassembly.id if reassembly else None,
                     "manifest_uri": f"{item['asset']['storage_uri'][:-4]}.manifest.json",
                 },
             )
@@ -2976,13 +3001,14 @@ class WorkflowManager:
                 "completed_at": datetime.now(UTC).isoformat(),
             },
         )
-        await self._complete_automatic_publications(
-            session,
-            repo,
-            job,
-            [item["id"] for item in versions],
-            title=title,
-        )
+        if not reassembly:
+            await self._complete_automatic_publications(
+                session,
+                repo,
+                job,
+                [item["id"] for item in versions],
+                title=title,
+            )
         logger.info(
             "generation_ready job_id=%s video_id=%s retry_source=%s",
             job.id,

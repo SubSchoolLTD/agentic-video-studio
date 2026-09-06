@@ -114,6 +114,7 @@ from .schemas import (
     SourceItemCreate,
     SourcePatch,
     TopicMute,
+    VideoReassemble,
     WebhookCreate,
     WebhookPatch,
 )
@@ -183,10 +184,27 @@ def serialize_video(repo: ResourceRepository, video: Resource, *, organization_i
         versions.append(ResourceRepository.serialize(version) if version else snapshot)
     payload["versions"] = versions
     storage = MediaStorage(get_settings())
+    def subtitles(data: dict[str, Any]) -> list[dict[str, Any]]:
+        return _serialize_subtitles(repo, data, organization_id=organization_id, storage=storage)
+
+    payload["subtitle_assets"] = subtitles(video.data)
+    for version in versions:
+        # Legacy snapshots did not retain caption references. Only the current
+        # render can safely fall back to the video's current caption assets.
+        data = version if version.get("caption_asset_id") else (
+            video.data if version["id"] == video.data.get("latest_version_id") else {}
+        )
+        version["subtitle_assets"] = subtitles(data)
+    return payload
+
+
+def _serialize_subtitles(
+    repo: ResourceRepository, data: dict[str, Any], *, organization_id: str, storage: MediaStorage
+) -> list[dict[str, Any]]:
     subtitle_assets = []
     for subtitle_format, asset_id in (
-        ("srt", video.data.get("caption_srt_asset_id")),
-        ("vtt", video.data.get("caption_asset_id")),
+        ("srt", data.get("caption_srt_asset_id")),
+        ("vtt", data.get("caption_asset_id")),
     ):
         asset = (
             repo.get(str(asset_id), organization_id=organization_id, kind="media_asset")
@@ -208,8 +226,7 @@ def serialize_video(repo: ResourceRepository, video: Resource, *, organization_i
                     "url": storage.signed_path(str(public_path), organization_id),
                 }
             )
-    payload["subtitle_assets"] = subtitle_assets
-    return payload
+    return subtitle_assets
 
 
 def serialize_brand_profile(resource: Resource) -> dict[str, Any]:
@@ -263,10 +280,12 @@ def serialize_scene(repo: ResourceRepository, scene: Resource, *, organization_i
     latest_ids = dict(scene.data.get("latest_attempt_ids") or {})
     if not latest_ids and scene.data.get("latest_attempt_id"):
         latest_ids["9:16"] = str(scene.data["latest_attempt_id"])
-    for _aspect_ratio, attempt_id in latest_ids.items():
-        attempt = repo.get(str(attempt_id), organization_id=organization_id, kind="scene_attempt")
-        if not attempt:
-            continue
+    history = repo.session.scalars(select(Resource).where(
+        Resource.kind == "scene_attempt", Resource.organization_id == organization_id,
+        Resource.project_id == scene.project_id, Resource.data["scene_id"].as_string() == scene.id,
+        Resource.status == "passed",
+    ).order_by(Resource.created_at.desc(), Resource.id.desc())).all()
+    for attempt in history:
         serialized = ResourceRepository.serialize(attempt)
         public_path = attempt.data.get("public_path") or storage.public_path_for(
             storage_uri=attempt.data.get("storage_uri"),
@@ -276,7 +295,8 @@ def serialize_scene(repo: ResourceRepository, scene: Resource, *, organization_i
             storage.signed_path(str(public_path), organization_id) if public_path else None
         )
         attempts.append(serialized)
-    payload["attempts"] = attempts
+    payload["attempt_history"] = attempts
+    payload["attempts"] = [item for item in attempts if item["id"] in latest_ids.values()]
     payload["preview_url"] = attempts[0].get("preview_url") if attempts else None
     return payload
 
@@ -4197,7 +4217,7 @@ def cancel_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
-    if job.data.get("active_regeneration_id"):
+    if job.data.get("active_regeneration_id") or job.data.get("active_reassembly_id"):
         raise HTTPException(409, "A selective scene regeneration is active; the original production cannot be cancelled or refunded")
     if job.status not in {"queued", "running", "awaiting_script_review"}:
         raise HTTPException(409, f"Job cannot be cancelled from {job.status}")
@@ -4224,6 +4244,8 @@ async def retry_generation(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.data.get("last_reassembly_error") or job.data.get("active_reassembly_id"):
+        raise HTTPException(409, "Use the final video rebuild action; no scene generation is needed")
     if job.data.get("last_regeneration_error") or job.data.get("active_regeneration_id"):
         raise HTTPException(409, "Use the scene regeneration action and confirm its cost; the existing video is preserved")
     if job.status not in {"failed", "blocked", "cancelled"}:
@@ -4271,6 +4293,8 @@ async def retry_generation_stage(
     principal.require("generations:write")
     repo = ResourceRepository(session)
     job = require_resource(repo, job_id, principal, kind="generation_job")
+    if job.data.get("last_reassembly_error") or job.data.get("active_reassembly_id"):
+        raise HTTPException(409, "Use the final video rebuild action; no scene generation is needed")
     if job.data.get("last_regeneration_error") or job.data.get("active_regeneration_id"):
         raise HTTPException(409, "Use the scene regeneration action and confirm its cost; the existing video is preserved")
     stages = [dict(item) for item in job.data.get("stages", [])]
@@ -4395,7 +4419,71 @@ def get_video(
         for scene_id in video.data.get("scene_ids", [])
         if (item := repo.get(scene_id, organization_id=principal.organization_id, kind="scene"))
     ]
+    # Legacy renders predate explicit edit-decision lists. Infer their accepted
+    # takes from creation times without rewriting old immutable records.
+    for version in payload["versions"]:
+        if "scene_attempt_ids" not in version:
+            version["scene_attempt_ids"] = {
+                scene["id"]: eligible[0]["id"]
+                for scene in payload["scenes"]
+                if (eligible := [take for take in scene["attempt_history"]
+                    if take.get("aspect_ratio") == version.get("aspect_ratio")
+                    and take.get("generation_job_id") == version.get("generation_job_id")
+                    and take["created_at"] <= version["created_at"]])
+            }
+            version["selection_inferred"] = True
     return payload
+
+
+@router.post("/videos/{video_id}/reassemble", status_code=202, tags=["videos"])
+async def reassemble_video(video_id: str, payload: VideoReassemble, request: Request,
+                     principal: Principal = Depends(get_principal), session: Session = Depends(get_db)) -> dict[str, Any]:
+    principal.require("generations:write")
+    repo = ResourceRepository(session)
+    video = require_resource(repo, video_id, principal, kind="video")
+    job = require_resource(repo, str(video.data.get("latest_generation_job_id") or video.data.get("generation_job_id") or ""), principal, kind="generation_job", project_id=video.project_id)
+    if job.status not in {"ready", "failed"} or job.data.get("active_regeneration_id") or job.data.get("active_reassembly_id"):
+        raise HTTPException(409, "Wait for the current production operation to finish")
+    if video.data.get("latest_version_id") != payload.base_version_id:
+        raise HTTPException(409, "A new final render appeared. Refresh before rebuilding your selection.")
+    if payload.aspect_ratio not in (job.data.get("aspect_ratios") or ["9:16"]):
+        raise HTTPException(422, "This production does not have that aspect ratio")
+    selection = {item.scene_id: item.attempt_id for item in payload.selections}
+    scene_ids = list(video.data.get("scene_ids") or [])
+    if len(selection) != len(payload.selections) or set(selection) != set(scene_ids):
+        raise HTTPException(422, "Select exactly one take for every scene in this production")
+    for scene_id, attempt_id in selection.items():
+        scene = require_resource(repo, scene_id, principal, kind="scene", project_id=video.project_id)
+        attempt = require_resource(repo, attempt_id, principal, kind="scene_attempt", project_id=video.project_id)
+        if (scene.data.get("storyboard_id") != _active_storyboard_id(job)
+                or attempt.data.get("scene_id") != scene_id or attempt.data.get("generation_job_id") != job.id
+                or attempt.data.get("aspect_ratio") != payload.aspect_ratio
+                or attempt.status != "passed" or not attempt.data.get("storage_uri") or not attempt.data.get("output_uri")):
+            raise HTTPException(422, "Each selected take must be a playable, accepted take of that scene and format")
+    operation_id = repo.new_id("assembly")
+    stages = [dict(stage) for stage in job.data.get("stages") or []]
+    for stage in stages:
+        if stage["name"] in {"voice_audio", "render", "qa", "scoring"}:
+            stage.update(status="queued" if stage["name"] == "voice_audio" else "pending", error=None)
+    claimed = session.execute(update(Resource).where(
+        Resource.id == job.id, Resource.status == job.status, Resource.updated_at == job.updated_at,
+    ).values(status="queued", updated_at=datetime.now(UTC), data={
+        **job.data, "active_reassembly_id": operation_id, "current_stage": "voice_audio", "stages": stages,
+        "last_reassembly_error": None, "last_error": None, "progress": 7 / 11,
+    }))
+    if claimed.rowcount != 1:
+        session.rollback()
+        raise HTTPException(409, "Another production operation started. Refresh and try again.")
+    operation = repo.add(kind="video_reassembly", resource_id=operation_id,
+        organization_id=video.organization_id, project_id=video.project_id, status="queued", data={
+            "generation_job_id": job.id, "video_id": video.id, "scene_ids": scene_ids,
+            "selection": selection, "aspect_ratio": payload.aspect_ratio,
+            "base_version_id": payload.base_version_id, "requested_by_id": principal.actor_id,
+        })
+    # Sync the idea's phase as well as the atomically claimed production.
+    repo.update(job, data={"active_reassembly_id": operation.id})
+    request.app.state.workflow.schedule_reassembly(operation.id)
+    return {"reassembly_id": operation.id, "generation_job_id": job.id, "status": "queued", "additional_veo_charge_usd": 0}
 
 
 @router.get("/video-versions/{version_id}", tags=["videos"])
@@ -4464,9 +4552,9 @@ def _review_video_version(
     repo = ResourceRepository(session)
     version = require_resource(repo, version_id, principal, kind="video_version")
     video = repo.get_any(version.data["video_id"], kind="video")
-    job = repo.get_any(str(video.data.get("generation_job_id") or ""), kind="generation_job") if video else None
+    job = repo.get_any(str(video.data.get("latest_generation_job_id") or video.data.get("generation_job_id") or ""), kind="generation_job") if video else None
     current_version = bool(video and (version.id == video.data.get("latest_version_id") or (job and version.id in (job.data.get("video_version_ids") or []))))
-    if current_version and job and job.data.get("active_regeneration_id") and job.status != "ready":
+    if current_version and job and (job.data.get("active_regeneration_id") or job.data.get("active_reassembly_id")) and job.status != "ready":
         raise HTTPException(409, "Wait for scene regeneration to finish before approving this production")
     approval = repo.add(
         kind="approval",

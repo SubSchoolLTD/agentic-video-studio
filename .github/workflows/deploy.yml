@@ -1,6 +1,8 @@
-name: Deploy production
+name: Deploy production to OVH
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -8,13 +10,14 @@ permissions:
   id-token: write
 
 concurrency:
-  group: production
+  group: framewise-production
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment: production
+  google-token-broker:
     runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.service.outputs.url }}
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
@@ -22,62 +25,199 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v2
-      - name: Build immutable API image
+      - name: Build token broker image
         run: >-
           gcloud builds submit .
           --project='${{ secrets.GCP_PROJECT_ID }}'
-          --config=infra/cloudbuild-api.yaml
+          --config=infra/cloudbuild-google-token-broker.yaml
           --gcs-source-staging-dir=gs://${{ secrets.GCP_PROJECT_ID }}-avs-build-source/source
-          --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/api:${{ github.sha }}
-      - name: Build immutable web image
+          --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/google-token-broker:${{ github.sha }}
+      - name: Deploy request-only Google token broker
         run: >-
-          gcloud builds submit .
-          --project='${{ secrets.GCP_PROJECT_ID }}'
-          --config=infra/cloudbuild-web.yaml
-          --gcs-source-staging-dir=gs://${{ secrets.GCP_PROJECT_ID }}-avs-build-source/source
-          --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/web:${{ github.sha }}
-      - name: Deploy API and run migrations
-        env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          PRODUCTION_API_URL: ${{ secrets.PRODUCTION_API_URL }}
-          PRODUCTION_WEB_URL: ${{ secrets.PRODUCTION_WEB_URL }}
-        run: |
-          set -euo pipefail
-          PRODUCTION_API_URL="${PRODUCTION_API_URL%/}"
-          PRODUCTION_WEB_URL="${PRODUCTION_WEB_URL%/}"
-          secret_bindings='JWT_SECRET=jwt-secret:latest,SENDPULSE_ID=sendpulse-id:latest,SENDPULSE_SECRET=sendpulse-secret:latest,PAYPAL_CLIENT_ID=paypal-client-id:latest,PAYPAL_SECRET=paypal-secret:latest'
-          gcloud run deploy agentic-video-studio-api \
-            --project="${GCP_PROJECT_ID}" \
-            --region=us-central1 \
-            --no-invoker-iam-check \
-            --concurrency=2 \
-            --cpu=2 \
-            --memory=4Gi \
-            --timeout=3600 \
-            --image="us-central1-docker.pkg.dev/${GCP_PROJECT_ID}/agentic-video-studio/api:${{ github.sha }}" \
-            --update-env-vars="APP_ENV=production,APP_AUTH_MODE=jwt,APP_BASE_URL=${PRODUCTION_API_URL},MCP_API_BASE=http://127.0.0.1:8080,WEB_BASE_URL=${PRODUCTION_WEB_URL},PROVIDER_MODE=live,PAYPAL_ENV=live,PAYPAL_MIN_TOPUP_USD=12,EMAIL_DELIVERY_MODE=sendpulse,EMAIL_FROM_NAME=Framewise,EMAIL_FROM_EMAIL=maksim@subschool.us,GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }},BOOTSTRAP_ADMIN_EMAIL=maksim@subschool.us,BOOTSTRAP_ADMIN_NAME=Maksim Mamchur,SEED_DEMO_DATA=false,YOUTUBE_REDIRECT_URI=${PRODUCTION_API_URL}/v1/connections/youtube/callback" \
-            --update-secrets="${secret_bindings}" \
-            --remove-env-vars=APP_DEMO_TOKEN,INSTAGRAM_APP_ID,INSTAGRAM_APP_SECRET,INSTAGRAM_REDIRECT_URI,INSTAGRAM_GRAPH_VERSION,TIKTOK_CLIENT_KEY,TIKTOK_CLIENT_SECRET,TIKTOK_REDIRECT_URI,SOCIAL_BROWSER_SESSION_SECRET
-      - name: Deploy web
-        run: >-
-          gcloud run deploy agentic-video-studio-web
+          gcloud run deploy framewise-google-token-broker
           --project='${{ secrets.GCP_PROJECT_ID }}'
           --region=us-central1
           --no-invoker-iam-check
-          --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/web:${{ github.sha }}
-          --update-env-vars=NUXT_PUBLIC_GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-          --remove-env-vars=NUXT_PUBLIC_DEMO_TOKEN
-      - name: Verify rollout
-        env:
-          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          PRODUCTION_API_URL: ${{ secrets.PRODUCTION_API_URL }}
-          PRODUCTION_WEB_URL: ${{ secrets.PRODUCTION_WEB_URL }}
+          --service-account=framewise-api@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+          --min=0
+          --max=1
+          --cpu=1
+          --memory=256Mi
+          --concurrency=20
+          --timeout=60
+          --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/google-token-broker:${{ github.sha }}
+          --set-secrets=BROKER_SECRET=google-token-broker-secret:latest
+      - name: Resolve and verify broker
+        id: service
+        shell: bash
         run: |
-          curl --fail --silent --show-error '${{ secrets.PRODUCTION_API_URL }}/v1/health'
-          test "$(curl --fail --silent --show-error '${{ secrets.PRODUCTION_API_URL }}/v1/billing/public-pricing' | python -c 'import json,sys; print(json.load(sys.stdin)["minimum_topup_usd"])')" = "12"
-          curl --fail --silent --show-error '${{ secrets.PRODUCTION_WEB_URL }}/' >/dev/null
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' '${{ secrets.PRODUCTION_API_URL }}/v1/projects')" = "401"
-          gcloud run services describe agentic-video-studio-api \
-            --project="${GCP_PROJECT_ID}" \
-            --region=us-central1 \
-            --format=json | python -c 'import json,os,sys; data=json.load(sys.stdin); env={item["name"]:item.get("value") for item in data["spec"]["template"]["spec"]["containers"][0]["env"]}; api=os.environ["PRODUCTION_API_URL"].rstrip("/"); web=os.environ["PRODUCTION_WEB_URL"].rstrip("/"); expected={"APP_BASE_URL":api,"WEB_BASE_URL":web,"YOUTUBE_REDIRECT_URI":f"{api}/v1/connections/youtube/callback"}; wrong={key:(env.get(key),value) for key,value in expected.items() if env.get(key)!=value}; assert not wrong, wrong'
+          set -euo pipefail
+          url="$(gcloud run services describe framewise-google-token-broker --project='${{ secrets.GCP_PROJECT_ID }}' --region=us-central1 --format='value(status.url)')"
+          curl --fail --silent --show-error "${url}/health" >/dev/null
+          echo "url=${url}" >> "${GITHUB_OUTPUT}"
+
+  deploy:
+    needs: google-token-broker
+    environment: production
+    runs-on: ubuntu-latest
+    env:
+      PROD_HOST: "137.74.202.47"
+      PROD_USER: ubuntu
+      APP_ROOT: /home/ubuntu/apps/Framewise
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      PARALLEL_API_KEY: ${{ secrets.PARALLEL_API_KEY }}
+      PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
+      PAYPAL_SECRET: ${{ secrets.PAYPAL_SECRET }}
+      PAYPAL_WEBHOOK_ID: ${{ secrets.PAYPAL_WEBHOOK_ID }}
+      SENDPULSE_ID: ${{ secrets.SENDPULSE_ID }}
+      SENDPULSE_SECRET: ${{ secrets.SENDPULSE_SECRET }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+      GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+      INTERNAL_AUTOMATION_TOKEN: ${{ secrets.INTERNAL_AUTOMATION_TOKEN }}
+      WEBHOOK_SIGNING_SECRET: ${{ secrets.WEBHOOK_SIGNING_SECRET }}
+      API_KEY_PEPPER: ${{ secrets.API_KEY_PEPPER }}
+      SECRET_ENCRYPTION_KEY: ${{ secrets.SECRET_ENCRYPTION_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GOOGLE_TOKEN_BROKER_URL: ${{ needs.google-token-broker.outputs.url }}
+      GOOGLE_TOKEN_BROKER_SECRET: ${{ secrets.GOOGLE_TOKEN_BROKER_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate required deployment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(POSTGRES_PASSWORD JWT_SECRET PARALLEL_API_KEY PAYPAL_CLIENT_ID PAYPAL_SECRET SENDPULSE_ID SENDPULSE_SECRET CLICKHOUSE_PASSWORD GRAFANA_ADMIN_PASSWORD INTERNAL_AUTOMATION_TOKEN WEBHOOK_SIGNING_SECRET API_KEY_PEPPER SECRET_ENCRYPTION_KEY GOOGLE_OAUTH_CLIENT_ID YOUTUBE_CLIENT_ID YOUTUBE_CLIENT_SECRET GCP_PROJECT_ID GOOGLE_TOKEN_BROKER_URL GOOGLE_TOKEN_BROKER_SECRET)
+          for key in "${required[@]}"; do
+            if [[ -z "${!key:-}" ]]; then
+              echo "Missing GitHub Actions secret: ${key}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Prepare production configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          fixed = {
+              "APP_ENV": "production",
+              "APP_AUTH_MODE": "jwt",
+              "APP_BASE_URL": "https://studio.subschool.us",
+              "WEB_BASE_URL": "https://studio.subschool.us",
+              "ALLOWED_ORIGINS": "https://studio.subschool.us",
+              "PROVIDER_MODE": "live",
+              "LOG_LEVEL": "INFO",
+              "STORAGE_ROOT": "/data/media",
+              "MEDIA_STORAGE_BACKEND": "local",
+              "OAUTH_SECRET_BACKEND": "local",
+              "EMAIL_DELIVERY_MODE": "sendpulse",
+              "EMAIL_FROM_NAME": "Framewise",
+              "EMAIL_FROM_EMAIL": "maksim@subschool.us",
+              "PAYPAL_ENV": "live",
+              "PAYPAL_MIN_TOPUP_USD": "12",
+              "GOOGLE_CLOUD_PROJECT": os.environ["GCP_PROJECT_ID"],
+              "GOOGLE_CLOUD_LOCATION": "us-central1",
+              "GOOGLE_TOKEN_BROKER_URL": os.environ["GOOGLE_TOKEN_BROKER_URL"],
+              # Kept as a path namespace for migrated gs:// references. New writes
+              # still go to local storage because MEDIA_STORAGE_BACKEND=local.
+              "GOOGLE_CLOUD_STORAGE_BUCKET": "upheld-dragon-505012-v3-avs-media",
+              "GOOGLE_PUBSUB_TOPIC": "",
+              "GOOGLE_GENAI_USE_VERTEXAI": "true",
+              "GEMINI_MODEL": "gemini-2.5-flash",
+              "GEMINI_EDITORIAL_MODEL": "gemini-2.5-pro",
+              "GEMINI_QUALITY_MODEL": "gemini-2.5-pro",
+              "GOOGLE_IMAGE_MODEL": "gemini-2.5-flash-image",
+              "VEO_MODEL": "veo-3.1-generate-001",
+              "GOOGLE_TTS_VOICE": "en-US-Chirp3-HD-Achernar",
+              "YOUTUBE_REDIRECT_URI": "https://studio.subschool.us/v1/connections/youtube/callback",
+              "SOCIAL_BROWSER_HEADLESS": "true",
+              "SOCIAL_BROWSER_TIMEOUT_SECONDS": "120",
+              "SOCIAL_BROWSER_INSTAGRAM_BASE_URL": "https://www.instagram.com",
+              "SOCIAL_BROWSER_TIKTOK_BASE_URL": "https://www.tiktok.com",
+              "BOOTSTRAP_ADMIN_EMAIL": "maksim@subschool.us",
+              "BOOTSTRAP_ADMIN_NAME": "Maksim Mamchur",
+              "SEED_DEMO_DATA": "false",
+          }
+          secret_keys = [
+              "POSTGRES_PASSWORD", "JWT_SECRET", "PARALLEL_API_KEY", "PAYPAL_CLIENT_ID",
+              "PAYPAL_SECRET", "PAYPAL_WEBHOOK_ID", "SENDPULSE_ID", "SENDPULSE_SECRET",
+              "CLICKHOUSE_PASSWORD", "GRAFANA_ADMIN_PASSWORD", "INTERNAL_AUTOMATION_TOKEN",
+              "WEBHOOK_SIGNING_SECRET", "API_KEY_PEPPER", "SECRET_ENCRYPTION_KEY",
+              "GOOGLE_API_KEY", "GOOGLE_OAUTH_CLIENT_ID", "YOUTUBE_CLIENT_ID",
+              "YOUTUBE_CLIENT_SECRET", "YOUTUBE_CHANNEL_ID", "GOOGLE_TOKEN_BROKER_SECRET",
+          ]
+          values = fixed | {key: os.environ.get(key, "") for key in secret_keys}
+
+          def quote(value: str) -> str:
+              if "\n" in value or "\r" in value:
+                  raise ValueError("Production env values must be single-line")
+              return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+          Path(".env.production.next").write_text(
+              "".join(f"{key}={quote(value)}\n" for key, value in sorted(values.items())),
+              encoding="utf-8",
+          )
+          PY
+          chmod 600 .env.production.next
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${PROD_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${PROD_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Sync application and secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh "${PROD_USER}@${PROD_HOST}" "mkdir -p '${APP_ROOT}/backups'"
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='.secrets/' \
+            --exclude='backups/' \
+            --exclude='migration/' \
+            --exclude='local_data/' \
+            --exclude='node_modules/' \
+            ./ "${PROD_USER}@${PROD_HOST}:${APP_ROOT}/"
+          scp .env.production.next "${PROD_USER}@${PROD_HOST}:${APP_ROOT}/.env.production.next"
+          ssh "${PROD_USER}@${PROD_HOST}" "chmod 600 '${APP_ROOT}/.env.production.next' && mv '${APP_ROOT}/.env.production.next' '${APP_ROOT}/.env.production'"
+
+      - name: Deploy isolated Framewise stack
+        shell: bash
+        env:
+          ACTIVATE_CADDY: ${{ vars.ACTIVATE_CADDY || 'false' }}
+          LOCAL_SCHEDULER_ENABLED: ${{ vars.LOCAL_SCHEDULER_ENABLED || 'false' }}
+        run: |
+          set -euo pipefail
+          ssh "${PROD_USER}@${PROD_HOST}" \
+            "cd '${APP_ROOT}' && chmod +x ops/deploy-production.sh && ACTIVATE_CADDY='${ACTIVATE_CADDY}' LOCAL_SCHEDULER_ENABLED='${LOCAL_SCHEDULER_ENABLED}' ./ops/deploy-production.sh"
+
+      - name: Verify stack and shared proxy safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh "${PROD_USER}@${PROD_HOST}" '
+            set -euo pipefail
+            for container in framewise_postgres framewise_clickhouse framewise_api framewise_web framewise_grafana subschool_caddy_prod subschool_backend_prod; do
+              test "$(sudo docker inspect --format "{{.State.Running}}" "${container}")" = true
+            done
+            sudo docker exec subschool_caddy_prod caddy validate --config /etc/caddy/Caddyfile >/dev/null
+            sudo docker exec framewise_api python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8080/v1/health\", timeout=5)"
+          '

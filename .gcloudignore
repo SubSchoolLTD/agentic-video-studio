@@ -18,3 +18,4 @@ infra/terraform/terraform.tfvars
 __pycache__
 *.pyc
 *.sqlite3
+*.mp4

@@ -44,7 +44,7 @@ from .billing import (
     refund_feature_charges,
     veo_request_duration,
 )
-from .cloud_auth import require_google_service_identity
+from .cloud_auth import require_internal_service_identity
 from .config import Settings, get_settings
 from .content_planning import research_plan, select_content_candidates
 from .database import SessionLocal, get_db
@@ -2374,7 +2374,7 @@ def enqueue_due_research_profiles(
 @router.post("/internal/research/run-due", include_in_schema=False)
 def run_due_research(
     background: BackgroundTasks,
-    _: dict[str, Any] = Depends(require_google_service_identity),
+    _: dict[str, Any] = Depends(require_internal_service_identity),
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
@@ -2438,7 +2438,7 @@ async def poll_due_rss_sources(
 @router.post("/internal/automation/run-due", include_in_schema=False)
 async def run_due_automation(
     background: BackgroundTasks,
-    _: dict[str, Any] = Depends(require_google_service_identity),
+    _: dict[str, Any] = Depends(require_internal_service_identity),
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
@@ -6326,7 +6326,7 @@ async def collect_metric_checkpoint(
 
 @router.post("/internal/metrics/collect-due", include_in_schema=False)
 async def collect_due_metric_checkpoints(
-    _identity: dict[str, Any] = Depends(require_google_service_identity),
+    _identity: dict[str, Any] = Depends(require_internal_service_identity),
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:

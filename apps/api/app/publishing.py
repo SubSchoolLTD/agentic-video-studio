@@ -125,7 +125,12 @@ def _store_json_secret(
     local_name: str,
     payload: dict[str, Any],
 ) -> str:
-    if settings.google_cloud_project and settings.app_env not in {"local", "test"}:
+    use_gcp = settings.oauth_secret_backend == "gcp" or (
+        settings.oauth_secret_backend == "auto"
+        and bool(settings.google_cloud_project)
+        and settings.app_env not in {"local", "test"}
+    )
+    if use_gcp:
         from google.cloud import secretmanager
 
         client = secretmanager.SecretManagerServiceClient()

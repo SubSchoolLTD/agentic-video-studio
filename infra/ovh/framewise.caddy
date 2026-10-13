@@ -1,0 +1,28 @@
+studio.subschool.us {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	@api path /v1/* /docs /redoc /openapi.json /media/* /mcp /mcp/*
+	handle @api {
+		reverse_proxy framewise_api:8080 {
+			transport http {
+				read_timeout 0
+				write_timeout 0
+			}
+		}
+	}
+
+	redir /grafana /grafana/ 308
+	handle /grafana/* {
+		reverse_proxy framewise_grafana:8080
+	}
+
+	handle {
+		reverse_proxy framewise_web:8080
+	}
+}

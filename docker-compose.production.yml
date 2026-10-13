@@ -1,0 +1,207 @@
+name: framewise
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: framewise_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: framewise
+      POSTGRES_USER: framewise
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - framewise_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U framewise -d framewise"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+    cpus: 1.5
+    logging: *default-logging
+    networks:
+      - framewise_internal
+
+  clickhouse:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.clickhouse
+    container_name: framewise_clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: avs
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - framewise_clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user avs --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 2500m
+    cpus: 2
+    logging: *default-logging
+    networks:
+      - framewise_internal
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    container_name: framewise_api
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env.production
+    environment:
+      APP_ENV: production
+      APP_AUTH_MODE: jwt
+      APP_BASE_URL: https://studio.subschool.us
+      WEB_BASE_URL: https://studio.subschool.us
+      ALLOWED_ORIGINS: https://studio.subschool.us
+      DATABASE_URL: postgresql+psycopg://framewise:${POSTGRES_PASSWORD}@postgres:5432/framewise
+      STORAGE_ROOT: /data/media
+      MEDIA_STORAGE_BACKEND: local
+      OAUTH_SECRET_BACKEND: local
+      GOOGLE_CLOUD_STORAGE_BUCKET: upheld-dragon-505012-v3-avs-media
+      GOOGLE_PUBSUB_TOPIC: ""
+      CLICKHOUSE_URL: http://clickhouse:8080
+      CLICKHOUSE_USER: avs
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      GRAFANA_URL: https://studio.subschool.us/grafana
+      YOUTUBE_REDIRECT_URI: https://studio.subschool.us/v1/connections/youtube/callback
+      MCP_API_BASE: http://127.0.0.1:8080
+    volumes:
+      - framewise_app_data:/data
+    shm_size: 1gb
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5)"
+      interval: 15s
+      timeout: 8s
+      retries: 30
+      start_period: 45s
+    mem_limit: 6g
+    cpus: 4
+    logging: *default-logging
+    networks:
+      - framewise_internal
+      - caddy_net
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.web
+    container_name: framewise_web
+    restart: unless-stopped
+    environment:
+      NUXT_PUBLIC_API_BASE: https://studio.subschool.us
+      NUXT_PUBLIC_GRAFANA_URL: https://studio.subschool.us/grafana
+      NUXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 8s
+      retries: 20
+    mem_limit: 512m
+    cpus: 1
+    logging: *default-logging
+    networks:
+      - caddy_net
+
+  grafana:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.grafana
+    container_name: framewise_grafana
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: avs
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_SERVER_ROOT_URL: https://studio.subschool.us/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - ./infra/ovh/grafana-datasource.yaml:/etc/grafana/provisioning/datasources/clickhouse.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+    mem_limit: 768m
+    cpus: 1
+    logging: *default-logging
+    networks:
+      - framewise_internal
+      - caddy_net
+
+  scheduler:
+    image: curlimages/curl:8.12.1
+    container_name: framewise_scheduler
+    restart: unless-stopped
+    profiles: ["scheduler"]
+    environment:
+      INTERNAL_AUTOMATION_TOKEN: ${INTERNAL_AUTOMATION_TOKEN:?INTERNAL_AUTOMATION_TOKEN is required}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        while true; do
+          curl --fail --silent --show-error --max-time 840 \
+            -H "Authorization: Bearer $${INTERNAL_AUTOMATION_TOKEN}" \
+            -X POST http://api:8080/v1/internal/automation/run-due || true
+          curl --fail --silent --show-error --max-time 840 \
+            -H "Authorization: Bearer $${INTERNAL_AUTOMATION_TOKEN}" \
+            -X POST http://api:8080/v1/internal/metrics/collect-due || true
+          sleep 900
+        done
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *default-logging
+    networks:
+      - framewise_internal
+
+volumes:
+  framewise_postgres_data:
+    name: framewise_postgres_data
+  framewise_clickhouse_data:
+    name: framewise_clickhouse_data
+  framewise_app_data:
+    name: framewise_app_data
+
+networks:
+  framewise_internal:
+    name: framewise_internal
+    internal: true
+  caddy_net:
+    external: true

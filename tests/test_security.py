@@ -35,3 +35,29 @@ def test_internal_metrics_runner_requires_google_identity(client) -> None:
     response = client.post("/v1/internal/metrics/collect-due")
     assert response.status_code == 401
     assert response.json()["error"]["message"] == "Google service identity token required"
+
+
+def test_internal_metrics_runner_rejects_wrong_local_scheduler_token(client, monkeypatch) -> None:
+    from apps.api.app.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "internal_automation_token", "scheduler-test-secret-longer-than-thirty-two-characters")
+    response = client.post(
+        "/v1/internal/metrics/collect-due",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == "Internal service identity token required"
+
+
+def test_internal_metrics_runner_accepts_local_scheduler_token(client, monkeypatch) -> None:
+    from apps.api.app.config import get_settings
+
+    token = "scheduler-test-secret-longer-than-thirty-two-characters"
+    settings = get_settings()
+    monkeypatch.setattr(settings, "internal_automation_token", token)
+    response = client.post(
+        "/v1/internal/metrics/collect-due",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import mimetypes
+import shutil
 import time
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,7 +19,9 @@ class MediaStorage:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.settings.google_cloud_storage_bucket)
+        return self.settings.media_storage_backend == "gcs" or (
+            self.settings.media_storage_backend == "auto" and bool(self.settings.google_cloud_storage_bucket)
+        )
 
     def _bucket(self):
         if self._client is None:
@@ -85,8 +88,16 @@ class MediaStorage:
         prefix = f"gs://{self.settings.google_cloud_storage_bucket}/"
         if not storage_uri.startswith(prefix):
             raise ValueError("Media object is outside the configured bucket")
+        relative = storage_uri.removeprefix(prefix)
+        local_mirror = self.resolve_local(relative)
+        if local_mirror and local_mirror.is_file():
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_mirror, local_path)
+            return local_path
+        if not self.enabled:
+            raise FileNotFoundError(local_mirror or local_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        self._bucket().blob(storage_uri.removeprefix(prefix)).download_to_filename(str(local_path), timeout=180)
+        self._bucket().blob(relative).download_to_filename(str(local_path), timeout=180)
         return local_path
 
     def resolve_local(self, asset_path: str) -> Path | None:

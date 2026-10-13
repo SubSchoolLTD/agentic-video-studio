@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     web_base_url: str = "http://localhost:3000"
     database_url: str = "sqlite:///./local_data/agentic_video_studio.sqlite3"
     storage_root: Path = Path("./local_data/media")
+    media_storage_backend: str = "auto"
+    oauth_secret_backend: str = "auto"
     provider_mode: str = "mock"
     log_level: str = "INFO"
 
@@ -54,6 +56,9 @@ class Settings(BaseSettings):
     google_application_credentials: str = ""
     google_runtime_service_account: str = ""
     google_pubsub_topic: str = ""
+    google_token_broker_url: str = ""
+    google_token_broker_secret: str = ""
+    internal_automation_token: str = ""
     google_api_key: str = ""
     google_oauth_client_id: str = ""
     gemini_model: str = "gemini-2.5-flash"
@@ -119,6 +124,10 @@ class Settings(BaseSettings):
                 Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     def validate_runtime(self) -> None:
+        if self.media_storage_backend not in {"auto", "local", "gcs"}:
+            raise RuntimeError("MEDIA_STORAGE_BACKEND must be auto, local, or gcs")
+        if self.oauth_secret_backend not in {"auto", "local", "gcp"}:
+            raise RuntimeError("OAUTH_SECRET_BACKEND must be auto, local, or gcp")
         if self.app_env in {"production", "prod"}:
             if self.app_auth_mode != "jwt":
                 raise RuntimeError("Production requires APP_AUTH_MODE=jwt")
@@ -131,8 +140,14 @@ class Settings(BaseSettings):
                 missing.append("PARALLEL_API_KEY")
             if not self.google_cloud_project:
                 missing.append("GOOGLE_CLOUD_PROJECT")
-            if not self.google_cloud_storage_bucket:
+            if bool(self.google_token_broker_url) != bool(self.google_token_broker_secret):
+                missing.append("GOOGLE_TOKEN_BROKER_URL and GOOGLE_TOKEN_BROKER_SECRET together")
+            if self.media_storage_backend == "gcs" and not self.google_cloud_storage_bucket:
                 missing.append("GOOGLE_CLOUD_STORAGE_BUCKET")
+            if self.oauth_secret_backend == "gcp" and not self.google_cloud_project:
+                missing.append("GOOGLE_CLOUD_PROJECT (required by OAUTH_SECRET_BACKEND=gcp)")
+            if self.internal_automation_token and len(self.internal_automation_token) < 32:
+                missing.append("INTERNAL_AUTOMATION_TOKEN (at least 32 characters)")
             if self.email_delivery_mode != "sendpulse":
                 missing.append("EMAIL_DELIVERY_MODE=sendpulse")
             if not self.sendpulse_id:

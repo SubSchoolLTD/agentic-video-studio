@@ -1,4 +1,6 @@
-# Google Cloud deployment
+# Legacy Google Cloud deployment
+
+This document describes the hackathon deployment retained during the OVH cutover. The current OVH topology, deployment gates and rollback procedure are documented in [ovh-deployment.md](ovh-deployment.md). Do not delete the resources below until the OVH data copy and DNS cutover have been verified.
 
 The live hackathon environment uses four Cloud Run services:
 

@@ -19,8 +19,8 @@ RUN python -m playwright install --with-deps chromium \
     && chmod -R a+rX /ms-playwright
 
 RUN addgroup --system avs && adduser --system --ingroup avs avs \
-    && mkdir -p /tmp/avs-media /tmp/avs-data \
-    && chown -R avs:avs /tmp/avs-media /tmp/avs-data /app
+    && mkdir -p /tmp/avs-media /tmp/avs-data /data/media /data/.secrets \
+    && chown -R avs:avs /tmp/avs-media /tmp/avs-data /data /app
 USER avs
 
 CMD ["sh", "-c", "alembic upgrade head && uvicorn apps.api.app.main:app --host 0.0.0.0 --port ${PORT}"]

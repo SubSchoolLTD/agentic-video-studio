@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 from .config import Settings
 from .content_planning import candidate_plan_errors, research_plan
+from .google_credentials import google_cloud_credentials
 from .renderer import extract_video_tail
 from .schemas import ScenePromptRevision
 
@@ -82,10 +83,15 @@ def google_genai_client(settings: Settings, *, location: str | None = None):
     if settings.google_genai_use_vertexai:
         if not settings.google_cloud_project:
             raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for Vertex AI")
+        client_kwargs: dict[str, Any] = {}
+        credentials = google_cloud_credentials(settings)
+        if credentials is not None:
+            client_kwargs["credentials"] = credentials
         return genai.Client(
             vertexai=True,
             project=settings.google_cloud_project,
             location=location or settings.google_cloud_location,
+            **client_kwargs,
         )
     if not settings.google_api_key:
         raise RuntimeError("GOOGLE_API_KEY is required when Vertex AI mode is disabled")
@@ -3302,7 +3308,8 @@ class TextToSpeechProvider:
     def _synthesize(self, text: str, output_path: Path) -> Path:
         from google.cloud import texttospeech
 
-        client = texttospeech.TextToSpeechClient()
+        credentials = google_cloud_credentials(self.settings)
+        client = texttospeech.TextToSpeechClient(credentials=credentials) if credentials else texttospeech.TextToSpeechClient()
         language_code = "-".join(self.settings.google_tts_voice.split("-")[:2])
         response = client.synthesize_speech(
             request={

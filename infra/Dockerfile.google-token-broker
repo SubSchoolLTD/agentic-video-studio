@@ -1,0 +1,16 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080
+
+WORKDIR /app
+RUN pip install --no-cache-dir "fastapi>=0.116.1" "google-auth>=2.40.0" "requests>=2.32.0" "uvicorn[standard]>=0.35.0"
+COPY apps/__init__.py ./apps/__init__.py
+COPY apps/google_token_broker ./apps/google_token_broker
+
+RUN addgroup --system broker && adduser --system --ingroup broker broker \
+    && chown -R broker:broker /app
+USER broker
+
+CMD ["sh", "-c", "uvicorn apps.google_token_broker.main:app --host 0.0.0.0 --port ${PORT}"]

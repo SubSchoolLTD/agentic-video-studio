@@ -111,6 +111,7 @@ services:
     container_name: framewise_web
     restart: unless-stopped
     environment:
+      NUXT_API_BASE: http://api:8080
       NUXT_PUBLIC_API_BASE: https://studio.subschool.us
       NUXT_PUBLIC_GRAFANA_URL: https://studio.subschool.us/grafana
       NUXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}

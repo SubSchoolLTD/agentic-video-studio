@@ -14,6 +14,7 @@ export function useApi() {
   const route = useRoute()
   const nuxtApp = useNuxtApp()
   const projectId = auth.projectId
+  const requestBase = import.meta.server ? config.apiBase : config.public.apiBase
 
   async function api<T>(path: string, options: Record<string, unknown> = {}, alreadyRefreshed = false): Promise<T> {
     const headers: Record<string, string> = {
@@ -23,7 +24,7 @@ export function useApi() {
     }
     try {
       return await $fetch<T>(path, {
-        baseURL: config.public.apiBase,
+        baseURL: requestBase,
         ...options,
         headers,
       })

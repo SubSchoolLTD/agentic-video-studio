@@ -22,5 +22,6 @@ def test_production_deploy_targets_ovh_and_keeps_dynamic_oauth_state_local() -> 
     assert "social-browser-sessions" not in workflow
     assert "MEDIA_STORAGE_BACKEND: local" in compose
     assert "OAUTH_SECRET_BACKEND: local" in compose
+    assert "NUXT_API_BASE: http://api:8080" in compose
     assert "framewise_postgres_data" in compose
     assert "caddy_net" in compose

@@ -21,6 +21,7 @@ interface SessionPayload {
 
 export function useAuth() {
   const config = useRuntimeConfig()
+  const requestBase = import.meta.server ? config.apiBase : config.public.apiBase
   const nuxtApp = useNuxtApp() as ReturnType<typeof useNuxtApp> & { _avsRefreshPromise?: Promise<boolean> | null }
   const accessCookie = useCookie<string | null>('avs_access', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 30 })
   const refreshCookie = useCookie<string | null>('avs_refresh', { sameSite: 'lax', secure: !import.meta.dev, maxAge: 60 * 60 * 24 * 30 })
@@ -60,7 +61,7 @@ export function useAuth() {
 
   async function login(email: string, password: string) {
     const payload = await $fetch<SessionPayload>('/v1/auth/login', {
-      baseURL: config.public.apiBase,
+      baseURL: requestBase,
       method: 'POST',
       body: { email, password },
     })
@@ -70,7 +71,7 @@ export function useAuth() {
 
   async function loginWithGoogle(credential: string) {
     const payload = await $fetch<SessionPayload>('/v1/auth/google', {
-      baseURL: config.public.apiBase,
+      baseURL: requestBase,
       method: 'POST',
       body: { credential },
     })
@@ -81,7 +82,7 @@ export function useAuth() {
   async function refresh(): Promise<boolean> {
     if (!refreshToken.value) return false
     const rotate = () => $fetch<SessionPayload>('/v1/auth/refresh', {
-        baseURL: config.public.apiBase,
+        baseURL: requestBase,
         method: 'POST',
         body: { token: refreshToken.value },
       }).then((payload) => {
@@ -105,7 +106,7 @@ export function useAuth() {
     }
     try {
       const payload = await $fetch<any>('/v1/me', {
-        baseURL: config.public.apiBase,
+        baseURL: requestBase,
         headers: {
           Authorization: `Bearer ${accessToken.value}`,
           ...(organizationId.value ? { 'X-Organization-ID': organizationId.value } : {}),
@@ -135,7 +136,7 @@ export function useAuth() {
     clearSession()
     if (raw) {
       await $fetch('/v1/auth/logout', {
-        baseURL: config.public.apiBase,
+        baseURL: requestBase,
         method: 'POST',
         body: { token: raw },
       }).catch(() => undefined)

@@ -56,7 +56,9 @@ const fallbackPricing: PublicPricing = {
 
 const { data: pricing } = await useAsyncData<PublicPricing>('landing-pricing', async () => {
   try {
-    return await $fetch<PublicPricing>('/v1/billing/public-pricing', { baseURL: config.public.apiBase })
+    const requestBase = import.meta.server ? config.apiBase : config.public.apiBase
+    const payload = await $fetch<PublicPricing>('/v1/billing/public-pricing', { baseURL: requestBase })
+    return Array.isArray(payload?.prices) ? payload : fallbackPricing
   }
   catch {
     return fallbackPricing

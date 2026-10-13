@@ -206,7 +206,7 @@ jobs:
           LOCAL_SCHEDULER_ENABLED: ${{ vars.LOCAL_SCHEDULER_ENABLED || 'false' }}
         run: |
           set -euo pipefail
-          ssh "${PROD_USER}@${PROD_HOST}" \
+          ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "${PROD_USER}@${PROD_HOST}" \
             "cd '${APP_ROOT}' && chmod +x ops/deploy-production.sh && ACTIVATE_CADDY='${ACTIVATE_CADDY}' LOCAL_SCHEDULER_ENABLED='${LOCAL_SCHEDULER_ENABLED}' ./ops/deploy-production.sh"
 
       - name: Verify stack and shared proxy safety

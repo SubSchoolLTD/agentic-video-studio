@@ -52,6 +52,9 @@ for service in postgres clickhouse api web grafana; do
     if [[ "${status}" == "healthy" ]]; then
       break
     fi
+    if (( attempt % 6 == 0 )); then
+      echo "Waiting for ${container}: ${status:-not-created} (${attempt}/60)"
+    fi
     if [[ "${attempt}" == "60" ]]; then
       compose logs --tail=200 "${service}"
       echo "${container} did not become healthy" >&2

@@ -5,6 +5,9 @@ from pathlib import Path
 
 def test_production_deploy_targets_ovh_and_keeps_dynamic_oauth_state_local() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "deploy.yml").read_text()
+    broker_workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "deploy-google-token-broker.yml"
+    ).read_text()
     compose = (Path(__file__).parents[1] / "docker-compose.production.yml").read_text()
 
     for setting in (
@@ -17,8 +20,11 @@ def test_production_deploy_targets_ovh_and_keeps_dynamic_oauth_state_local() -> 
 
     assert "137.74.202.47" in workflow
     assert "GOOGLE_TOKEN_BROKER_SECRET" in workflow
-    assert "framewise-google-token-broker" in workflow
-    assert "google-github-actions/auth@v2" in workflow
+    assert "vars.GOOGLE_TOKEN_BROKER_URL" in workflow
+    assert "google-github-actions/auth@v2" not in workflow
+    assert "framewise-google-token-broker" in broker_workflow
+    assert "google-github-actions/auth@v2" in broker_workflow
+    assert "apps/google_token_broker/**" in broker_workflow
     assert "social-browser-sessions" not in workflow
     assert "MEDIA_STORAGE_BACKEND: local" in compose
     assert "OAUTH_SECRET_BACKEND: local" in compose

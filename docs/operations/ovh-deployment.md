@@ -4,6 +4,8 @@ Framewise runs as an isolated Docker Compose project under `/home/ubuntu/apps/Fr
 
 Deployments run from `.github/workflows/deploy.yml` on pushes to `main` or by manual dispatch. The workflow renders `.env.production` from GitHub Actions secrets, synchronizes the repository and runs `ops/deploy-production.sh`. The generated environment file is not committed.
 
+The scale-to-zero Google token broker has a separate `.github/workflows/deploy-google-token-broker.yml` workflow. It runs only when the broker source or image definition changes, or when manually dispatched, so ordinary OVH deployments do not incur Cloud Build work or create unnecessary Artifact Registry versions.
+
 ## Cutover gates
 
 Two production environment variables make the first deployment safe while DNS still targets Google:

@@ -1,0 +1,58 @@
+name: Deploy Google token broker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/google_token_broker/**
+      - infra/Dockerfile.google-token-broker
+      - infra/cloudbuild-google-token-broker.yaml
+      - .gcloudignore
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: framewise-google-token-broker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build token broker image
+        run: >-
+          gcloud builds submit .
+          --project='${{ secrets.GCP_PROJECT_ID }}'
+          --config=infra/cloudbuild-google-token-broker.yaml
+          --gcs-source-staging-dir=gs://${{ secrets.GCP_PROJECT_ID }}-avs-build-source/source
+          --substitutions=_IMAGE=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/google-token-broker:${{ github.sha }}
+      - name: Deploy request-only Google token broker
+        run: >-
+          gcloud run deploy framewise-google-token-broker
+          --project='${{ secrets.GCP_PROJECT_ID }}'
+          --region=us-central1
+          --no-invoker-iam-check
+          --service-account=framewise-api@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+          --min=0
+          --max=1
+          --cpu=1
+          --memory=256Mi
+          --concurrency=20
+          --timeout=60
+          --image=us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agentic-video-studio/google-token-broker:${{ github.sha }}
+          --set-secrets=BROKER_SECRET=google-token-broker-secret:latest
+      - name: Verify broker
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="$(gcloud run services describe framewise-google-token-broker --project='${{ secrets.GCP_PROJECT_ID }}' --region=us-central1 --format='value(status.url)')"
+          curl --fail --silent --show-error "${url}/health" >/dev/null
